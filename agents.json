@@ -1,0 +1,73 @@
+{
+  "opus": {
+    "harness": "claude",
+    "cliModel": "claude-opus-4-8",
+    "effort": "high",
+    "role": "manager",
+    "model": "opus-4.8",
+    "auth": "Claude subscription",
+    "description": "Manager. Splits the objective into tasks, reviews every submission, gives feedback."
+  },
+  "gpt": {
+    "harness": "codex",
+    "cliModel": "",
+    "reasoning": "high",
+    "role": "worker",
+    "model": "gpt-5.6-sol",
+    "auth": "ChatGPT subscription",
+    "description": "Worker. Implementation."
+  },
+  "kimi": {
+    "harness": "kimi",
+    "cliModel": "",
+    "role": "worker",
+    "model": "kimi-k3",
+    "auth": "Kimi subscription",
+    "description": "Worker. Kimi K3 via the official kimi-code CLI."
+  },
+  "kimi-oc": {
+    "harness": "opencode",
+    "cliModel": "opencode-go/kimi-k3",
+    "effort": "high",
+    "role": "worker",
+    "model": "kimi-k3",
+    "auth": "opencode subscription",
+    "experimental": true,
+    "description": "Worker (experimental). Kimi K3 via opencode; headless run is unreliable — prefer 'kimi' (kimi-code)."
+  },
+  "grok": {
+    "harness": "grok",
+    "cliModel": "grok-4.5",
+    "role": "worker",
+    "model": "grok-4.5",
+    "auth": "xAI subscription (login pending)",
+    "description": "Worker. Grok 4.5 via the official grok CLI."
+  },
+  "glm": {
+    "harness": "codex",
+    "cliModel": "glm-5.2:cloud",
+    "oss": "ollama",
+    "reasoning": "high",
+    "role": "worker",
+    "model": "glm-5.2",
+    "auth": "Ollama subscription",
+    "description": "Worker. GLM-5.2 via Ollama Cloud, driven by the codex harness."
+  },
+  "gem": {
+    "harness": "gemini",
+    "cliModel": "",
+    "role": "worker",
+    "model": "gemini",
+    "auth": "Google",
+    "description": "Worker. Optional."
+  },
+  "macaron": {
+    "harness": "hermes",
+    "profile": "macaron",
+    "cliModel": "",
+    "role": "worker",
+    "model": "macaron-v1-venti",
+    "auth": "Novita API (unlimited)",
+    "description": "Slave worker. Driven by Hermes (macaron profile) with full MCP bus tools. Unlimited tokens via Novita API. HERMES_DISABLE_STREAMING=1 — novita rejects stream=true."
+  }
+}

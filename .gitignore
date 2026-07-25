@@ -1,0 +1,8 @@
+node_modules/
+dist/*.tsbuildinfo
+gui/AgentBus.app/
+.agent-bus/
+.claude/
+.claude-flow/
+*.log
+.DS_Store

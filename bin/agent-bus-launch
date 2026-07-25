@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# Launch a CLI agent with the agent-bus MCP server attached.
+#
+#   agent-bus-launch <agent-id> [workdir] [-- extra cli args]
+#
+# Agent identities live in agents.json next to this script's project root.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SERVER="$ROOT/dist/mcp-server.js"
+AGENTS_JSON="$ROOT/agents.json"
+
+if [[ $# -lt 1 ]]; then
+  echo "usage: agent-bus-launch <agent-id> [workdir] [-- extra args]" >&2
+  echo "known agents: $(node -e 'console.log(Object.keys(require("'"$AGENTS_JSON"'")).join(", "))')" >&2
+  exit 1
+fi
+
+AGENT_ID="$1"; shift
+WORKDIR="${PWD}"
+if [[ $# -gt 0 && "$1" != "--" ]]; then WORKDIR="$1"; shift; fi
+[[ "${1:-}" == "--" ]] && shift
+
+[[ -f "$SERVER" ]] || { echo "build first: (cd '$ROOT' && npm run build)" >&2; exit 1; }
+
+read_field() {
+  node -e '
+    const a = require(process.argv[1])[process.argv[2]];
+    if (!a) { console.error("unknown agent: " + process.argv[2]); process.exit(1); }
+    process.stdout.write(String(a[process.argv[3]] ?? ""));
+  ' "$AGENTS_JSON" "$AGENT_ID" "$1"
+}
+
+CLI="$(read_field cli)"
+ROLE="$(read_field role)"
+MODEL="$(read_field model)"
+DESC="$(read_field description)"
+CLI_MODEL="$(read_field cliModel)"
+EFFORT="$(read_field effort)"
+
+export AGENT_ID AGENT_ROLE="$ROLE" AGENT_MODEL="$MODEL" AGENT_DESC="$DESC"
+
+cd "$WORKDIR"
+echo "── $AGENT_ID ($ROLE, $MODEL) via $CLI in $WORKDIR" >&2
+
+case "$CLI" in
+  claude)
+    MCP_JSON=$(node -e '
+      const [server,id,role,model,desc] = process.argv.slice(1);
+      console.log(JSON.stringify({mcpServers:{"agent-bus":{
+        command: process.execPath, args:[server],
+        env:{AGENT_ID:id, AGENT_ROLE:role, AGENT_MODEL:model, AGENT_DESC:desc}
+      }}}));
+    ' "$SERVER" "$AGENT_ID" "$ROLE" "$MODEL" "$DESC")
+    export MCP_TOOL_TIMEOUT=3600000 AGENT_BUS_BLOCK_SEC=900
+    exec claude --mcp-config "$MCP_JSON" \
+      --append-system-prompt "$(cat "$ROOT/protocol/PROTOCOL.md")" \
+      ${CLI_MODEL:+--model "$CLI_MODEL"} ${EFFORT:+--effort "$EFFORT"} "$@"
+    ;;
+
+  codex)
+    # Codex takes TOML overrides, so we never touch ~/.codex/config.toml.
+    exec codex \
+      -c "mcp_servers.agent_bus.command=\"$(command -v node)\"" \
+      -c "mcp_servers.agent_bus.args=[\"$SERVER\"]" \
+      -c "mcp_servers.agent_bus.startup_timeout_sec=30" \
+      -c "mcp_servers.agent_bus.tool_timeout_sec=300" \
+      -c "mcp_servers.agent_bus.env={AGENT_ID=\"$AGENT_ID\",AGENT_ROLE=\"$ROLE\",AGENT_MODEL=\"$MODEL\",AGENT_DESC=\"$DESC\",AGENT_BUS_BLOCK_SEC=\"240\"}" \
+      ${CLI_MODEL:+-m "$CLI_MODEL"} "$@"
+    ;;
+
+  kimi|gemini)
+    # These read MCP servers from their own config files; see scripts/setup.sh.
+    exec "$CLI" ${CLI_MODEL:+-m "$CLI_MODEL"} "$@"
+    ;;
+
+  *)
+    echo "don't know how to launch cli '$CLI'" >&2; exit 1 ;;
+esac

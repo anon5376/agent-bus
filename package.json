@@ -1,0 +1,24 @@
+{
+  "name": "agent-bus",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local message bus letting heterogeneous CLI agents (Claude, Codex, Kimi, Gemini) delegate work and block on each other's notifications.",
+  "bin": {
+    "agent-bus": "./dist/cli.js",
+    "agent-bus-mcp": "./dist/mcp-server.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "broker": "node dist/cli.js broker"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "typescript": "^5.6.3"
+  }
+}
