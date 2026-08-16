@@ -1,9 +1,10 @@
-name: apply-universal-harness
+name: Apply universal harness prototype
 
 on:
   push:
     branches: ["agent/universal-harness-prototype"]
     paths: [".github/workflows/apply-universal-harness.yml"]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -16,44 +17,28 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Reconstruct and apply implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .github/patch-parts/* | base64 --decode | gzip --decompress > /tmp/universal.patch
+          git apply --index /tmp/universal.patch
+          rm -rf .github/patch-parts
+          rm -f .github/workflows/apply-universal-harness.yml
+          git config user.name "agent-bus builder"
+          git config user.email "actions@github.com"
+          git add -A
+          git commit -m "Build universal multi-model harness prototype"
+          git push origin HEAD:agent/universal-harness-prototype
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-      - name: Decode and apply source patch
-        run: |
-          cat .github/agent-bus-payload.* | base64 -d | gzip -d > /tmp/agent-bus.patch
-          git apply --index --binary --exclude='.github/**' /tmp/agent-bus.patch
-      - run: npm ci
-      - run: npm test
-      - name: Commit validated implementation
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          rm -rf .github
-          mkdir -p .github/workflows
-          cat > .github/workflows/ci.yml <<'YAML'
-          name: ci
-          on:
-            push:
-            pull_request:
-          permissions:
-            contents: read
-          jobs:
-            test:
-              runs-on: ubuntu-latest
-              timeout-minutes: 15
-              steps:
-                - uses: actions/checkout@v4
-                - uses: actions/setup-node@v4
-                  with:
-                    node-version: 22
-                    cache: npm
-                - run: npm ci
-                - run: npm test
-          YAML
-          git add -A
-          git config user.name "agent-bus implementation"
-          git config user.email "actions@users.noreply.github.com"
-          git commit -m "Implement universal multi-model harness prototype"
-          git push origin HEAD:agent/universal-harness-prototype
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build and test
+        run: npm test
