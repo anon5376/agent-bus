@@ -1,0 +1,440 @@
+import { spawn } from "node:child_process";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { ResolvedAgent } from "./config.js";
+
+export interface AdapterContext {
+  agent: ResolvedAgent;
+  prompt: string;
+  sessionId: string | null;
+  workdir: string;
+  mcpServerPath: string;
+  fakeHarnessPath: string;
+  busEnvironment: Record<string, string>;
+}
+
+export interface HarnessInvocation {
+  command: string;
+  args: string[];
+  environment: Record<string, string>;
+  autoReport: boolean;
+  timeoutMs: number;
+}
+
+export interface NormalizedHarnessResult {
+  text: string;
+  sessionId: string | null;
+  usage: {
+    inputTokens: number;
+    outputTokens: number;
+    totalTokens: number;
+    costUSD: number;
+  };
+  structured: Record<string, unknown> | null;
+  malformed: boolean;
+}
+
+export interface HarnessProbe {
+  harness: string;
+  command: string;
+  available: boolean;
+  version: string | null;
+  error: string | null;
+}
+
+export interface ModelDiscoveryResult {
+  harness: string;
+  models: string[];
+  error: string | null;
+}
+
+export interface HarnessAdapter {
+  id: string;
+  prepare?(context: AdapterContext): Promise<void> | void;
+  build(context: AdapterContext): HarnessInvocation;
+  parse(stdout: string, exitCode: number): NormalizedHarnessResult;
+}
+
+const EMPTY_USAGE = { inputTokens: 0, outputTokens: 0, totalTokens: 0, costUSD: 0 };
+
+function stripAnsi(value: string): string {
+  return value.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
+}
+
+function jsonLines(stdout: string): Record<string, unknown>[] {
+  const rows: Record<string, unknown>[] = [];
+  for (const line of stdout.split("\n")) {
+    try {
+      const parsed = JSON.parse(line.trim());
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) rows.push(parsed as Record<string, unknown>);
+    } catch {
+      // Mixed prose/JSON output is normal for several CLIs.
+    }
+  }
+  return rows;
+}
+
+function defaultResult(stdout: string, exitCode: number): NormalizedHarnessResult {
+  const text = stripAnsi(stdout).trim();
+  return {
+    text: text || "(no textual output captured)",
+    sessionId: null,
+    usage: { ...EMPTY_USAGE },
+    structured: null,
+    malformed: exitCode === 0 && text.length === 0,
+  };
+}
+
+function asNumber(value: unknown): number {
+  const n = Number(value ?? 0);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function commonEnvironment(context: AdapterContext): Record<string, string> {
+  return {
+    ...context.busEnvironment,
+    AGENT_ID: context.agent.id,
+    AGENT_ROLE: context.agent.role,
+    AGENT_MODEL: context.agent.modelDefinition.id,
+    AGENT_FAMILY: context.agent.modelDefinition.family,
+    AGENT_PROVIDER: context.agent.modelDefinition.provider,
+    AGENT_HARNESS: context.agent.harnessDefinition.id,
+  };
+}
+
+const claudeAdapter: HarnessAdapter = {
+  id: "claude",
+  build(context) {
+    const env = commonEnvironment(context);
+    const mcp = JSON.stringify({
+      mcpServers: {
+        "agent-bus": {
+          command: process.execPath,
+          args: [context.mcpServerPath],
+          env,
+        },
+      },
+    });
+    const args = [
+      "-p",
+      context.prompt,
+      "--mcp-config",
+      mcp,
+      "--output-format",
+      "json",
+      "--permission-mode",
+      "acceptEdits",
+      "--allowedTools",
+      "mcp__agent-bus,Bash,Read,Write,Edit,Glob,Grep",
+    ];
+    if (context.sessionId) args.push("--resume", context.sessionId);
+    if (context.agent.modelDefinition.exactModel) args.push("--model", context.agent.modelDefinition.exactModel);
+    const effort = String(context.agent.harnessOptions?.effort ?? "");
+    if (effort) args.push("--effort", effort);
+    return {
+      command: context.agent.harnessDefinition.command,
+      args,
+      environment: { ...env, MCP_TOOL_TIMEOUT: "3600000", AGENT_BUS_BLOCK_SEC: "900" },
+      autoReport: false,
+      timeoutMs: 60 * 60_000,
+    };
+  },
+  parse(stdout, exitCode) {
+    for (const row of jsonLines(stdout).reverse()) {
+      const result = row.result;
+      if (typeof result !== "string") continue;
+      const usage = row.usage as Record<string, unknown> | undefined;
+      const input = asNumber(usage?.input_tokens) + asNumber(usage?.cache_read_input_tokens) + asNumber(usage?.cache_creation_input_tokens);
+      const output = asNumber(usage?.output_tokens);
+      return {
+        text: result,
+        sessionId: typeof row.session_id === "string" ? row.session_id : null,
+        usage: { inputTokens: input, outputTokens: output, totalTokens: input + output, costUSD: asNumber(row.total_cost_usd) },
+        structured: row,
+        malformed: false,
+      };
+    }
+    return defaultResult(stdout, exitCode);
+  },
+};
+
+const codexAdapter: HarnessAdapter = {
+  id: "codex",
+  build(context) {
+    const env = commonEnvironment(context);
+    const cfg = [
+      `mcp_servers.agent_bus.command="${process.execPath}"`,
+      `mcp_servers.agent_bus.args=["${context.mcpServerPath}"]`,
+      "mcp_servers.agent_bus.startup_timeout_sec=30",
+      "mcp_servers.agent_bus.tool_timeout_sec=300",
+      `mcp_servers.agent_bus.env=${JSON.stringify(env)}`,
+    ].flatMap((item) => ["-c", item]);
+    const reasoning = String(context.agent.harnessOptions?.reasoning ?? "");
+    if (reasoning) cfg.push("-c", `model_reasoning_effort="${reasoning}"`);
+    const localProvider = String(context.agent.harnessOptions?.localProvider ?? "");
+    if (localProvider) cfg.push("--oss", "--local-provider", localProvider);
+    const unsafe = context.agent.permissions.filesystem === "write" && context.agent.permissions.shell;
+    const access = unsafe
+      ? ["--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check"]
+      : ["--sandbox", "read-only", "--skip-git-repo-check"];
+    const args = context.sessionId
+      ? ["exec", "resume", ...cfg, ...access, "--last"]
+      : ["exec", ...cfg, ...access];
+    if (context.agent.modelDefinition.exactModel) args.push("-m", context.agent.modelDefinition.exactModel);
+    args.push(context.prompt);
+    return {
+      command: context.agent.harnessDefinition.command,
+      args,
+      environment: { ...env, AGENT_BUS_BLOCK_SEC: "240" },
+      autoReport: false,
+      timeoutMs: 60 * 60_000,
+    };
+  },
+  parse(stdout, exitCode) {
+    const result = defaultResult(stdout, exitCode);
+    const clean = stripAnsi(stdout);
+    const match = clean.match(/tokens used\s*\n\s*([\d,]+)/i);
+    if (match) {
+      result.usage.totalTokens = Number(match[1].replace(/,/g, "")) || 0;
+    }
+    result.sessionId = exitCode === 0 ? "resume-last" : null;
+    return result;
+  },
+};
+
+const kimiAdapter: HarnessAdapter = {
+  id: "kimi",
+  build(context) {
+    const env = commonEnvironment(context);
+    const args = context.sessionId
+      ? ["-r", context.sessionId, "-p", context.prompt]
+      : ["-p", context.prompt];
+    if (context.agent.modelDefinition.exactModel) args.push("-m", context.agent.modelDefinition.exactModel);
+    return { command: context.agent.harnessDefinition.command, args, environment: env, autoReport: false, timeoutMs: 60 * 60_000 };
+  },
+  parse(stdout, exitCode) {
+    const result = defaultResult(stdout, exitCode);
+    const session = stdout.match(/kimi -r (session_[\w-]+)/);
+    if (session) result.sessionId = session[1];
+    for (const match of stdout.matchAll(/"tokens":\{"total":(\d+)/g)) {
+      result.usage.totalTokens = Math.max(result.usage.totalTokens, Number(match[1]) || 0);
+    }
+    return result;
+  },
+};
+
+const geminiAdapter: HarnessAdapter = {
+  id: "gemini",
+  build(context) {
+    const env = commonEnvironment(context);
+    const args = ["-p", context.prompt];
+    if (context.agent.modelDefinition.exactModel) args.push("-m", context.agent.modelDefinition.exactModel);
+    return { command: context.agent.harnessDefinition.command, args, environment: env, autoReport: false, timeoutMs: 60 * 60_000 };
+  },
+  parse: defaultResult,
+};
+
+const grokAdapter: HarnessAdapter = {
+  id: "grok",
+  build(context) {
+    const env = commonEnvironment(context);
+    const args = ["-p", context.prompt, "--output-format", "json", "--always-approve"];
+    if (context.sessionId) args.push("-r", context.sessionId);
+    if (context.agent.modelDefinition.exactModel) args.push("-m", context.agent.modelDefinition.exactModel);
+    return { command: context.agent.harnessDefinition.command, args, environment: env, autoReport: false, timeoutMs: 60 * 60_000 };
+  },
+  parse(stdout, exitCode) {
+    for (const row of jsonLines(stdout).reverse()) {
+      const text = row.result ?? row.text ?? row.content;
+      if (typeof text !== "string") continue;
+      const usage = (row.usage ?? {}) as Record<string, unknown>;
+      const input = asNumber(usage.input_tokens ?? usage.inputTokens);
+      const output = asNumber(usage.output_tokens ?? usage.outputTokens);
+      return {
+        text,
+        sessionId: typeof row.session_id === "string" ? row.session_id : typeof row.sessionId === "string" ? row.sessionId : null,
+        usage: { inputTokens: input, outputTokens: output, totalTokens: asNumber(usage.total_tokens ?? usage.totalTokens) || input + output, costUSD: asNumber(usage.cost_usd) },
+        structured: row,
+        malformed: false,
+      };
+    }
+    return defaultResult(stdout, exitCode);
+  },
+};
+
+const opencodeAdapter: HarnessAdapter = {
+  id: "opencode",
+  prepare(context) {
+    const cfgPath = join(context.workdir, "opencode.json");
+    let cfg: Record<string, unknown> = {};
+    try {
+      cfg = JSON.parse(readFileSync(cfgPath, "utf8")) as Record<string, unknown>;
+    } catch {
+      // New project-local configuration.
+    }
+    const mcp = (cfg.mcp && typeof cfg.mcp === "object" ? cfg.mcp : {}) as Record<string, unknown>;
+    mcp["agent-bus"] = {
+      type: "local",
+      command: [process.execPath, context.mcpServerPath],
+      environment: commonEnvironment(context),
+      enabled: true,
+    };
+    cfg.$schema = "https://opencode.ai/config.json";
+    cfg.mcp = mcp;
+    writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
+  },
+  build(context) {
+    const env = commonEnvironment(context);
+    const args = ["run", "--format", "json"];
+    if (context.agent.modelDefinition.exactModel) args.push("-m", context.agent.modelDefinition.exactModel);
+    const variant = String(context.agent.harnessOptions?.variant ?? "");
+    if (variant) args.push("--variant", variant);
+    if (context.sessionId) args.push("-s", context.sessionId);
+    args.push(context.prompt);
+    return { command: context.agent.harnessDefinition.command, args, environment: env, autoReport: false, timeoutMs: 60 * 60_000 };
+  },
+  parse(stdout, exitCode) {
+    const rows = jsonLines(stdout);
+    const parts: string[] = [];
+    let sessionId: string | null = null;
+    let totalTokens = 0;
+    for (const row of rows) {
+      const part = row.part as Record<string, unknown> | undefined;
+      if (part?.type === "text" && typeof part.text === "string") parts.push(part.text);
+      if (typeof row.sessionID === "string") sessionId = row.sessionID;
+      const tokens = row.tokens as Record<string, unknown> | undefined;
+      totalTokens = Math.max(totalTokens, asNumber(tokens?.total));
+    }
+    if (!parts.length) return defaultResult(stdout, exitCode);
+    return {
+      text: parts.join(""),
+      sessionId,
+      usage: { ...EMPTY_USAGE, totalTokens },
+      structured: { events: rows.length },
+      malformed: false,
+    };
+  },
+};
+
+const hermesAdapter: HarnessAdapter = {
+  id: "hermes",
+  build(context) {
+    const env = { ...commonEnvironment(context), HERMES_DISABLE_STREAMING: "1" };
+    const profile = String(context.agent.harnessOptions?.profile ?? "default");
+    const args = ["--profile", profile, "chat", "-q", context.prompt];
+    if (context.sessionId) args.unshift("--resume", context.sessionId);
+    return { command: context.agent.harnessDefinition.command, args, environment: env, autoReport: false, timeoutMs: 60 * 60_000 };
+  },
+  parse(stdout, exitCode) {
+    const clean = stripAnsi(stdout);
+    const blocks = clean.split(/\n─{20,}\n/);
+    const text = blocks.length >= 2 ? blocks[blocks.length - 2].trim() : clean.trim();
+    const session = clean.match(/--resume\s+(\S+)/);
+    const tokens = clean.match(/~?([\d,]+)\s*tokens/i);
+    return {
+      text: text || "(no textual output captured)",
+      sessionId: session?.[1] ?? null,
+      usage: { ...EMPTY_USAGE, totalTokens: tokens ? Number(tokens[1].replace(/,/g, "")) || 0 : 0 },
+      structured: null,
+      malformed: exitCode === 0 && !text,
+    };
+  },
+};
+
+const fakeAdapter: HarnessAdapter = {
+  id: "fake",
+  prepare(context) {
+    mkdirSync(join(context.workdir, ".agent-bus"), { recursive: true });
+  },
+  build(context) {
+    const env = commonEnvironment(context);
+    const mode = String(context.agent.harnessOptions?.mode ?? "success");
+    const args = [context.fakeHarnessPath, "--mode", mode, "--agent", context.agent.id, "--prompt", context.prompt];
+    if (context.sessionId) args.push("--session", context.sessionId);
+    return { command: process.execPath, args, environment: env, autoReport: true, timeoutMs: 30_000 };
+  },
+  parse(stdout, exitCode) {
+    const rows = jsonLines(stdout);
+    const row = rows.at(-1);
+    if (!row || typeof row.result !== "string") {
+      const fallback = defaultResult(stdout, exitCode);
+      fallback.malformed = exitCode === 0;
+      return fallback;
+    }
+    const usage = (row.usage ?? {}) as Record<string, unknown>;
+    return {
+      text: row.result,
+      sessionId: typeof row.sessionId === "string" ? row.sessionId : null,
+      usage: {
+        inputTokens: asNumber(usage.inputTokens),
+        outputTokens: asNumber(usage.outputTokens),
+        totalTokens: asNumber(usage.totalTokens),
+        costUSD: asNumber(usage.costUSD),
+      },
+      structured: row,
+      malformed: false,
+    };
+  },
+};
+
+const ADAPTERS: Record<string, HarnessAdapter> = {
+  claude: claudeAdapter,
+  codex: codexAdapter,
+  kimi: kimiAdapter,
+  gemini: geminiAdapter,
+  grok: grokAdapter,
+  opencode: opencodeAdapter,
+  hermes: hermesAdapter,
+  fake: fakeAdapter,
+};
+
+export function getHarnessAdapter(id: string): HarnessAdapter {
+  const adapter = ADAPTERS[id];
+  if (!adapter) throw new Error(`unknown harness adapter: ${id}`);
+  return adapter;
+}
+
+function runCommand(command: string, args: string[], timeoutMs = 10_000): Promise<{ code: number; output: string }> {
+  return new Promise((resolve) => {
+    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let output = "";
+    const timer = setTimeout(() => child.kill("SIGTERM"), timeoutMs);
+    child.stdout.on("data", (data) => (output += data.toString()));
+    child.stderr.on("data", (data) => (output += data.toString()));
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      resolve({ code: -1, output: error.message });
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolve({ code: code ?? -1, output: stripAnsi(output).trim() });
+    });
+  });
+}
+
+export async function probeHarness(agent: ResolvedAgent): Promise<HarnessProbe> {
+  const harness = agent.harnessDefinition;
+  const result = await runCommand(harness.command, harness.probeArgs ?? ["--version"]);
+  return {
+    harness: harness.id,
+    command: harness.command,
+    available: result.code === 0,
+    version: result.code === 0 ? result.output.split("\n")[0] || null : null,
+    error: result.code === 0 ? null : result.output || `exit ${result.code}`,
+  };
+}
+
+export async function discoverHarnessModels(agent: ResolvedAgent): Promise<ModelDiscoveryResult> {
+  const discovery = agent.harnessDefinition.modelDiscovery;
+  if (!discovery) return { harness: agent.harnessDefinition.id, models: [], error: "model discovery is registry-only for this harness" };
+  const result = await runCommand(agent.harnessDefinition.command, discovery.args, 30_000);
+  if (result.code !== 0) return { harness: agent.harnessDefinition.id, models: [], error: result.output || `exit ${result.code}` };
+  try {
+    const models = discovery.format === "json"
+      ? (JSON.parse(result.output) as unknown[]).map(String)
+      : result.output.split("\n").map((line) => line.trim()).filter(Boolean);
+    return { harness: agent.harnessDefinition.id, models: [...new Set(models)], error: null };
+  } catch (error) {
+    return { harness: agent.harnessDefinition.id, models: [], error: `could not parse model discovery output: ${(error as Error).message}` };
+  }
+}

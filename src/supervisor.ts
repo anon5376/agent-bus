@@ -2,6 +2,8 @@ import { spawn } from "node:child_process";
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { AdapterContext, HarnessInvocation, NormalizedHarnessResult, getHarnessAdapter } from "./adapters.js";
+import { ResolvedAgent, configPathFromProject, loadConfig, resolveAgent } from "./config.js";
 import {
   BUS_HOME,
   MAX_WAIT_MS,
@@ -9,688 +11,332 @@ import {
   brokerAlive,
   brokerCall,
 } from "./protocol.js";
+import { agentTokenPath, readTokenFile } from "./security.js";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const SERVER = join(ROOT, "dist", "mcp-server.js");
+const MCP_SERVER = join(ROOT, "dist", "mcp-server.js");
+const FAKE_HARNESS = join(ROOT, "dist", "fake-harness.js");
 const LOG_DIR = join(BUS_HOME, "logs");
-/** Human-readable per-agent conversation, one file per agent, for the GUI to open. */
 const TRANSCRIPT_DIR = join(BUS_HOME, "transcripts");
+const SESSION_DIR = join(BUS_HOME, "sessions");
 
-interface AgentDef {
-  /** Which CLI harness runs this agent: claude | codex | opencode | kimi | grok | gemini. */
-  harness: string;
-  /** Legacy alias for harness, still accepted from older agents.json files. */
-  cli?: string;
-  cliModel?: string;
-  /** Reasoning effort, where the harness supports it: low | medium | high | xhigh | max */
-  effort?: string;
-  /** codex only: drive a local OSS provider ("ollama"|"lmstudio") instead of the default. */
-  oss?: string;
-  /** codex only: reasoning-effort override for OSS models that reject the default. */
-  reasoning?: string;
-  role: string;
-  model: string;
-  /** Human-readable auth source (subscription vs credits), for display only. */
-  auth?: string;
-  /** Hermes harness only: profile name to use (e.g. "macaron"). */
-  profile?: string;
-  description: string;
+interface SessionRecord {
+  sessionId: string | null;
+  turns: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  costUSD: number;
+  latencyMs: number;
 }
 
-function loadAgent(id: string): AgentDef {
-  const all = JSON.parse(
-    readFileSync(join(ROOT, "agents.json"), "utf8"),
-  ) as Record<string, AgentDef>;
-  const def = all[id];
-  if (!def) {
-    throw new Error(
-      `unknown agent "${id}" — agents.json has: ${Object.keys(all).join(", ")}`,
-    );
-  }
-  // Migrate compatibly: harness is the new field, cli the old one.
-  def.harness = def.harness ?? def.cli ?? "claude";
-  def.cli = def.harness;
-  return def;
+export interface ProcessResult {
+  code: number;
+  output: string;
+  durationMs: number;
+  timedOut: boolean;
 }
 
 function log(agentId: string, line: string): void {
   const stamped = `[${new Date().toISOString()}] ${line}`;
   process.stdout.write(stamped + "\n");
+  try { appendFileSync(join(LOG_DIR, `${agentId}.log`), stamped + "\n"); } catch { /* logging is best effort */ }
+}
+
+function sessionPath(agentId: string): string {
+  return join(SESSION_DIR, `${agentId}.json`);
+}
+
+function readSession(agentId: string): SessionRecord {
   try {
-    appendFileSync(join(LOG_DIR, `${agentId}.log`), stamped + "\n");
-  } catch {
-    /* never let logging kill the supervisor */
-  }
-}
-
-/** Pull the agent's readable reply out of a CLI's raw stdout. */
-function extractResponseText(cli: string, stdout: string): string {
-  if (cli === "claude") {
-    // Claude --output-format json emits one result envelope with a .result string.
-    for (const line of stdout.trim().split("\n").reverse()) {
-      try {
-        const o = JSON.parse(line);
-        if (o && typeof o.result === "string") return o.result;
-      } catch {
-        /* not the envelope line */
-      }
-    }
-  }
-  if (cli === "opencode") {
-    // --format json emits events; the assistant's prose is in text parts.
-    const parts: string[] = [];
-    for (const line of stdout.split("\n")) {
-      try {
-        const o = JSON.parse(line.trim());
-        const p = o?.part;
-        if (p && p.type === "text" && typeof p.text === "string") parts.push(p.text);
-      } catch {
-        /* not a json event line */
-      }
-    }
-    if (parts.length) return parts.join("");
-  }
-  if (cli === "aider") {
-    // Aider prints THINKING then ANSWER sections. Extract the ANSWER block —
-    // that's the model's actual response. Strip ANSI colours first.
-    const clean = stdout.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
-    const m = clean.match(/►\s*ANSWER\s*([\s\S]*?)(?:Tokens:|$)/);
-    if (m && m[1].trim()) return m[1].trim();
-    // Fallback: if no ANSWER marker, return everything after the last divider
-    const lines = clean.split("\n");
-    const lastDivider = lines.lastIndexOf(
-      lines.find((l) => l.match(/^─{20,}$/)) ?? "",
-    );
-    if (lastDivider >= 0 && lastDivider < lines.length - 1) {
-      return lines.slice(lastDivider + 1).join("\n").trim();
-    }
-  }
-  if (cli === "hermes") {
-    // Hermes CLI in -q (quiet) mode prints the response between horizontal
-    // divider lines, after the "Initializing agent..." preamble. Strip ANSI,
-    // find the last ─ divider block and extract the content between them.
-    const clean = stdout.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
-    const blocks = clean.split(/\n─{20,}\n/);
-    if (blocks.length >= 2) {
-      // The response is in the second-to-last block (between the two dividers)
-      const response = blocks[blocks.length - 2].trim();
-      if (response) return response;
-    }
-    // Fallback: strip lines that are just whitespace or UI noise
-    const lines = clean.split("\n").filter((l) => {
-      const t = l.trim();
-      return t && !t.startsWith("Initializing") && !t.startsWith("Resume")
-        && !t.startsWith("Session:") && !t.startsWith("Duration:")
-        && !t.startsWith("Messages:");
-    });
-    return lines.join("\n").trim() || "(no textual output captured)";
-  }
-  // Codex/grok/kimi print prose directly; keep it as-is (trimmed) so the transcript
-  // shows exactly what the agent said and did.
-  const trimmed = stdout.trim();
-  return trimmed || "(no textual output captured)";
-}
-
-/** Best-effort usage for one turn: tokens spent and USD cost where the harness reports it. */
-function extractUsage(harness: string, stdout: string): { tokens: number; costUSD: number } {
-  let tokens = 0;
-  let costUSD = 0;
-  if (harness === "claude") {
-    for (const line of stdout.trim().split("\n").reverse()) {
-      try {
-        const o = JSON.parse(line);
-        if (o?.usage) {
-          tokens =
-            (o.usage.input_tokens ?? 0) +
-            (o.usage.output_tokens ?? 0) +
-            (o.usage.cache_read_input_tokens ?? 0) +
-            (o.usage.cache_creation_input_tokens ?? 0);
-          costUSD = o.total_cost_usd ?? 0;
-          break;
-        }
-      } catch {
-        /* not the envelope */
-      }
-    }
-  } else if (harness === "codex") {
-    // Codex prints "tokens used" then the number (e.g. "20,250") on the next line.
-    const m = stdout.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "").match(/tokens used\s*\n\s*([\d,]+)/i);
-    if (m) tokens = Number(m[1].replace(/,/g, "")) || 0;
-  } else if (harness === "kimi" || harness === "opencode") {
-    // step_finish events carry {"tokens":{"total":N,...}} — take the largest total.
-    for (const m of stdout.matchAll(/"tokens":\{"total":(\d+)/g)) {
-      tokens = Math.max(tokens, Number(m[1]) || 0);
-    }
-  } else if (harness === "grok") {
-    const m = stdout.match(/"(total_tokens|totalTokens)":(\d+)/);
-    if (m) tokens = Number(m[2]) || 0;
-  } else if (harness === "aider") {
-    // Aider prints "Tokens: 2.3k sent, 84 received" at the end of each turn.
-    const clean = stdout.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
-    const m = clean.match(/Tokens:\s*([\d.]+k?)\s*sent,\s*([\d.]+k?)\s*received/i);
-    if (m) {
-      const parseTok = (s: string) =>
-        s.endsWith("k") ? Math.round(Number(s.slice(0, -1)) * 1000) : Number(s);
-      tokens = parseTok(m[1]) + parseTok(m[2]);
-    }
-  } else if (harness === "hermes") {
-    // Hermes prints "~3,688 tokens" or "Context: 2 msgs, ~3,688 tokens"
-    const clean = stdout.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
-    const m = clean.match(/~?([\d,]+)\s*tokens/i);
-    if (m) tokens = Number(m[1].replace(/,/g, "")) || 0;
-  }
-  return { tokens, costUSD };
-}
-
-/** Append one turn to the agent's readable transcript file. */
-function appendTranscript(
-  agentId: string,
-  turn: number,
-  promptMessages: Message[],
-  cli: string,
-  stdout: string,
-  code: number,
-): void {
-  const ts = new Date().toLocaleString();
-  const incoming = promptMessages
-    .map((m) => `**${m.from} → ${agentId}** (${m.type}${m.taskId ? ` · ${m.taskId}` : ""})\n${m.subject}\n\n${m.body}`)
-    .join("\n\n");
-  const response = extractResponseText(cli, stdout);
-  const block = [
-    `\n---\n`,
-    `### Turn ${turn} · ${ts}${code === 0 ? "" : `  ⚠️ exited ${code}`}`,
-    ``,
-    `#### ▸ Received`,
-    incoming,
-    ``,
-    `#### ◂ ${agentId} replied`,
-    response,
-    ``,
-  ].join("\n");
-  try {
-    appendFileSync(join(TRANSCRIPT_DIR, `${agentId}.md`), block);
-  } catch {
-    /* transcript is best-effort */
-  }
-}
-
-/** Turn the mail that woke us into the prompt we hand the agent. */
-function buildPrompt(messages: Message[]): string {
-  const rendered = messages
-    .map((m) =>
-      [
-        `── from ${m.from} · ${m.type}${m.taskId ? ` · ${m.taskId}` : ""}`,
-        m.subject,
-        "",
-        m.body,
-      ].join("\n"),
-    )
-    .join("\n\n");
-
-  return [
-    `=== agent-bus: ${messages.length} new message(s) ===`,
-    "",
-    rendered,
-    "",
-    "=== end of messages ===",
-    "",
-    "Act on these now using the agent-bus tools (bus_submit_work, bus_review_work,",
-    "bus_send, bus_assign_task). Do the actual work before you report it.",
-    "",
-    "Do NOT call bus_wait. A supervisor process is holding the wait for you and will",
-    "wake you with a new prompt the moment more mail arrives. End your turn once you",
-    "have responded — you will not miss anything.",
-  ].join("\n");
-}
-
-/** Prompt for a harness with no bus tools (aider). Just do the work — the
- * supervisor will report to the bus on your behalf. */
-function buildSlavePrompt(messages: Message[]): string {
-  const rendered = messages
-    .map((m) =>
-      [
-        `── from ${m.from} · ${m.type}${m.taskId ? ` · ${m.taskId}` : ""}`,
-        m.subject,
-        "",
-        m.body,
-      ].join("\n"),
-    )
-    .join("\n\n");
-
-  return [
-    `=== agent-bus: ${messages.length} new message(s) ===`,
-    "",
-    rendered,
-    "",
-    "=== end of messages ===",
-    "",
-    "Do the work described above. Edit the files directly. Do NOT try to call",
-    "any bus tools, send messages, or report back — your supervisor handles all",
-    "bus communication on your behalf. Just do the actual work and end your turn.",
-  ].join("\n");
-}
-
-/** Per-CLI invocation, including how to resume the agent's own session. */
-function buildCommand(
-  def: AgentDef,
-  agentId: string,
-  prompt: string,
-  session: string | null,
-): { cmd: string; args: string[]; env: Record<string, string> } {
-  const env: Record<string, string> = {
-    AGENT_ID: agentId,
-    AGENT_ROLE: def.role,
-    AGENT_MODEL: def.model,
-    AGENT_DESC: def.description,
-    AGENT_HARNESS: def.harness,
-    AGENT_AUTH: def.auth ?? "",
-    // Keep bus_wait's block shorter than the host CLI's own MCP tool timeout.
-    AGENT_BUS_BLOCK_SEC: def.harness === "claude" ? "900" : "240",
-  };
-
-  switch (def.harness) {
-    case "claude": {
-      const mcp = JSON.stringify({
-        mcpServers: {
-          "agent-bus": { command: process.execPath, args: [SERVER], env },
-        },
-      });
-      const args = [
-        "-p",
-        prompt,
-        "--mcp-config",
-        mcp,
-        "--output-format",
-        "json",
-        "--permission-mode",
-        "acceptEdits",
-        // acceptEdits covers file writes but NOT MCP tools — without this the agent
-        // wakes, reasons correctly, and then has every bus call denied, which looks
-        // exactly like the agent ignoring the protocol.
-        "--allowedTools",
-        "mcp__agent-bus,Bash,Read,Write,Edit,Glob,Grep",
-      ];
-      if (session) args.push("--resume", session);
-      if (def.cliModel) args.push("--model", def.cliModel);
-      if (def.effort) args.push("--effort", def.effort);
-      return { cmd: "claude", args, env };
-    }
-
-    case "codex": {
-      const cfg = [
-        `mcp_servers.agent_bus.command="${process.execPath}"`,
-        `mcp_servers.agent_bus.args=["${SERVER}"]`,
-        `mcp_servers.agent_bus.startup_timeout_sec=30`,
-        `mcp_servers.agent_bus.tool_timeout_sec=300`,
-        `mcp_servers.agent_bus.env={AGENT_ID="${agentId}",AGENT_ROLE="${def.role}",` +
-          `AGENT_MODEL="${def.model}",AGENT_DESC="${def.description}",` +
-          `AGENT_BUS_BLOCK_SEC="240"}`,
-      ].flatMap((c) => ["-c", c]);
-      // Reasoning-effort override (e.g. "high"). Also required for OSS models like
-      // glm-5.2 via Ollama, which reject codex's default "xhigh".
-      if (def.reasoning) cfg.push("-c", `model_reasoning_effort="${def.reasoning}"`);
-      if (def.oss) cfg.push("--oss", "--local-provider", def.oss);
-      // The workspace-write sandbox silently cancels every MCP tool call in this
-      // Codex build, which leaves a worker able to do the work but unable to report
-      // it. Bypassing the sandbox is the only config where both work — so a
-      // supervised Codex agent runs unsandboxed. Keep its workdir trusted.
-      const auto = ["--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check"];
-      // Options must precede the positional prompt; --last picks this agent's
-      // most recent session rather than us tracking a uuid.
-      const base = session
-        ? ["exec", "resume", ...cfg, ...auto, "--last"]
-        : ["exec", ...cfg, ...auto];
-      const args = [...base, prompt];
-      if (def.cliModel) args.push("-m", def.cliModel);
-      return { cmd: "codex", args, env };
-    }
-
-    case "kimi": {
-      // Kimi reads its MCP servers from ~/.kimi-code/config.toml (scripts/setup.sh).
-      // -p is single-shot and already non-interactive (it rejects --auto/--yolo).
-      // -r <session_id> resumes the prior conversation.
-      const args = session ? ["-r", session, "-p", prompt] : ["-p", prompt];
-      if (def.cliModel) args.push("-m", def.cliModel);
-      return { cmd: "kimi", args, env };
-    }
-
-    case "grok": {
-      // Official grok CLI: -p single-turn, json output for the session id, resume
-      // with -r, --always-approve for headless tool use. MCP via `grok mcp add`.
-      const args = ["-p", prompt, "--output-format", "json", "--always-approve"];
-      if (session) args.push("-r", session);
-      if (def.cliModel) args.push("-m", def.cliModel);
-      return { cmd: "grok", args, env };
-    }
-
-    case "gemini": {
-      const args = ["-p", prompt];
-      if (def.cliModel) args.push("-m", def.cliModel);
-      return { cmd: "gemini", args, env };
-    }
-
-    case "opencode": {
-      // opencode reads its MCP servers + AGENT_ID from opencode.json in the workdir
-      // (written in supervise()). --auto approves tool use headlessly; --format json
-      // gives us the sessionID to resume and the text parts for the transcript.
-      const args = ["run", "--auto", "--format", "json"];
-      if (def.cliModel) args.push("-m", def.cliModel);
-      if (def.effort) args.push("--variant", def.effort);
-      if (session) args.push("-s", session); // resume this session
-      args.push(prompt);
-      return { cmd: "opencode", args, env };
-    }
-
-    case "aider": {
-      // Aider is a code-editing assistant — no MCP support, no tool calling, no
-      // command execution. It is a "literal slave": the supervisor drives it in
-      // --message mode, it edits files, and the supervisor reports to the bus on
-      // its behalf. --yes-always auto-accepts every SEARCH/REPLACE block.
-      // --restore-chat-history keeps context across turns (aider saves to
-      // --chat-history-file automatically). The supervisor auto-submits work
-      // after each turn because aider cannot call bus_submit_work itself.
-      const args = [
-        "--config", process.env.AIDER_CONFIG ?? join(BUS_HOME, "aider.conf.yml"),
-        "--message", prompt,
-        "--no-git",
-        "--yes-always",
-        "--no-show-model-warnings",
-        "--restore-chat-history",
-      ];
-      if (def.cliModel) args.push("--model", def.cliModel);
-      return { cmd: "aider", args, env };
-    }
-
-    case "hermes": {
-      // Hermes is a full agent framework with native MCP support. The agent-bus
-      // MCP server is wired in the profile config (hermes mcp add), so the agent
-      // gets all 9 bus tools directly. It calls bus_wait, bus_submit_work, etc.
-      // itself — the supervisor just holds the wait and wakes it with a prompt.
-      // --profile selects the dedicated macaron profile (novita endpoint).
-      // HERMES_DISABLE_STREAMING=1 is set because novita rejects stream=true.
-      const args = ["--profile", def.profile ?? "macaron", "chat", "-q", prompt];
-      return { cmd: "hermes", args, env };
-    }
-
-    default:
-      throw new Error(`supervisor doesn't know how to run cli "${def.harness}"`);
-  }
-}
-
-/** Claude reports its session id in the JSON envelope; others we track by flag. */
-function extractSession(cli: string, stdout: string): string | null {
-  if (cli === "claude") {
-    for (const line of stdout.trim().split("\n").reverse()) {
-      try {
-        const obj = JSON.parse(line);
-        if (obj && typeof obj.session_id === "string") return obj.session_id;
-      } catch {
-        /* not the JSON envelope */
-      }
-    }
-    return null;
-  }
-  if (cli === "opencode") {
-    // Every event carries the sessionID; take the last one we see.
-    let sid: string | null = null;
-    for (const line of stdout.split("\n")) {
-      try {
-        const o = JSON.parse(line.trim());
-        if (o && typeof o.sessionID === "string") sid = o.sessionID;
-      } catch {
-        /* not a json event line */
-      }
-    }
-    return sid;
-  }
-  if (cli === "kimi") {
-    // kimi prints "To resume this session: kimi -r session_<uuid>".
-    const m = stdout.match(/kimi -r (session_[\w-]+)/);
-    return m ? m[1] : null;
-  }
-  if (cli === "grok") {
-    // grok --output-format json includes a session id; also printed as "grok -r <id>".
-    for (const line of stdout.split("\n").reverse()) {
-      try {
-        const o = JSON.parse(line.trim());
-        const sid = o?.session_id ?? o?.sessionId ?? o?.session?.id;
-        if (typeof sid === "string") return sid;
-      } catch {
-        /* not json */
-      }
-    }
-    const m = stdout.match(/grok -r ([\w-]+)/);
-    return m ? m[1] : null;
-  }
-  if (cli === "hermes") {
-    // Hermes prints "Resume this session with:\n  hermes --resume <id> -p ..."
-    const m = stdout.match(/--resume\s+(\S+)/);
-    return m ? m[1] : null;
-  }
-  return null;
-}
-
-function runAgent(
-  def: AgentDef,
-  agentId: string,
-  prompt: string,
-  session: string | null,
-  workdir: string,
-): Promise<{ code: number; stdout: string }> {
-  const { cmd, args } = buildCommand(def, agentId, prompt, session);
-  const childEnv: Record<string, string | undefined> = {
-    ...process.env,
-    MCP_TOOL_TIMEOUT: "3600000",
-  };
-  // Aider needs the Novita API key. The supervisor doesn't have it in its own
-  // env (it's in the aider env file), so read it and inject it for aider runs.
-  if (def.harness === "aider") {
-    try {
-      const envPath = join(BUS_HOME, "aider.env");
-      const envContent = readFileSync(envPath, "utf8");
-      const match = envContent.match(/OPENAI_API_KEY=(.+)/);
-      if (match) childEnv.OPENAI_API_KEY = match[1].trim();
-    } catch { /* env file missing — aider will warn */ }
-  }
-  // Agents should draw on the subscription login (Keychain OAuth), not API credits.
-  // The supervisor inherits the whole environment, so a stray key set for some other
-  // purpose would silently switch every agent turn onto metered billing.
-  // Set AGENT_BUS_ALLOW_API_KEY=1 if you actually want key-based auth.
-  if (process.env.AGENT_BUS_ALLOW_API_KEY !== "1") {
-    delete childEnv.ANTHROPIC_API_KEY;
-    delete childEnv.ANTHROPIC_AUTH_TOKEN;
-  }
-
-  return new Promise((resolve) => {
-    const child = spawn(cmd, args, {
-      cwd: workdir,
-      env: childEnv as NodeJS.ProcessEnv,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    // Capture both streams: some harnesses (codex) print usage/session info to
-    // stderr, so the extractors need the combined output.
-    let stdout = "";
-    child.stdout.on("data", (d) => {
-      stdout += d.toString();
-      process.stdout.write(d);
-    });
-    child.stderr.on("data", (d) => {
-      stdout += d.toString();
-      process.stderr.write(d);
-    });
-    child.on("error", (err) => {
-      log(agentId, `spawn failed: ${err.message}`);
-      resolve({ code: -1, stdout });
-    });
-    child.on("close", (code) => resolve({ code: code ?? -1, stdout }));
-  });
-}
-
-/**
- * Hold the blocking wait on the agent's behalf and wake it with a fresh prompt
- * whenever mail arrives. A shell loop cannot decide it is finished, so the agent
- * is structurally incapable of going deaf — and it burns nothing while idle
- * because its process isn't even running.
- */
-export async function supervise(agentId: string, workdir: string): Promise<void> {
-  mkdirSync(LOG_DIR, { recursive: true });
-  mkdirSync(TRANSCRIPT_DIR, { recursive: true });
-  const def = loadAgent(agentId);
-
-  if (!(await brokerAlive())) {
-    throw new Error("broker is not running — start it with: agent-bus broker");
-  }
-  const reg = await brokerCall<{ token?: string }>("/register", {
-    id: agentId,
-    role: def.role,
-    model: def.model,
-    description: def.description,
-    harness: def.harness,
-    auth: def.auth ?? "",
-  });
-  const token = reg.token ?? "";
-
-  // opencode discovers MCP servers + the agent's AGENT_ID from opencode.json in the
-  // working directory. Write/refresh it so the bus tools are present and the MCP
-  // server registers as this agent. (Merge-safe: only touches the agent-bus key.)
-  if (def.harness === "opencode") {
-    const cfgPath = join(workdir, "opencode.json");
-    let cfg: any = {};
-    try { cfg = JSON.parse(readFileSync(cfgPath, "utf8")); } catch { /* new file */ }
-    cfg["$schema"] = "https://opencode.ai/config.json";
-    cfg.mcp = cfg.mcp ?? {};
-    cfg.mcp["agent-bus"] = {
-      type: "local",
-      command: [process.execPath, SERVER],
-      environment: {
-        AGENT_ID: agentId,
-        AGENT_ROLE: def.role,
-        AGENT_MODEL: def.model,
-        AGENT_DESC: def.description,
-      },
-      enabled: true,
+    const parsed = JSON.parse(readFileSync(sessionPath(agentId), "utf8")) as Partial<SessionRecord>;
+    return {
+      sessionId: parsed.sessionId ?? null,
+      turns: Number(parsed.turns ?? 0),
+      inputTokens: Number(parsed.inputTokens ?? 0),
+      outputTokens: Number(parsed.outputTokens ?? 0),
+      totalTokens: Number(parsed.totalTokens ?? 0),
+      costUSD: Number(parsed.costUSD ?? 0),
+      latencyMs: Number(parsed.latencyMs ?? 0),
     };
-    try {
-      writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
-    } catch (err) {
-      log(agentId, `could not write opencode.json: ${(err as Error).message}`);
-    }
+  } catch {
+    return { sessionId: null, turns: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, costUSD: 0, latencyMs: 0 };
   }
+}
 
-  // Announce our pid (for the kill switch), workdir and cli (for the GUI's
-  // "open session in terminal" action).
+function writeSession(agentId: string, session: SessionRecord): void {
+  mkdirSync(SESSION_DIR, { recursive: true });
+  writeFileSync(sessionPath(agentId), JSON.stringify(session, null, 2));
+}
+
+export function buildSupervisorPrompt(messages: Message[], agent: ResolvedAgent): string {
+  const rendered = messages.map((message) => [
+    `── from ${message.from} · ${message.type}${message.taskId ? ` · ${message.taskId}` : ""}`,
+    message.subject,
+    "",
+    message.body,
+    message.refs.length ? `\nReferences:\n${message.refs.map((ref) => `- ${ref.type}: ${ref.value}`).join("\n")}` : "",
+  ].filter(Boolean).join("\n")).join("\n\n");
+
+  return [
+    `=== agent-bus: ${messages.length} new message(s) for ${agent.id} ===`,
+    `Role: ${agent.role}; model: ${agent.modelDefinition.id}; family: ${agent.modelDefinition.family}; harness: ${agent.harnessDefinition.id}.`,
+    `Permissions: filesystem=${agent.permissions.filesystem}, shell=${agent.permissions.shell}, network=${agent.permissions.network}, delegate=${agent.permissions.canDelegate}, review=${agent.permissions.canReview}.`,
+    "",
+    rendered,
+    "",
+    "=== end of scoped messages ===",
+    "",
+    "Do the actual work now. Retrieve only the files or evidence needed for this task.",
+    "Use file paths and artifacts for handoff instead of pasting large outputs into messages.",
+    "Use bus_submit_work, bus_review_work, bus_send, or bus_assign_task as authorized.",
+    "Do NOT call bus_wait: the supervisor owns the blocking wait and will wake you again.",
+    "End the turn after reporting the result or question.",
+  ].join("\n");
+}
+
+function sanitizedEnvironment(agent: ResolvedAgent, additions: Record<string, string>): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env, ...additions, MCP_TOOL_TIMEOUT: "3600000" };
+  if (process.env.AGENT_BUS_ALLOW_API_KEY === "1" || !agent.providerDefinition.subscriptionBacked) return env;
+  const providerKeys: Record<string, string[]> = {
+    anthropic: ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"],
+    openai: ["OPENAI_API_KEY"],
+    google: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+    moonshot: ["MOONSHOT_API_KEY", "KIMI_API_KEY"],
+    xai: ["XAI_API_KEY"],
+  };
+  for (const key of providerKeys[agent.modelDefinition.provider] ?? []) delete env[key];
+  return env;
+}
+
+export function retryDelayMs(consecutiveFailures: number): number {
+  return Math.min(60_000, 2_000 * 2 ** Math.max(0, consecutiveFailures - 1));
+}
+
+export function runHarnessProcess(
+  invocation: HarnessInvocation,
+  agent: ResolvedAgent,
+  workdir: string,
+  onSpawn?: (pid: number | null) => void,
+): Promise<ProcessResult> {
+  const started = Date.now();
+  return new Promise((resolve) => {
+    const child = spawn(invocation.command, invocation.args, {
+      cwd: workdir,
+      env: sanitizedEnvironment(agent, invocation.environment),
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: process.platform !== "win32",
+    });
+    onSpawn?.(child.pid ?? null);
+    let output = "";
+    let settled = false;
+    let timedOut = false;
+    const finish = (code: number) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      onSpawn?.(null);
+      resolve({ code, output, durationMs: Date.now() - started, timedOut });
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      if (child.pid && process.platform !== "win32") {
+        try { process.kill(-child.pid, "SIGTERM"); } catch { child.kill("SIGTERM"); }
+      } else {
+        child.kill("SIGTERM");
+      }
+      setTimeout(() => {
+        if (!settled && child.pid && process.platform !== "win32") {
+          try { process.kill(-child.pid, "SIGKILL"); } catch { child.kill("SIGKILL"); }
+        }
+      }, 3_000).unref();
+    }, invocation.timeoutMs);
+    child.stdout.on("data", (data) => {
+      output += data.toString();
+      process.stdout.write(data);
+    });
+    child.stderr.on("data", (data) => {
+      output += data.toString();
+      process.stderr.write(data);
+    });
+    child.on("error", (error) => {
+      output += `\nspawn error: ${error.message}`;
+      finish(-1);
+    });
+    child.on("close", (code) => finish(code ?? -1));
+  });
+}
+
+function appendTranscript(
+  agent: ResolvedAgent,
+  turn: number,
+  messages: Message[],
+  result: NormalizedHarnessResult,
+  processResult: ProcessResult,
+): void {
+  const received = messages.map((message) =>
+    `**${message.from} → ${agent.id}** (${message.type}${message.taskId ? ` · ${message.taskId}` : ""})\n${message.subject}\n\n${message.body}`,
+  ).join("\n\n");
+  const block = [
+    "\n---\n",
+    `### Turn ${turn} · ${new Date().toLocaleString()}${processResult.code === 0 ? "" : ` · exit ${processResult.code}`}`,
+    "",
+    "#### Received",
+    received,
+    "",
+    `#### ${agent.id} replied`,
+    result.text,
+    "",
+    `Usage: ${result.usage.totalTokens.toLocaleString()} tokens · ${processResult.durationMs} ms${result.usage.costUSD ? ` · $${result.usage.costUSD.toFixed(4)}` : ""}`,
+    "",
+  ].join("\n");
+  try { appendFileSync(join(TRANSCRIPT_DIR, `${agent.id}.md`), block); } catch { /* best effort */ }
+}
+
+function taskMessages(messages: Message[]): Message[] {
+  return messages.filter((message) => message.taskId && (message.type === "task" || message.type === "feedback" || message.type === "control"));
+}
+
+function cancellationOnly(messages: Message[]): boolean {
+  return messages.length > 0 && messages.every((message) => message.type === "control" && message.subject.startsWith("[CANCELLED"));
+}
+
+function structuredArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+async function reportPresence(token: string, agent: ResolvedAgent, workdir: string, childPid: number | null): Promise<void> {
   await brokerCall("/presence", {
     token,
     pid: process.pid,
+    childPid,
     workdir,
-    cli: def.harness,
+    cli: agent.harnessDefinition.id,
   }).catch(() => {});
+}
 
-  // Start each supervised run with a session header so the transcript reads cleanly.
+export async function supervise(agentId: string, workdir: string): Promise<void> {
+  mkdirSync(LOG_DIR, { recursive: true });
+  mkdirSync(TRANSCRIPT_DIR, { recursive: true });
+  mkdirSync(SESSION_DIR, { recursive: true });
+  const config = loadConfig(configPathFromProject(workdir));
+  const agent = resolveAgent(config, agentId);
+  if (!agent.enabled) throw new Error(`agent ${agentId} is disabled in configuration`);
+  if (!(await brokerAlive())) throw new Error("broker is not running — start it with: agent-bus broker");
+
+  const token = readTokenFile(agentTokenPath(agentId));
+  if (!token) {
+    throw new Error(`no token for ${agentId}; provision it explicitly with: agent-bus provision ${agentId}`);
+  }
+  await brokerCall("/register", { token, id: agentId });
+  await reportPresence(token, agent, workdir, null);
+
+  const adapter = getHarnessAdapter(agent.harnessDefinition.adapter);
+  let session = readSession(agentId);
+  let consecutiveFailures = 0;
+
   try {
     appendFileSync(
       join(TRANSCRIPT_DIR, `${agentId}.md`),
-      `\n\n# ═══ Session started ${new Date().toLocaleString()} — ${agentId} (${def.role}, ${def.model}, ${def.harness}) ═══\n`,
+      `\n\n# Session started ${new Date().toLocaleString()} — ${agent.id} (${agent.role}, ${agent.modelDefinition.id}, ${agent.harnessDefinition.id})\n`,
     );
-  } catch { /* best-effort */ }
-
-  log(agentId, `supervising ${agentId} (${def.role}, ${def.harness}) in ${workdir}`);
-
-  let session: string | null = null;
-  let turn = 0;
-  let cumTokens = 0;
-  let cumCost = 0;
-  let consecutiveFailures = 0;
+  } catch { /* best effort */ }
+  log(agentId, `supervising ${agent.id} via ${agent.harnessDefinition.id} in ${workdir}`);
 
   for (;;) {
     await brokerCall("/status", { token, status: "waiting" });
-    const res = await brokerCall<{ messages: Message[] }>(
+    const response = await brokerCall<{ messages: Message[] }>(
       "/wait",
-      { token, timeoutMs: MAX_WAIT_MS, reason: "supervisor holding the wait" },
+      { token, timeoutMs: MAX_WAIT_MS, reason: "supervisor holds the wait" },
       MAX_WAIT_MS + 15_000,
-    ).catch((err) => {
-      log(agentId, `broker wait failed: ${err.message}`);
+    ).catch((error) => {
+      log(agentId, `broker wait failed: ${error.message}`);
       return { messages: [] as Message[] };
     });
+    if (!response.messages.length) continue;
+    if (cancellationOnly(response.messages)) {
+      log(agentId, `received cancellation control; no model turn started`);
+      continue;
+    }
 
-    if (res.messages.length === 0) continue; // idle timeout, go straight back to waiting
-
-    log(
-      agentId,
-      `woke on ${res.messages.length} message(s): ` +
-        res.messages.map((m) => `${m.from}/${m.type}`).join(", "),
-    );
-    await brokerCall("/status", { token, status: "working" });
-
-    turn += 1;
-    const prompt =
-      def.harness === "aider"
-        ? buildSlavePrompt(res.messages)
-        : buildPrompt(res.messages);
-    const { code, stdout } = await runAgent(
-      def,
-      agentId,
-      prompt,
-      session,
-      workdir,
-    );
-    appendTranscript(agentId, turn, res.messages, def.harness, stdout, code);
-
-    // Accumulate and report usage so the GUI can show spend per agent/subscription.
-    const u = extractUsage(def.harness, stdout);
-    cumTokens += u.tokens;
-    cumCost += u.costUSD;
-    await brokerCall("/usage", {
-      token,
-      turns: turn,
-      tokens: cumTokens,
-      costUSD: cumCost,
-    }).catch(() => {});
-
-    // Most harnesses hand back a real session id to resume. Codex is the exception:
-    // it has no id in exec output, so "resume" is just a marker and `resume --last`
-    // reopens its most recent session.
-    const found = extractSession(def.harness, stdout);
-    if (found) session = found;
-    else if (def.harness === "codex" && code === 0) session = "resume";
-
-    // Aider cannot call bus_submit_work — it has no MCP tools. The supervisor
-    // auto-reports on its behalf: the ANSWER block from aider's output becomes
-    // the submission summary, and any task that woke us gets submitted.
-    if (code === 0 && def.harness === "aider") {
-      const answer = extractResponseText("aider", stdout);
-      // Find the task that woke us (if any) and submit it.
-      const taskMsg = res.messages.find((m) => m.taskId);
-      if (taskMsg?.taskId) {
-        await brokerCall("/task/submit", {
-          token,
-          taskId: taskMsg.taskId,
-          summary: answer.slice(0, 500),
-          details: "(auto-submitted by supervisor — aider has no bus tools)",
-        }).catch((err) => log(agentId, `auto-submit failed: ${err.message}`));
-        log(agentId, `auto-submitted task ${taskMsg.taskId} on behalf of aider`);
+    const relevantTasks = taskMessages(response.messages).filter((message) => !message.subject.startsWith("[CANCELLED"));
+    for (const message of relevantTasks) {
+      if (message.taskId && (message.type === "task" || message.subject.startsWith("[RETRY") || message.subject.startsWith("[REROUTED"))) {
+        await brokerCall("/task/start", { token, taskId: message.taskId }).catch(() => {});
       }
     }
+    await brokerCall("/status", { token, status: "working" });
+    const prompt = buildSupervisorPrompt(response.messages, agent);
+    const context: AdapterContext = {
+      agent,
+      prompt,
+      sessionId: session.sessionId,
+      workdir,
+      mcpServerPath: MCP_SERVER,
+      fakeHarnessPath: FAKE_HARNESS,
+      busEnvironment: { AGENT_TOKEN: token, AGENT_BUS_BLOCK_SEC: agent.harnessDefinition.id === "claude" ? "900" : "240" },
+    };
+    await adapter.prepare?.(context);
+    const invocation = adapter.build(context);
+    const processResult = await runHarnessProcess(invocation, agent, workdir, (childPid) => {
+      void reportPresence(token, agent, workdir, childPid);
+    });
+    const normalized = adapter.parse(processResult.output, processResult.code);
+    session.turns += 1;
+    session.inputTokens += normalized.usage.inputTokens;
+    session.outputTokens += normalized.usage.outputTokens;
+    session.totalTokens += normalized.usage.totalTokens;
+    session.costUSD += normalized.usage.costUSD;
+    session.latencyMs += processResult.durationMs;
+    if (normalized.sessionId) session.sessionId = normalized.sessionId;
+    writeSession(agentId, session);
+    appendTranscript(agent, session.turns, response.messages, normalized, processResult);
+    await brokerCall("/usage", { token, ...session }).catch(() => {});
 
-    if (code === 0) {
-      consecutiveFailures = 0;
-      log(agentId, `turn complete`);
-    } else {
+    const failed = processResult.code !== 0 || processResult.timedOut || normalized.malformed;
+    if (failed) {
       consecutiveFailures += 1;
-      const backoff = Math.min(60_000, 2_000 * 2 ** (consecutiveFailures - 1));
-      log(agentId, `turn FAILED (exit ${code}); backing off ${backoff / 1000}s`);
-      // Put the mail back so the work isn't silently dropped. We hold the agent's
-      // token, so this redelivers as the agent to itself — a self-addressed retry.
-      await brokerCall("/send", {
-        token,
-        to: agentId,
-        type: "info",
-        subject: "Retry: your previous turn failed",
-        body:
-          `Your last run exited with code ${code}. The messages below are being redelivered.\n\n` +
-          res.messages.map((m) => `${m.subject}\n${m.body}`).join("\n\n"),
-      }).catch(() => {});
-      await new Promise((r) => setTimeout(r, backoff));
+      const error = processResult.timedOut
+        ? `harness timed out after ${processResult.durationMs} ms`
+        : normalized.malformed
+          ? "harness returned malformed output"
+          : `harness exited ${processResult.code}`;
+      for (const message of relevantTasks) {
+        if (!message.taskId) continue;
+        await brokerCall("/task/failure", {
+          token,
+          taskId: message.taskId,
+          error,
+          exitCode: processResult.code,
+          malformed: normalized.malformed,
+        }).catch((brokerError) => log(agentId, `failure report rejected: ${brokerError.message}`));
+      }
+      const delay = retryDelayMs(consecutiveFailures);
+      log(agentId, `${error}; broker owns retry/reroute policy; backing off ${delay / 1000}s`);
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, delay));
+      continue;
     }
+
+    consecutiveFailures = 0;
+    if (invocation.autoReport) {
+      const structured = normalized.structured ?? {};
+      for (const message of relevantTasks) {
+        if (!message.taskId || message.type === "feedback" && message.subject.startsWith("[REVIEW")) continue;
+        await brokerCall("/task/submit", {
+          token,
+          taskId: message.taskId,
+          summary: normalized.text.slice(0, 20_000),
+          details: "auto-submitted by a harness adapter without native bus tool calls",
+          changedFiles: structuredArray(structured.changedFiles),
+          artifacts: structuredArray(structured.artifacts),
+          validation: structuredArray(structured.validation),
+          inputTokens: normalized.usage.inputTokens,
+          outputTokens: normalized.usage.outputTokens,
+          totalTokens: normalized.usage.totalTokens,
+          costUSD: normalized.usage.costUSD,
+        }).catch((error) => log(agentId, `auto-submit failed for ${message.taskId}: ${error.message}`));
+      }
+    }
+    log(agentId, `turn complete in ${processResult.durationMs} ms`);
   }
 }
