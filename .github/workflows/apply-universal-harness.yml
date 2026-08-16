@@ -1,13 +1,19 @@
-name: Apply universal harness prototype
+name: Apply final universal harness overlay
 
 on:
   push:
     branches: ["agent/universal-harness-prototype"]
-    paths: [".github/workflows/apply-universal-harness.yml"]
+    paths:
+      - ".github/agent-bus-overlay.*"
+      - ".github/workflows/apply-universal-harness.yml"
   workflow_dispatch:
 
 permissions:
   contents: write
+
+concurrency:
+  group: universal-harness-overlay
+  cancel-in-progress: false
 
 jobs:
   apply:
@@ -18,36 +24,64 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Materialize final overlay
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          chunks=(.github/agent-bus-overlay.*)
+          if (( ${#chunks[@]} == 0 )); then
+            echo "No overlay chunks remain; nothing to apply."
+            exit 0
+          fi
+
+          cat "${chunks[@]}" | base64 --decode > /tmp/agent-bus-overlay.gz
+          gzip --decompress --stdout /tmp/agent-bus-overlay.gz > /tmp/agent-bus-overlay
+
+          if tar --list --file /tmp/agent-bus-overlay >/tmp/overlay-list 2>/dev/null; then
+            first="$(head -n 1 /tmp/overlay-list || true)"
+            if [[ "$first" == agent-bus-proto/* ]]; then
+              tar --extract --file /tmp/agent-bus-overlay --strip-components=1 --directory .
+            else
+              tar --extract --file /tmp/agent-bus-overlay --directory .
+            fi
+          elif grep -q '^diff --git ' /tmp/agent-bus-overlay; then
+            git apply --index --binary /tmp/agent-bus-overlay
+          else
+            echo "Overlay is neither a tar archive nor a Git patch." >&2
+            file /tmp/agent-bus-overlay >&2 || true
+            exit 1
+          fi
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
 
-      - name: Apply implementation and publish branch
+      - name: Install, build and test
         shell: bash
         run: |
           set -euo pipefail
-          cat .github/agent-bus-payload.* | base64 --decode | gzip --decompress > /tmp/agent-bus.patch
-          git apply --index --binary --exclude='.github/**' /tmp/agent-bus.patch
+          npm ci
+          timeout 8m npm test
 
-          node <<'NODE'
-          const fs = require('node:fs');
-          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-          pkg.scripts.test = 'npm run build && npm run test:compile && mkdir -p dist-test && cp agent-bus.config.json dist-test/agent-bus.config.json && node --test dist-test/tests/*.test.js';
-          fs.writeFileSync('package.json', `${JSON.stringify(pkg, null, 2)}\n`);
-          NODE
-
-          rm -f .github/agent-bus-payload.* .github/export-trigger
+      - name: Publish materialized implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .github/agent-bus-overlay.* .github/export-trigger
+          rm -f .github/workflows/apply-universal-harness.yml
+          rm -f .github/workflows/bootstrap-deps.yml
+          rm -f .github/workflows/bootstrap-export.yml
+          rm -f .github/workflows/deps-export.yml
           rm -rf .github/patch-parts
 
           git config user.name "agent-bus builder"
           git config user.email "actions@github.com"
           git add -A
-          git commit -m "Build universal multi-model harness prototype"
+          if git diff --cached --quiet; then
+            echo "Nothing changed."
+            exit 0
+          fi
+          git commit -m "Apply final universal harness implementation"
           git push origin HEAD:agent/universal-harness-prototype
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build and test
-        run: npm test
