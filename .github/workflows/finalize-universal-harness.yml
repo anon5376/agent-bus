@@ -48,19 +48,19 @@ jobs:
 
           broker_path = Path("src/broker.ts")
           broker = broker_path.read_text()
-          old = '''    if (!task.readOnly && this.config.constraints.isolation === "path-locks" && task.runId) {
-              const projectRoot = this.taskProjectRoot(task);
-              if (!projectRoot) throw new Error(`cannot acquire path leases without a project root for ${task.id}`);
-              const lease = this.store.acquirePathLeases(task.id, task.runId, projectRoot, task.pathScopes.length ? task.pathScopes : ["."]);'''
-          new = '''    if (!task.readOnly && this.config.constraints.isolation === "path-locks") {
-              const projectRoot = this.taskProjectRoot(task);
-              if (!projectRoot) throw new Error(`cannot acquire path leases without a project root for ${task.id}`);
-              const leaseGroup = task.runId ?? `standalone:${projectRoot}`;
-              const lease = this.store.acquirePathLeases(task.id, leaseGroup, projectRoot, task.pathScopes.length ? task.pathScopes : ["."]);'''
-          if old in broker:
-              broker = broker.replace(old, new, 1)
-          elif new not in broker:
-              raise SystemExit("path lease patch marker missing")
+          old_condition = 'if (!task.readOnly && this.config.constraints.isolation === "path-locks" && task.runId) {'
+          new_condition = 'if (!task.readOnly && this.config.constraints.isolation === "path-locks") {'
+          if old_condition in broker:
+              broker = broker.replace(old_condition, new_condition, 1)
+          elif new_condition not in broker:
+              raise SystemExit("path lease condition marker missing")
+
+          old_lease = 'const lease = this.store.acquirePathLeases(task.id, task.runId, projectRoot, task.pathScopes.length ? task.pathScopes : ["."]);'
+          new_lease = 'const leaseGroup = task.runId ?? `standalone:${projectRoot}`;\n      const lease = this.store.acquirePathLeases(task.id, leaseGroup, projectRoot, task.pathScopes.length ? task.pathScopes : ["."]);'
+          if old_lease in broker:
+              broker = broker.replace(old_lease, new_lease, 1)
+          elif 'const leaseGroup = task.runId ?? `standalone:${projectRoot}`;' not in broker:
+              raise SystemExit("path lease call marker missing")
           broker_path.write_text(broker)
           PY
       - name: Validate complete prototype
