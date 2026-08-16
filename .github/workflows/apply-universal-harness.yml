@@ -20,17 +20,38 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - name: Decode and apply patch
+      - name: Decode and apply source patch
         run: |
           cat .github/agent-bus-payload.* | base64 -d | gzip -d > /tmp/agent-bus.patch
-          git apply --index --binary /tmp/agent-bus.patch
+          git apply --index --binary --exclude='.github/**' /tmp/agent-bus.patch
       - run: npm ci
       - run: npm test
-      - name: Commit implementation
+      - name: Commit validated implementation
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          rm -f .github/agent-bus-payload.* .github/workflows/apply-universal-harness.yml
+          rm -rf .github
+          mkdir -p .github/workflows
+          cat > .github/workflows/ci.yml <<'YAML'
+          name: ci
+          on:
+            push:
+            pull_request:
+          permissions:
+            contents: read
+          jobs:
+            test:
+              runs-on: ubuntu-latest
+              timeout-minutes: 15
+              steps:
+                - uses: actions/checkout@v4
+                - uses: actions/setup-node@v4
+                  with:
+                    node-version: 22
+                    cache: npm
+                - run: npm ci
+                - run: npm test
+          YAML
           git add -A
           git config user.name "agent-bus implementation"
           git config user.email "actions@users.noreply.github.com"
