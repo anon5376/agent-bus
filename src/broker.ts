@@ -511,10 +511,11 @@ export class BrokerService {
       this.store.saveTask(task);
       return false;
     }
-    if (!task.readOnly && this.config.constraints.isolation === "path-locks" && task.runId) {
+    if (!task.readOnly && this.config.constraints.isolation === "path-locks") {
       const projectRoot = this.taskProjectRoot(task);
       if (!projectRoot) throw new Error(`cannot acquire path leases without a project root for ${task.id}`);
-      const lease = this.store.acquirePathLeases(task.id, task.runId, projectRoot, task.pathScopes.length ? task.pathScopes : ["."]);
+      const leaseGroup = task.runId ?? `standalone:${projectRoot}`;
+      const lease = this.store.acquirePathLeases(task.id, leaseGroup, projectRoot, task.pathScopes.length ? task.pathScopes : ["."]);
       task.pathScopes = lease.normalized;
       if (!lease.acquired) {
         task.state = "blocked";

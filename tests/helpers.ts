@@ -20,6 +20,7 @@ export function testConfig(): BusConfig {
   config.roles.manager.families = ["fake-strong-family"];
   config.roles.planner.families = ["fake-strong-family"];
   config.roles.reviewer.families = ["fake-small-family", "fake-strong-family"];
+  config.roles.reviewer.minimumCapability = 0.20;
   config.roles.tester.families = ["fake-small-family", "fake-strong-family"];
   config.roles.research.families = ["fake-small-family", "fake-strong-family"];
   config.constraints.maxConcurrentTasks = 4;
