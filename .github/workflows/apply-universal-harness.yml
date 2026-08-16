@@ -13,7 +13,7 @@ permissions:
 
 concurrency:
   group: universal-harness-overlay
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   apply:
@@ -24,18 +24,34 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Wait for chunk upload to settle
+        shell: bash
+        run: |
+          set -euo pipefail
+          sleep 90
+          git fetch origin agent/universal-harness-prototype
+          git reset --hard origin/agent/universal-harness-prototype
+
       - name: Materialize final overlay
+        id: overlay
         shell: bash
         run: |
           set -euo pipefail
           shopt -s nullglob
           chunks=(.github/agent-bus-overlay.*)
           if (( ${#chunks[@]} == 0 )); then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
             echo "No overlay chunks remain; nothing to apply."
             exit 0
           fi
 
           cat "${chunks[@]}" | base64 --decode > /tmp/agent-bus-overlay.gz
+          if ! gzip --test /tmp/agent-bus-overlay.gz; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "Overlay upload is still incomplete after the settle window."
+            exit 0
+          fi
+          echo "ready=true" >> "$GITHUB_OUTPUT"
           gzip --decompress --stdout /tmp/agent-bus-overlay.gz > /tmp/agent-bus-overlay
 
           if tar --list --file /tmp/agent-bus-overlay >/tmp/overlay-list 2>/dev/null; then
@@ -46,7 +62,7 @@ jobs:
               tar --extract --file /tmp/agent-bus-overlay --directory .
             fi
           elif grep -q '^diff --git ' /tmp/agent-bus-overlay; then
-            git apply --index --binary /tmp/agent-bus-overlay
+            git apply --binary /tmp/agent-bus-overlay
           else
             echo "Overlay is neither a tar archive nor a Git patch." >&2
             file /tmp/agent-bus-overlay >&2 || true
@@ -54,11 +70,13 @@ jobs:
           fi
 
       - uses: actions/setup-node@v4
+        if: steps.overlay.outputs.ready == 'true'
         with:
           node-version: 22
           cache: npm
 
       - name: Install, build and test
+        if: steps.overlay.outputs.ready == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -66,6 +84,7 @@ jobs:
           timeout 8m npm test
 
       - name: Publish materialized implementation
+        if: steps.overlay.outputs.ready == 'true'
         shell: bash
         run: |
           set -euo pipefail
