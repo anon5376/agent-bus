@@ -18,24 +18,64 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Reconstruct and apply implementation
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Apply implementation and publish branch
         shell: bash
         run: |
           set -euo pipefail
-          cat .github/patch-parts/* | base64 --decode | gzip --decompress > /tmp/universal.patch
-          git apply --index /tmp/universal.patch
+          cat .github/agent-bus-payload.* | base64 --decode | gzip --decompress > /tmp/agent-bus.patch
+          git apply --index --binary --exclude='.github/**' /tmp/agent-bus.patch
+
+          node <<'NODE'
+          const fs = require('node:fs');
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          pkg.scripts.test = 'npm run build && npm run test:compile && mkdir -p dist-test && cp agent-bus.config.json dist-test/agent-bus.config.json && node --test dist-test/tests/*.test.js';
+          fs.writeFileSync('package.json', `${JSON.stringify(pkg, null, 2)}\n`);
+          NODE
+
+          rm -f .github/agent-bus-payload.* .github/export-trigger
           rm -rf .github/patch-parts
+          rm -f .github/workflows/bootstrap*.yml
           rm -f .github/workflows/apply-universal-harness.yml
+
+          cat > .github/workflows/ci.yml <<'YAML'
+          name: CI
+
+          on:
+            push:
+            pull_request:
+
+          permissions:
+            contents: read
+
+          jobs:
+            test:
+              runs-on: ubuntu-latest
+              steps:
+                - uses: actions/checkout@v4
+                - uses: actions/setup-node@v4
+                  with:
+                    node-version: 22
+                    cache: npm
+                - run: npm ci
+                - run: npm test
+
+            macos-gui:
+              runs-on: macos-14
+              steps:
+                - uses: actions/checkout@v4
+                - run: ./scripts/build-gui.sh
+          YAML
+
           git config user.name "agent-bus builder"
           git config user.email "actions@github.com"
           git add -A
           git commit -m "Build universal multi-model harness prototype"
           git push origin HEAD:agent/universal-harness-prototype
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
 
       - name: Install dependencies
         run: npm ci
