@@ -1,0 +1,23 @@
+name: bootstrap-deps
+on:
+  push:
+    branches: ["agent/universal-harness-prototype"]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  deps:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-bus-node-modules
+          path: node_modules
+          include-hidden-files: true
+          retention-days: 1
