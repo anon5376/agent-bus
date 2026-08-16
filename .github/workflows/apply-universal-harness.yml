@@ -1,0 +1,38 @@
+name: apply-universal-harness
+
+on:
+  push:
+    branches: ["agent/universal-harness-prototype"]
+    paths: [".github/workflows/apply-universal-harness.yml"]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Decode and apply patch
+        run: |
+          cat .github/agent-bus-payload.* | base64 -d | gzip -d > /tmp/agent-bus.patch
+          git apply --index --binary /tmp/agent-bus.patch
+      - run: npm ci
+      - run: npm test
+      - name: Commit implementation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          rm -f .github/agent-bus-payload.* .github/workflows/apply-universal-harness.yml
+          git add -A
+          git config user.name "agent-bus implementation"
+          git config user.email "actions@users.noreply.github.com"
+          git commit -m "Implement universal multi-model harness prototype"
+          git push origin HEAD:agent/universal-harness-prototype
