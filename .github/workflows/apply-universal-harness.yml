@@ -39,37 +39,6 @@ jobs:
 
           rm -f .github/agent-bus-payload.* .github/export-trigger
           rm -rf .github/patch-parts
-          rm -f .github/workflows/bootstrap*.yml
-          rm -f .github/workflows/apply-universal-harness.yml
-
-          cat > .github/workflows/ci.yml <<'YAML'
-          name: CI
-
-          on:
-            push:
-            pull_request:
-
-          permissions:
-            contents: read
-
-          jobs:
-            test:
-              runs-on: ubuntu-latest
-              steps:
-                - uses: actions/checkout@v4
-                - uses: actions/setup-node@v4
-                  with:
-                    node-version: 22
-                    cache: npm
-                - run: npm ci
-                - run: npm test
-
-            macos-gui:
-              runs-on: macos-14
-              steps:
-                - uses: actions/checkout@v4
-                - run: ./scripts/build-gui.sh
-          YAML
 
           git config user.name "agent-bus builder"
           git config user.email "actions@github.com"
