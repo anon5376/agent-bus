@@ -1,50 +1,51 @@
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import type { AgentPermissions, Authority } from "./config.js";
+import type { RoutingDecision } from "./router.js";
 
-export const BUS_HOME =
-  process.env.AGENT_BUS_HOME ?? join(homedir(), ".agent-bus");
-
+export const BUS_HOME = process.env.AGENT_BUS_HOME ?? join(homedir(), ".agent-bus");
 export const BUS_PORT = Number(process.env.AGENT_BUS_PORT ?? 7717);
-export const BUS_HOST = "127.0.0.1";
-export const BUS_URL = `http://${BUS_HOST}:${BUS_PORT}`;
-
-/** Longest a single broker long-poll may block. Under undici's 300s header timeout. */
+export const BUS_HOST = process.env.AGENT_BUS_HOST ?? "127.0.0.1";
+export const BUS_URL = process.env.AGENT_BUS_URL ?? `http://${BUS_HOST}:${BUS_PORT}`;
 export const MAX_WAIT_MS = 240_000;
 export const DEFAULT_WAIT_MS = 180_000;
-
-/**
- * How long `bus_wait` blocks overall. The MCP shim re-issues broker polls back to
- * back for this long, so the agent gets one uninterrupted call rather than a string
- * of empty timeouts it might decide to stop re-calling. Must stay under the host
- * CLI's own MCP tool timeout, which the launcher raises to an hour.
- */
 export const DEFAULT_BLOCK_MS = Number(process.env.AGENT_BUS_BLOCK_SEC ?? 900) * 1000;
 export const MAX_BLOCK_MS = 3_600_000;
-
-/** An agent is considered offline if it hasn't touched the broker in this long. */
 export const STALE_AGENT_MS = 15 * 60_000;
 
-export type MessageType =
-  | "task"
-  | "result"
-  | "feedback"
-  | "question"
-  | "answer"
-  | "info";
+export type MessageType = "task" | "result" | "feedback" | "question" | "answer" | "info" | "control";
+export type AgentStatus = "idle" | "working" | "waiting" | "offline" | "failed";
+export type TaskState =
+  | "blocked"
+  | "ready"
+  | "assigned"
+  | "in_progress"
+  | "submitted"
+  | "changes_requested"
+  | "accepted"
+  | "failed"
+  | "cancelled";
+export type ContextReferenceType = "path" | "artifact" | "summary" | "commit" | "url";
 
-export type AgentStatus = "idle" | "working" | "waiting" | "offline";
+export interface ContextReference {
+  type: ContextReferenceType;
+  value: string;
+  description?: string;
+  digest?: string;
+}
 
 export interface Agent {
   id: string;
-  /** Bearer token proving this identity; held only by the agent's own processes. */
-  token?: string;
   role: string;
   model: string;
+  family: string;
+  provider: string;
+  harness: string;
   description: string;
-  /** Which CLI harness runs this agent (claude, codex, opencode, kimi, grok…). */
-  harness?: string;
-  /** Human-readable auth source, for display (subscription vs credits). */
-  auth?: string;
+  auth: string;
+  authority: Authority;
+  permissions: AgentPermissions;
   status: AgentStatus;
   currentTaskId: string | null;
   registeredAt: number;
@@ -53,7 +54,6 @@ export interface Agent {
 
 export interface Message {
   id: string;
-  /** Monotonic delivery counter — the GUI uses it as a poll cursor. */
   seq: number;
   ts: number;
   from: string;
@@ -62,51 +62,139 @@ export interface Message {
   subject: string;
   body: string;
   taskId: string | null;
+  refs: ContextReference[];
 }
 
-export type TaskState =
-  | "assigned"
-  | "in_progress"
-  | "submitted"
-  | "changes_requested"
-  | "accepted"
-  | "cancelled";
-
-export interface Task {
+export interface ValidationRequirement {
   id: string;
-  title: string;
-  brief: string;
-  context: string;
-  assigner: string;
-  assignee: string;
-  state: TaskState;
-  round: number;
-  createdAt: number;
-  updatedAt: number;
-  /** Every submission and review, oldest first. */
-  history: TaskEvent[];
+  description: string;
+  command?: string;
+  required: boolean;
+}
+
+export interface ValidationObservation {
+  requirementId?: string;
+  command?: string;
+  passed: boolean;
+  summary: string;
+  artifact?: string;
+}
+
+export interface TaskResult {
+  summary: string;
+  details: string;
+  changedFiles: string[];
+  artifacts: ContextReference[];
+  validation: ValidationObservation[];
+  completedAt: number;
+}
+
+export interface TaskReview {
+  reviewer: string;
+  reviewerFamily: string | null;
+  accepted: boolean;
+  feedback: string;
+  reviewedAt: number;
+}
+
+export interface UsageMetrics {
+  turns: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  costUSD: number;
+  latencyMs: number;
 }
 
 export interface TaskEvent {
   ts: number;
   actor: string;
-  kind: "assigned" | "submitted" | "reviewed" | "cancelled";
+  kind:
+    | "created"
+    | "blocked"
+    | "assigned"
+    | "started"
+    | "submitted"
+    | "reviewed"
+    | "retry"
+    | "rerouted"
+    | "failed"
+    | "cancelled"
+    | "dependency_released";
   state: TaskState;
   note: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface Task {
+  id: string;
+  runId: string | null;
+  parentTaskId: string | null;
+  childTaskIds: string[];
+  dependencyIds: string[];
+  title: string;
+  brief: string;
+  /** Compatibility summary. Detailed context should use refs. */
+  context: string;
+  contextRefs: ContextReference[];
+  assigner: string;
+  assignee: string;
+  role: string;
+  complexity: number;
+  estimatedContextTokens: number;
+  readOnly: boolean;
+  pathScopes: string[];
+  validationRequirements: ValidationRequirement[];
+  state: TaskState;
+  round: number;
+  attempts: number;
+  maxRetries: number;
+  depth: number;
+  reviewRequired: boolean;
+  implementationFamily: string | null;
+  reviewerId: string | null;
+  routing: RoutingDecision | null;
+  reviewRouting: RoutingDecision | null;
+  result: TaskResult | null;
+  review: TaskReview | null;
+  usage: UsageMetrics;
+  createdAt: number;
+  updatedAt: number;
+  history: TaskEvent[];
+}
+
+export interface Run {
+  id: string;
+  goal: string;
+  projectRoot: string;
+  status: "active" | "completed" | "failed" | "cancelled";
+  rootTaskId: string | null;
+  createdBy: string;
+  constraints: Record<string, unknown>;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface ModelTelemetry {
+  agentId: string;
+  taskCount: number;
+  acceptedCount: number;
+  failedCount: number;
+  reviewRejectedCount: number;
+  averageLatencyMs: number;
+  averageTokens: number;
+  updatedAt: number;
+}
+
+export function emptyUsage(): UsageMetrics {
+  return { turns: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, costUSD: 0, latencyMs: 0 };
 }
 
 export function newId(prefix: string): string {
-  return `${prefix}_${Math.random().toString(36).slice(2, 8)}${Date.now()
-    .toString(36)
-    .slice(-4)}`;
+  return `${prefix}_${randomUUID().replace(/-/g, "").slice(0, 12)}`;
 }
 
-/** POST JSON to the broker and parse the reply. Throws on non-2xx. */
-export async function brokerCall<T = any>(
-  path: string,
-  payload: unknown,
-  timeoutMs = 20_000,
-): Promise<T> {
+export async function brokerCall<T = any>(path: string, payload: unknown, timeoutMs = 20_000): Promise<T> {
   const res = await fetch(`${BUS_URL}${path}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -114,17 +202,13 @@ export async function brokerCall<T = any>(
     signal: AbortSignal.timeout(timeoutMs),
   });
   const text = await res.text();
-  if (!res.ok) {
-    throw new Error(`broker ${path} -> ${res.status}: ${text.slice(0, 400)}`);
-  }
+  if (!res.ok) throw new Error(`broker ${path} -> ${res.status}: ${text.slice(0, 800)}`);
   return text ? (JSON.parse(text) as T) : ({} as T);
 }
 
 export async function brokerAlive(): Promise<boolean> {
   try {
-    const res = await fetch(`${BUS_URL}/health`, {
-      signal: AbortSignal.timeout(1200),
-    });
+    const res = await fetch(`${BUS_URL}/health`, { signal: AbortSignal.timeout(1200) });
     return res.ok;
   } catch {
     return false;

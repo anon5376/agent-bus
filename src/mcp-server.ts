@@ -2,7 +2,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { spawn } from "node:child_process";
-import { openSync } from "node:fs";
+import { mkdirSync, openSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
@@ -18,360 +18,361 @@ import {
 } from "./protocol.js";
 
 const AGENT_ID = process.env.AGENT_ID;
-if (!AGENT_ID) {
-  process.stderr.write(
-    "agent-bus: AGENT_ID env var is required (e.g. AGENT_ID=fable5).\n",
-  );
+const AGENT_TOKEN = process.env.AGENT_TOKEN;
+if (!AGENT_ID || !AGENT_TOKEN) {
+  process.stderr.write("agent-bus: AGENT_ID and AGENT_TOKEN are required. Provision through `agent-bus provision <id>`.\n");
   process.exit(1);
 }
 const AGENT_ROLE = process.env.AGENT_ROLE ?? "worker";
 const AGENT_MODEL = process.env.AGENT_MODEL ?? "unknown";
-const AGENT_DESC = process.env.AGENT_DESC ?? "";
 const DEFAULT_BLOCK_SEC = DEFAULT_BLOCK_MS / 1000;
 
-// ------------------------------------------------------------- bootstrap
-
-/**
- * Start the broker if nobody has yet. Every agent shim races to do this on
- * launch; the losers get EADDRINUSE from the broker process and exit, which is
- * harmless because the winner is already serving.
- */
 async function ensureBroker(): Promise<void> {
   if (await brokerAlive()) return;
+  mkdirSync(BUS_HOME, { recursive: true });
   const cli = join(fileURLToPath(new URL(".", import.meta.url)), "cli.js");
   const log = openSync(join(BUS_HOME, "broker.log"), "a");
-  spawn(process.execPath, [cli, "broker"], {
-    detached: true,
-    stdio: ["ignore", log, log],
-  }).unref();
-
-  for (let i = 0; i < 40; i++) {
-    await new Promise((r) => setTimeout(r, 150));
+  spawn(process.execPath, [cli, "broker"], { detached: true, stdio: ["ignore", log, log] }).unref();
+  for (let i = 0; i < 40; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 150));
     if (await brokerAlive()) return;
   }
-  throw new Error(
-    `could not reach the agent-bus broker; see ${join(BUS_HOME, "broker.log")}`,
-  );
+  throw new Error(`could not reach the broker; see ${join(BUS_HOME, "broker.log")}`);
 }
 
 let registered = false;
-/** This process's bearer token. Every mutating call carries it; it is what makes
- * `from` un-spoofable — we can only ever act as AGENT_ID. */
-let authToken = "";
-
 async function ensureRegistered(): Promise<void> {
   if (registered) return;
   await ensureBroker();
-  const res = await brokerCall<{ token?: string }>("/register", {
-    id: AGENT_ID,
-    role: AGENT_ROLE,
-    model: AGENT_MODEL,
-    description: AGENT_DESC,
-    harness: process.env.AGENT_HARNESS ?? "",
-    auth: process.env.AGENT_AUTH ?? "",
-  });
-  authToken = res.token ?? "";
+  await brokerCall("/register", { token: AGENT_TOKEN, id: AGENT_ID });
   registered = true;
 }
 
-/** brokerCall with our token attached — use for anything that acts as this agent. */
-function authCall<T = any>(path: string, payload: object, timeoutMs?: number) {
-  return brokerCall<T>(path, { ...payload, token: authToken }, timeoutMs);
+function authCall<T = any>(path: string, payload: object, timeoutMs?: number): Promise<T> {
+  return brokerCall<T>(path, { ...payload, token: AGENT_TOKEN }, timeoutMs);
 }
 
-// ------------------------------------------------------------- rendering
-
-function ago(ts: number): string {
-  const s = Math.round((Date.now() - ts) / 1000);
-  if (s < 60) return `${s}s ago`;
-  if (s < 3600) return `${Math.round(s / 60)}m ago`;
-  return `${Math.round(s / 3600)}h ago`;
-}
-
-function renderMessage(m: Message): string {
-  return [
-    `── from ${m.from} · ${m.type}${m.taskId ? ` · ${m.taskId}` : ""} · ${ago(m.ts)}`,
-    m.subject,
-    "",
-    m.body,
-  ].join("\n");
-}
-
-function renderMessages(messages: Message[], timedOut: boolean): string {
-  if (messages.length === 0) {
-    return timedOut
-      ? "No messages arrived before the timeout. Call bus_wait again to keep waiting."
-      : "Inbox is empty.";
-  }
-  return (
-    `${messages.length} message(s):\n\n` +
-    messages.map(renderMessage).join("\n\n")
-  );
-}
-
-function renderTask(t: Task): string {
-  return `${t.id} [${t.state}] "${t.title}" ${t.assigner} → ${t.assignee} (round ${t.round}, updated ${ago(t.updatedAt)})`;
-}
-
-function text(s: string) {
-  return { content: [{ type: "text" as const, text: s }] };
+function text(value: string) {
+  return { content: [{ type: "text" as const, text: value }] };
 }
 
 async function guarded(fn: () => Promise<string>) {
   try {
     await ensureRegistered();
     return text(await fn());
-  } catch (err) {
+  } catch (error) {
     return {
-      content: [
-        { type: "text" as const, text: `agent-bus error: ${(err as Error).message}` },
-      ],
+      content: [{ type: "text" as const, text: `agent-bus error: ${(error as Error).message}` }],
       isError: true,
     };
   }
 }
 
-// ------------------------------------------------------------- tools
+function ago(ts: number): string {
+  const seconds = Math.round((Date.now() - ts) / 1000);
+  if (seconds < 60) return `${seconds}s ago`;
+  if (seconds < 3600) return `${Math.round(seconds / 60)}m ago`;
+  return `${Math.round(seconds / 3600)}h ago`;
+}
 
-const server = new McpServer({ name: "agent-bus", version: "0.1.0" });
+function renderMessage(message: Message): string {
+  return [
+    `── from ${message.from} · ${message.type}${message.taskId ? ` · ${message.taskId}` : ""} · ${ago(message.ts)}`,
+    message.subject,
+    "",
+    message.body,
+    message.refs.length ? `\nReferences:\n${message.refs.map((ref) => `- ${ref.type}: ${ref.value}`).join("\n")}` : "",
+  ].filter(Boolean).join("\n");
+}
+
+function renderMessages(messages: Message[], timedOut: boolean): string {
+  if (!messages.length) return timedOut
+    ? "Nothing arrived before the timeout. Call bus_wait again if work is still outstanding."
+    : "Inbox is empty.";
+  return `${messages.length} message(s):\n\n${messages.map(renderMessage).join("\n\n")}`;
+}
+
+function renderTask(task: Task): string {
+  const deps = task.dependencyIds.length ? ` · deps ${task.dependencyIds.join(",")}` : "";
+  const route = task.routing?.selectedAgentId ? ` · routed ${task.routing.selectedAgentId}` : "";
+  return `${task.id} [${task.state}] ${task.assigner} → ${task.assignee || "unassigned"} · ${task.role} · c${task.complexity} · r${task.round}${deps}${route} · ${task.title}`;
+}
+
+async function inferredParentTaskId(): Promise<string | null> {
+  const { roster } = await brokerCall<{ roster: { id: string; currentTaskId?: string | null }[] }>("/roster", {});
+  return roster.find((agent) => agent.id === AGENT_ID)?.currentTaskId ?? null;
+}
+
+const contextRefSchema = z.object({
+  type: z.enum(["path", "artifact", "summary", "commit", "url"]),
+  value: z.string(),
+  description: z.string().optional(),
+  digest: z.string().optional(),
+});
+const validationRequirementSchema = z.object({
+  id: z.string().optional(),
+  description: z.string(),
+  command: z.string().optional(),
+  required: z.boolean().default(true),
+});
+const validationObservationSchema = z.object({
+  requirementId: z.string().optional(),
+  command: z.string().optional(),
+  passed: z.boolean(),
+  summary: z.string(),
+  artifact: z.string().optional(),
+});
+
+const server = new McpServer({ name: "agent-bus", version: "0.2.0" });
 
 server.tool(
   "bus_whoami",
-  "Your identity on the agent bus plus the current roster of agents, their status and pending mail. Call this first to learn who you can talk to.",
+  "Show your broker-enforced identity, authority, permissions, model/provider/harness and the live roster.",
   {},
-  async () =>
-    guarded(async () => {
-      const { roster } = await brokerCall("/roster", {});
-      const lines = roster.map(
-        (a: any) =>
-          `  ${a.id === AGENT_ID ? "*" : " "} ${a.id} (${a.role}, ${a.model}) — ${a.status}` +
-          `${a.currentTaskId ? ` on ${a.currentTaskId}` : ""}` +
-          `${a.pendingMessages ? ` · ${a.pendingMessages} unread` : ""}` +
-          `${a.description ? `\n      ${a.description}` : ""}`,
-      );
-      return `You are "${AGENT_ID}" (role: ${AGENT_ROLE}, model: ${AGENT_MODEL}).\n\nRoster:\n${lines.join("\n")}`;
-    }),
+  async () => guarded(async () => {
+    const { roster } = await brokerCall<{ roster: any[] }>("/roster", {});
+    const me = roster.find((agent) => agent.id === AGENT_ID);
+    const lines = roster.map((agent) =>
+      `  ${agent.id === AGENT_ID ? "*" : " "} ${agent.id} (${agent.role}; ${agent.family}/${agent.model} via ${agent.harness}) — ${agent.status}` +
+      `${agent.currentTaskId ? ` on ${agent.currentTaskId}` : ""}${agent.pendingMessages ? ` · ${agent.pendingMessages} unread` : ""}`,
+    );
+    return [
+      `You are ${AGENT_ID} (role ${AGENT_ROLE}, model ${AGENT_MODEL}).`,
+      `Authority: ${me?.authority ?? "unknown"}. Permissions: ${JSON.stringify(me?.permissions ?? {})}.`,
+      "",
+      "Roster:",
+      ...lines,
+    ].join("\n");
+  }),
 );
 
 server.tool(
   "bus_send",
-  "Send a free-form message to another agent (or to '*' for everyone). Use for questions, answers and status notes. For handing out work use bus_assign_task instead.",
+  "Send a concise question, answer, or status note. Use context references rather than pasting large artifacts.",
   {
-    to: z
-      .string()
-      .describe("Recipient agent id, a comma-separated list, or '*' for all"),
-    subject: z.string().describe("One-line subject"),
-    body: z.string().describe("Message body"),
-    type: z
-      .enum(["info", "question", "answer"])
-      .default("info")
-      .describe("Message kind"),
-    task_id: z
-      .string()
-      .optional()
-      .describe("Task this message relates to, if any"),
+    to: z.string().describe("Recipient id, comma-separated ids, or '*'"),
+    subject: z.string(),
+    body: z.string(),
+    type: z.enum(["info", "question", "answer"]).default("info"),
+    task_id: z.string().optional(),
+    refs: z.array(contextRefSchema).optional(),
   },
-  async ({ to, subject, body, type, task_id }) =>
-    guarded(async () => {
-      const res = await authCall("/send", {
-        from: AGENT_ID,
-        to,
-        subject,
-        body,
-        type,
-        taskId: task_id ?? null,
-      });
-      const delivered = res.delivered.map((d: any) => d.to).join(", ") || "nobody";
-      const unknown = res.unknownRecipients?.length
-        ? `\nNot registered (undelivered): ${res.unknownRecipients.join(", ")}`
-        : "";
-      return `Delivered to: ${delivered}${unknown}`;
-    }),
+  async ({ to, subject, body, type, task_id, refs }) => guarded(async () => {
+    const response = await authCall<any>("/send", { to, subject, body, type, taskId: task_id, refs: refs ?? [] });
+    const delivered = response.delivered?.map((item: any) => item.to).join(", ") || "nobody";
+    const unknown = response.unknownRecipients?.length ? `; unknown: ${response.unknownRecipients.join(", ")}` : "";
+    return `Delivered to ${delivered}${unknown}.`;
+  }),
 );
 
 server.tool(
   "bus_wait",
-  "BLOCK until another agent sends you something. This is how you idle between tasks — it costs no tokens while blocked, and it will not return until real mail arrives. Call it whenever you have nothing left to do; never end your turn with unfinished work and no wait outstanding.",
+  "Block without consuming model tokens until mail arrives. Do not use under a supervisor prompt; the supervisor owns the wait there.",
   {
-    timeout_sec: z
-      .number()
-      .int()
-      .min(1)
-      .max(MAX_BLOCK_MS / 1000)
-      .optional()
-      .describe(`How long to block. Default ${DEFAULT_BLOCK_SEC}s.`),
-    reason: z
-      .string()
-      .optional()
-      .describe("What you are waiting for, shown in the monitor"),
+    timeout_sec: z.number().int().min(1).max(MAX_BLOCK_MS / 1000).optional(),
+    reason: z.string().optional(),
   },
-  async ({ timeout_sec, reason }) =>
-    guarded(async () => {
-      const totalMs = Math.min(
-        (timeout_sec ?? DEFAULT_BLOCK_SEC) * 1000,
-        MAX_BLOCK_MS,
+  async ({ timeout_sec, reason }) => guarded(async () => {
+    const totalMs = Math.min((timeout_sec ?? DEFAULT_BLOCK_SEC) * 1000, MAX_BLOCK_MS);
+    const deadline = Date.now() + totalMs;
+    while (Date.now() < deadline) {
+      const chunk = Math.min(MAX_WAIT_MS, deadline - Date.now());
+      const response = await authCall<{ messages: Message[]; timedOut: boolean }>(
+        "/wait",
+        { timeoutMs: chunk, reason: reason ?? "" },
+        chunk + 15_000,
       );
-      const deadline = Date.now() + totalMs;
-
-      // Re-issue broker polls back to back. Each is capped by undici's header
-      // timeout, but the agent sees a single long block and is never handed an
-      // empty result it might choose not to follow up on.
-      while (Date.now() < deadline) {
-        const chunk = Math.min(MAX_WAIT_MS, deadline - Date.now());
-        const res = await authCall<{ messages: Message[]; timedOut: boolean }>(
-          "/wait",
-          { agentId: AGENT_ID, timeoutMs: chunk, reason: reason ?? "" },
-          chunk + 15_000,
-        );
-        if (res.messages.length > 0) {
-          await authCall("/status", { status: "idle" });
-          return renderMessages(res.messages, false);
-        }
+      if (response.messages.length) {
+        await authCall("/status", { status: "idle" });
+        return renderMessages(response.messages, false);
       }
-      return `Nothing arrived in ${Math.round(totalMs / 1000)}s. If you are still waiting on another agent, call bus_wait again now.`;
-    }),
+    }
+    return renderMessages([], true);
+  }),
 );
 
 server.tool(
   "bus_peek",
-  "Read and clear your inbox without blocking. Use when you want to check for mail mid-task; use bus_wait when you have nothing else to do.",
+  "Read and drain your inbox without blocking.",
   {},
-  async () =>
-    guarded(async () => {
-      const res = await authCall<{ messages: Message[] }>("/peek", {
-        agentId: AGENT_ID,
-      });
-      return renderMessages(res.messages, false);
-    }),
+  async () => guarded(async () => {
+    const response = await authCall<{ messages: Message[] }>("/peek", {});
+    return renderMessages(response.messages, false);
+  }),
+);
+
+server.tool(
+  "bus_route_task",
+  "Preview the deterministic routing decision and all candidate rejection reasons before creating a task.",
+  {
+    role: z.string(),
+    complexity: z.number().int().min(1).max(5),
+    context_tokens: z.number().int().min(0).default(8000),
+    write_access: z.boolean().default(false),
+    shell: z.boolean().default(false),
+    network: z.boolean().default(false),
+    families: z.array(z.string()).optional(),
+    providers: z.array(z.string()).optional(),
+    exact_model: z.string().optional(),
+    exact_agent: z.string().optional(),
+    implementation_family: z.string().optional(),
+  },
+  async (input) => guarded(async () => {
+    const { decision } = await brokerCall<any>("/route/preview", {
+      role: input.role,
+      complexity: input.complexity,
+      contextTokens: input.context_tokens,
+      writeAccess: input.write_access,
+      shell: input.shell,
+      network: input.network,
+      families: input.families,
+      providers: input.providers,
+      exactModel: input.exact_model,
+      exactAgent: input.exact_agent,
+      implementationFamily: input.implementation_family,
+    });
+    return [
+      decision.reason,
+      "",
+      ...decision.candidates.map((candidate: any) =>
+        `${candidate.eligible ? "ELIGIBLE" : "REJECTED"} ${candidate.agentId} score=${candidate.score.toFixed(3)}${candidate.rejectedBy.length ? ` — ${candidate.rejectedBy.join("; ")}` : ""}`,
+      ),
+    ].join("\n");
+  }),
 );
 
 server.tool(
   "bus_assign_task",
-  "Hand a unit of work to another agent. Creates a tracked task and notifies them. After assigning everything, call bus_wait to sleep until a worker reports back.",
+  "Create a dependency-aware child task. Omit `to` to let the router choose. The current task is used as parent unless explicitly overridden.",
   {
-    to: z.string().describe("Agent id of the worker"),
-    title: z.string().describe("Short task title"),
-    brief: z
-      .string()
-      .describe("What to do and what 'done' looks like. Be explicit — the worker has none of your context."),
-    context: z
-      .string()
-      .optional()
-      .describe("Files, constraints, prior decisions the worker needs"),
+    to: z.string().optional(),
+    title: z.string(),
+    brief: z.string().describe("Scoped objective and definition of done; assume the worker has no other context"),
+    role: z.string().default("implementation"),
+    complexity: z.number().int().min(1).max(5).default(3),
+    context: z.string().optional(),
+    context_refs: z.array(contextRefSchema).optional(),
+    parent_task_id: z.string().optional(),
+    dependencies: z.array(z.string()).optional(),
+    path_scopes: z.array(z.string()).optional(),
+    read_only: z.boolean().optional(),
+    estimated_context_tokens: z.number().int().min(0).optional(),
+    validation_requirements: z.array(validationRequirementSchema).optional(),
+    review_required: z.boolean().optional(),
+    families: z.array(z.string()).optional(),
+    providers: z.array(z.string()).optional(),
+    exact_model: z.string().optional(),
   },
-  async ({ to, title, brief, context }) =>
-    guarded(async () => {
-      const { task } = await authCall<{ task: Task }>("/task/create", {
-        assigner: AGENT_ID,
-        assignee: to,
-        title,
-        brief,
-        context: context ?? "",
-      });
-      return `Assigned ${task.id} to ${to}: "${title}".\nThey have been notified. Call bus_wait to sleep until they report back.`;
-    }),
+  async (input) => guarded(async () => {
+    const parentTaskId = input.parent_task_id ?? await inferredParentTaskId();
+    const { task } = await authCall<{ task: Task }>("/task/create", {
+      assignee: input.to,
+      title: input.title,
+      brief: input.brief,
+      role: input.role,
+      complexity: input.complexity,
+      context: input.context ?? "",
+      contextRefs: input.context_refs ?? [],
+      parentTaskId,
+      dependencies: input.dependencies ?? [],
+      pathScopes: input.path_scopes ?? [],
+      readOnly: input.read_only,
+      estimatedContextTokens: input.estimated_context_tokens,
+      validationRequirements: input.validation_requirements ?? [],
+      reviewRequired: input.review_required,
+      families: input.families ?? [],
+      providers: input.providers ?? [],
+      exactModel: input.exact_model,
+    });
+    return `${renderTask(task)}\nRouting: ${task.routing?.reason ?? "not available"}.`;
+  }),
 );
 
 server.tool(
   "bus_submit_work",
-  "Report a finished (or revised) task back to whoever assigned it, then wait for their review. Call this when you have actually completed the work.",
+  "Submit structured work: concise summary, changed files/artifacts and reproducible validation observations.",
   {
-    task_id: z.string().describe("Task id from the assignment message"),
-    summary: z.string().describe("What you did, in a few lines"),
-    details: z
-      .string()
-      .optional()
-      .describe("Files changed, commands run, test output, caveats"),
+    task_id: z.string(),
+    summary: z.string(),
+    details: z.string().optional(),
+    changed_files: z.array(z.string()).optional(),
+    artifacts: z.array(contextRefSchema).optional(),
+    validation: z.array(validationObservationSchema).optional(),
   },
-  async ({ task_id, summary, details }) =>
-    guarded(async () => {
-      const { task } = await authCall<{ task: Task }>("/task/submit", {
-        taskId: task_id,
-        actor: AGENT_ID,
-        summary,
-        details: details ?? "",
-      });
-      return `Submitted ${task.id} (round ${task.round}) to ${task.assigner}.\nCall bus_wait to sleep until their feedback arrives.`;
-    }),
+  async ({ task_id, summary, details, changed_files, artifacts, validation }) => guarded(async () => {
+    const { task } = await authCall<{ task: Task }>("/task/submit", {
+      taskId: task_id,
+      summary,
+      details: details ?? "",
+      changedFiles: changed_files ?? [],
+      artifacts: artifacts ?? [],
+      validation: validation ?? [],
+    });
+    return `Submitted ${task.id} round ${task.round}. Reviewer: ${task.reviewerId ?? task.assigner}.`;
+  }),
 );
 
 server.tool(
   "bus_review_work",
-  "Accept a submitted task or send it back with concrete changes. Only the agent who assigned the task should call this.",
+  "Accept submitted work or request a bounded revision. Broker authorization and independent-family rules are enforced.",
   {
-    task_id: z.string().describe("Task id being reviewed"),
-    accepted: z
-      .boolean()
-      .describe("true to close the task, false to request another round"),
-    feedback: z
-      .string()
-      .describe("Your review. If rejecting, list exactly what must change."),
+    task_id: z.string(),
+    accepted: z.boolean(),
+    feedback: z.string(),
   },
-  async ({ task_id, accepted, feedback }) =>
-    guarded(async () => {
-      const { task } = await authCall<{ task: Task }>("/task/review", {
-        taskId: task_id,
-        actor: AGENT_ID,
-        accepted,
-        feedback,
-      });
-      return accepted
-        ? `Accepted ${task.id}. ${task.assignee} has been notified and is now free.`
-        : `Sent ${task.id} back to ${task.assignee} for round ${task.round}.`;
-    }),
+  async ({ task_id, accepted, feedback }) => guarded(async () => {
+    const { task } = await authCall<{ task: Task }>("/task/review", { taskId: task_id, accepted, feedback });
+    return accepted ? `Accepted ${task.id}.` : `Requested changes on ${task.id}; round ${task.round}.`;
+  }),
 );
 
 server.tool(
   "bus_task_board",
-  "List tasks on the bus so you can see what is outstanding and who owns it.",
+  "List the durable task graph, including blocked dependencies and routing assignments.",
   {
-    mine_only: z
-      .boolean()
-      .default(true)
-      .describe("Only tasks you assigned or were assigned"),
-    include_closed: z
-      .boolean()
-      .default(false)
-      .describe("Include accepted and cancelled tasks"),
+    mine_only: z.boolean().default(true),
+    include_closed: z.boolean().default(false),
+    run_id: z.string().optional(),
   },
-  async ({ mine_only, include_closed }) =>
-    guarded(async () => {
-      const { tasks } = await brokerCall<{ tasks: Task[] }>("/task/list", {
-        agent: mine_only ? AGENT_ID : null,
-        openOnly: !include_closed,
-      });
-      if (tasks.length === 0) return "No matching tasks.";
-      return tasks.map(renderTask).join("\n");
-    }),
+  async ({ mine_only, include_closed, run_id }) => guarded(async () => {
+    const { tasks } = await brokerCall<{ tasks: Task[] }>("/task/list", {
+      agent: mine_only ? AGENT_ID : null,
+      openOnly: !include_closed,
+      runId: run_id,
+    });
+    return tasks.length ? tasks.map(renderTask).join("\n") : "No matching tasks.";
+  }),
 );
 
 server.tool(
   "bus_task_detail",
-  "Full record of one task including every submission and review round.",
+  "Show one task's graph links, scoped context, routing rationale, result, review and complete retry history.",
   { task_id: z.string() },
-  async ({ task_id }) =>
-    guarded(async () => {
-      const { task } = await brokerCall<{ task: Task }>("/task/get", {
-        taskId: task_id,
-      });
-      const history = task.history
-        .map((h) => `  ${new Date(h.ts).toLocaleTimeString()} ${h.actor} ${h.kind} → ${h.state}\n    ${h.note.replace(/\n/g, "\n    ")}`)
-        .join("\n");
-      return `${renderTask(task)}\n\nBrief:\n${task.brief}\n${task.context ? `\nContext:\n${task.context}\n` : ""}\nHistory:\n${history}`;
-    }),
+  async ({ task_id }) => guarded(async () => {
+    const { task, routingHistory } = await brokerCall<{ task: Task; routingHistory: any[] }>("/task/get", { taskId: task_id });
+    const history = task.history.map((event) =>
+      `  ${new Date(event.ts).toISOString()} ${event.actor} ${event.kind} → ${event.state}\n    ${event.note.replace(/\n/g, "\n    ")}`,
+    ).join("\n");
+    return [
+      renderTask(task),
+      `Parent: ${task.parentTaskId ?? "none"}; children: ${task.childTaskIds.join(", ") || "none"}; dependencies: ${task.dependencyIds.join(", ") || "none"}.`,
+      `Routing: ${task.routing?.reason ?? "none"}.`,
+      routingHistory.length > 1 ? `Routing attempts: ${routingHistory.map((decision) => decision.reason).join(" | ")}` : "",
+      `\nBrief:\n${task.brief}`,
+      task.context ? `\nContext summary:\n${task.context}` : "",
+      task.result ? `\nResult:\n${task.result.summary}` : "",
+      task.review ? `\nReview by ${task.review.reviewer}: ${task.review.accepted ? "accepted" : "changes requested"}\n${task.review.feedback}` : "",
+      `\nHistory:\n${history}`,
+    ].filter(Boolean).join("\n");
+  }),
 );
 
-// ------------------------------------------------------------- start
-
 async function main(): Promise<void> {
-  await ensureRegistered().catch((err) => {
-    // Don't die: the tools report the error and the session stays usable.
-    process.stderr.write(`agent-bus: ${(err as Error).message}\n`);
-  });
+  await ensureRegistered().catch((error) => process.stderr.write(`agent-bus: ${error.message}\n`));
   await server.connect(new StdioServerTransport());
 }
 
-main().catch((err) => {
-  process.stderr.write(`agent-bus fatal: ${err?.stack ?? err}\n`);
+main().catch((error) => {
+  process.stderr.write(`agent-bus fatal: ${error?.stack ?? error}\n`);
   process.exit(1);
 });
