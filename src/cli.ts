@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { mkdirSync, openSync, readFileSync } from "node:fs";
+import { mkdirSync, openSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { discoverHarnessModels, probeHarness } from "./adapters.js";
@@ -20,6 +20,11 @@ import {
   writePrivateToken,
 } from "./security.js";
 import { startBroker } from "./broker.js";
+import {
+  DASHBOARD_URL,
+  dashboardAlive,
+  startDashboard,
+} from "./dashboard.js";
 
 const ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 const CLI_PATH = join(ROOT, "cli.js");
@@ -51,6 +56,26 @@ async function ensureBrokerStarted(): Promise<void> {
   throw new Error(`could not start broker; see ${join(BUS_HOME, "broker.log")}`);
 }
 
+async function ensureDashboardStarted(): Promise<void> {
+  if (await dashboardAlive()) return;
+  await ensureBrokerStarted();
+  mkdirSync(BUS_HOME, { recursive: true });
+  const log = openSync(join(BUS_HOME, "dashboard.log"), "a");
+  spawn(process.execPath, [CLI_PATH, "dashboard"], { detached: true, stdio: ["ignore", log, log] }).unref();
+  for (let i = 0; i < 50; i += 1) {
+    await new Promise((resolveWait) => setTimeout(resolveWait, 120));
+    if (await dashboardAlive()) return;
+  }
+  throw new Error(`could not start dashboard; see ${join(BUS_HOME, "dashboard.log")}`);
+}
+
+function openUrl(url: string): void {
+  const command = process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open";
+  const args = process.platform === "win32" ? ["/c", "start", "", url] : [url];
+  const child = spawn(command, args, { detached: true, stdio: "ignore" });
+  child.unref();
+}
+
 async function provisionAgent(id: string, rotate = false): Promise<string> {
   await ensureBrokerStarted();
   const existingFile = readTokenFile(agentTokenPath(id));
@@ -65,10 +90,6 @@ async function provisionAgent(id: string, rotate = false): Promise<string> {
   }
   writePrivateToken(agentTokenPath(id), response.token);
   return response.token;
-}
-
-function supervisorPattern(agentId: string, workdir: string): string {
-  return `${CLI_PATH} supervise ${agentId} ${workdir}`;
 }
 
 function startSupervisor(agentId: string, workdir: string): number {
@@ -135,6 +156,35 @@ async function main(): Promise<void> {
   const command = process.argv[2] ?? "status";
 
   switch (command) {
+    case "start": {
+      await ensureBrokerStarted();
+      await ensureDashboardStarted();
+      if (!hasFlag("--no-open")) openUrl(DASHBOARD_URL);
+      console.log("Agent Bus is running.");
+      console.log(`Dashboard: ${DASHBOARD_URL}`);
+      console.log(`Broker:    ${BUS_URL}`);
+      return;
+    }
+
+    case "open": {
+      await ensureDashboardStarted();
+      openUrl(DASHBOARD_URL);
+      console.log(DASHBOARD_URL);
+      return;
+    }
+
+    case "dashboard": {
+      await ensureBrokerStarted();
+      const handle = await startDashboard();
+      const shutdown = async () => {
+        await handle.close().catch(() => {});
+        process.exit(0);
+      };
+      process.on("SIGINT", shutdown);
+      process.on("SIGTERM", shutdown);
+      return;
+    }
+
     case "broker": {
       const handle = await startBroker();
       const shutdown = async () => {
@@ -190,7 +240,7 @@ async function main(): Promise<void> {
       console.log(`root task: ${response.rootTask.id} → ${response.rootTask.assignee}`);
       console.log(`routing: ${response.rootTask.routing?.reason ?? "unavailable"}`);
       if (started.length) console.log(`supervisors: ${started.map((item) => `${item.id}:${item.pid}`).join(", ")}`);
-      console.log(`monitor: agent-bus watch`);
+      console.log(`dashboard: ${DASHBOARD_URL}`);
       return;
     }
 
@@ -291,8 +341,10 @@ async function main(): Promise<void> {
       console.log([
         "agent-bus — universal local harness for heterogeneous coding/research agents",
         "",
-        "  agent-bus run <project> --goal \"Implement X\"",
-        "  agent-bus broker",
+        "  agent-bus start [--no-open]               start broker + dashboard",
+        "  agent-bus open                            open the dashboard",
+        "  agent-bus run <project> --goal \"...\"     create an autonomous run",
+        "  agent-bus broker | dashboard              run services in foreground",
         "  agent-bus provision <agent-id> [--rotate]",
         "  agent-bus supervise <agent-id> [workdir]",
         "  agent-bus route <role> [--complexity 1..5] [--write] [--families gpt,claude]",
@@ -301,7 +353,8 @@ async function main(): Promise<void> {
         "  agent-bus status | watch | usage",
         "  agent-bus send <to> <subject> [body]",
         "",
-        `  broker: ${BUS_URL} · state: ${BUS_HOME}`,
+        `  dashboard: ${DASHBOARD_URL}`,
+        `  broker:    ${BUS_URL} · state: ${BUS_HOME}`,
       ].join("\n"));
   }
 }
