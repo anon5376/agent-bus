@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Agent Bus</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div class="brand"><span class="logo">AB</span><div><strong>Agent Bus</strong><span id="connection" class="muted">connecting…</span></div></div>
+      <div class="top-actions">
+        <button id="newRunBtn" class="primary">New run</button>
+        <button id="addAgentBtn">Add agent</button>
+        <button id="stopAllBtn" class="danger">Stop all</button>
+      </div>
+    </header>
+
+    <div class="layout">
+      <aside class="sidebar">
+        <section>
+          <div class="section-title">Runs</div>
+          <div id="runs" class="stack"></div>
+        </section>
+        <section>
+          <div class="section-title">Providers</div>
+          <div id="providers" class="stack compact"></div>
+        </section>
+      </aside>
+
+      <main class="main">
+        <section id="runHeader" class="run-header empty-state">
+          <div>
+            <div class="eyebrow">CONTROL ROOM</div>
+            <h1>No run selected</h1>
+            <p>Create a run or select one from the sidebar.</p>
+          </div>
+        </section>
+
+        <div class="grid">
+          <section class="panel task-panel">
+            <div class="panel-head"><span>Task graph</span><span id="taskCount" class="badge">0</span></div>
+            <div id="tasks" class="task-list"></div>
+          </section>
+
+          <section class="panel activity-panel">
+            <div class="panel-head"><span>Live activity</span><span id="messageCount" class="badge">0</span></div>
+            <div id="messages" class="message-list"></div>
+            <form id="messageForm" class="composer">
+              <select id="messageTo"></select>
+              <input id="messageText" placeholder="Send operator message…" autocomplete="off" />
+              <button class="primary">Send</button>
+            </form>
+          </section>
+        </div>
+      </main>
+
+      <aside class="agents-pane">
+        <div class="panel-head sticky"><span>Agents</span><span id="agentCount" class="badge">0</span></div>
+        <div id="agents" class="agent-list"></div>
+      </aside>
+    </div>
+  </div>
+
+  <dialog id="runDialog">
+    <form id="runForm" method="dialog" class="dialog-form">
+      <div class="dialog-head"><div><div class="eyebrow">NEW RUN</div><h2>Give the team an objective</h2></div><button type="button" class="icon" data-close="runDialog">×</button></div>
+      <label>Project directory<input id="projectRoot" required placeholder="/Users/you/code/project" /></label>
+      <label>Objective<textarea id="runGoal" required rows="5" placeholder="Implement…"></textarea></label>
+      <div class="dialog-actions"><button type="button" data-close="runDialog">Cancel</button><button class="primary" type="submit">Start run</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="agentDialog">
+    <form id="agentForm" method="dialog" class="dialog-form wide">
+      <div class="dialog-head"><div><div class="eyebrow">AGENT</div><h2>Add or edit an agent</h2></div><button type="button" class="icon" data-close="agentDialog">×</button></div>
+      <div class="two-col">
+        <label>Agent ID<input id="agentId" required placeholder="reviewer-2" /></label>
+        <label>Model<select id="agentModel"></select></label>
+        <label>Role<select id="agentRole"></select></label>
+        <label>Filesystem<select id="agentFilesystem"><option value="read">Read</option><option value="write">Write</option><option value="none">None</option></select></label>
+      </div>
+      <label>Description<input id="agentDescription" placeholder="Independent reviewer" /></label>
+      <div class="checks">
+        <label><input id="agentShell" type="checkbox" /> shell</label>
+        <label><input id="agentNetwork" type="checkbox" /> network</label>
+        <label><input id="agentReview" type="checkbox" /> can review</label>
+        <label><input id="agentDelegate" type="checkbox" /> can delegate</label>
+        <label><input id="agentAutoStart" type="checkbox" /> auto-start</label>
+      </div>
+      <div class="dialog-actions"><button type="button" data-close="agentDialog">Cancel</button><button class="primary" type="submit">Save agent</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="taskDialog">
+    <div class="dialog-form wide">
+      <div class="dialog-head"><div><div class="eyebrow">TASK</div><h2 id="taskDialogTitle">Task</h2></div><button type="button" class="icon" data-close="taskDialog">×</button></div>
+      <div id="taskDetail"></div>
+      <textarea id="taskFeedback" rows="4" placeholder="Review feedback…"></textarea>
+      <div class="dialog-actions split"><button id="cancelTaskBtn" class="danger">Cancel task</button><span></span><button id="requestChangesBtn">Request changes</button><button id="acceptTaskBtn" class="success">Accept</button></div>
+    </div>
+  </dialog>
+
+  <div id="toast" class="toast"></div>
+  <script src="/app.js"></script>
+</body>
+</html>
