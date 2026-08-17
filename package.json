@@ -9,7 +9,8 @@
   },
   "bin": {
     "agent-bus": "./dist/cli.js",
-    "agent-bus-mcp": "./dist/mcp-server.js"
+    "agent-bus-mcp": "./dist/mcp-server.js",
+    "agent-bus-openai-compatible": "./dist/openai-compatible-harness.js"
   },
   "scripts": {
     "build": "tsc",
