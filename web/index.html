@@ -12,6 +12,7 @@
       <div class="brand"><span class="logo">AB</span><div><strong>Agent Bus</strong><span id="connection" class="muted">connecting…</span></div></div>
       <div class="top-actions">
         <button id="newRunBtn" class="primary">New run</button>
+        <button id="addIntegrationBtn">Add model</button>
         <button id="addAgentBtn">Add agent</button>
         <button id="stopAllBtn" class="danger">Stop all</button>
       </div>
@@ -69,6 +70,34 @@
       <label>Project directory<input id="projectRoot" required placeholder="/Users/you/code/project" /></label>
       <label>Objective<textarea id="runGoal" required rows="5" placeholder="Implement…"></textarea></label>
       <div class="dialog-actions"><button type="button" data-close="runDialog">Cancel</button><button class="primary" type="submit">Start run</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="integrationDialog">
+    <form id="integrationForm" method="dialog" class="dialog-form wide">
+      <div class="dialog-head"><div><div class="eyebrow">MODEL INTEGRATION</div><h2>Connect another model</h2></div><button type="button" class="icon" data-close="integrationDialog">×</button></div>
+      <label>Integration type<select id="integrationKind"><option value="openai-compatible">OpenAI-compatible endpoint</option><option value="command">Custom CLI command</option></select></label>
+      <div class="two-col">
+        <label>Provider ID<input id="integrationProviderId" required placeholder="openrouter" /></label>
+        <label>Provider name<input id="integrationProviderName" placeholder="OpenRouter" /></label>
+        <label>Model ID<input id="integrationModelId" required placeholder="qwen3.5-72b" /></label>
+        <label>Exact model selector<input id="integrationExactModel" placeholder="qwen/qwen3.5-72b" /></label>
+        <label>Family<input id="integrationFamily" placeholder="qwen" /></label>
+        <label>Agent ID<input id="integrationAgentId" placeholder="qwen-worker" /></label>
+        <label>Role<select id="integrationRole"></select></label>
+        <label>Auth kind<select id="integrationAuthKind"><option value="api">API</option><option value="subscription">Subscription</option><option value="local">Local</option></select></label>
+      </div>
+      <div id="openAIFields" class="two-col">
+        <label>Base URL<input id="integrationBaseUrl" value="http://127.0.0.1:1234/v1" placeholder="https://api.example.com/v1" /></label>
+        <label>API key env var<input id="integrationApiKeyEnv" value="OPENAI_API_KEY" placeholder="OPENROUTER_API_KEY" /></label>
+      </div>
+      <div id="commandFields" hidden>
+        <label>Command<input id="integrationCommand" placeholder="my-model-cli" /></label>
+        <label>Arguments JSON<textarea id="integrationArgs" rows="4" placeholder='["run","--model","{model}","--prompt","{prompt}"]'></textarea></label>
+        <p class="muted">Placeholders: {prompt}, {model}, {modelId}, {family}, {provider}, {agentId}, {role}, {session}, {workdir}, {mcpServer}</p>
+      </div>
+      <label>Description<input id="integrationDescription" placeholder="Custom model worker" /></label>
+      <div class="dialog-actions"><button type="button" data-close="integrationDialog">Cancel</button><button class="primary" type="submit">Add integration</button></div>
     </form>
   </dialog>
 
