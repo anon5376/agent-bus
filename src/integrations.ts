@@ -1,10 +1,12 @@
 import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   AgentDefinition,
   BusConfig,
   CapabilityProfile,
   HarnessDefinition,
   ModelDefinition,
+  PROJECT_ROOT,
   ProviderDefinition,
   loadConfig,
   validateConfig,
@@ -41,9 +43,7 @@ function safeId(value: unknown, label: string): string {
   return id;
 }
 
-function defaultCapabilities(
-  source: CapabilityProfile["source"] = "user-configured",
-): CapabilityProfile {
+function defaultCapabilities(source: CapabilityProfile["source"] = "user-configured"): CapabilityProfile {
   return {
     coding: 0.65,
     reasoning: 0.65,
@@ -100,8 +100,11 @@ export function addOrUpdateIntegration(
   const modelId = safeId(input.modelId, "modelId");
   const harnessId = safeId(input.harnessId ?? `${providerId}-${kind}`, "harnessId");
   const agentId = safeId(input.agentId ?? modelId, "agentId");
-  const role = String(input.role ?? "implementation");
+  const role = String(input.role ?? (kind === "openai-compatible" ? "cheap-worker" : "implementation"));
   if (!config.roles[role]) throw new Error(`unknown role: ${role}`);
+  if (kind === "openai-compatible" && ["manager", "reviewer"].includes(role)) {
+    throw new Error("raw OpenAI-compatible endpoints cannot act as manager/reviewer because they do not have Agent Bus tools; use a tool-capable CLI harness for those roles");
+  }
 
   const provider: ProviderDefinition = {
     id: providerId,
@@ -114,9 +117,7 @@ export function addOrUpdateIntegration(
     notes: "Added through Agent Bus integration editor.",
   };
 
-  const command = kind === "openai-compatible"
-    ? "agent-bus-openai-compatible"
-    : String(input.command ?? "").trim();
+  const command = kind === "openai-compatible" ? process.execPath : String(input.command ?? "").trim();
   if (!command) throw new Error("command is required for command integrations");
   const harness: HarnessDefinition = {
     id: harnessId,
@@ -124,10 +125,12 @@ export function addOrUpdateIntegration(
     command,
     providers: [providerId],
     enabled: input.enabled !== false,
-    probeArgs: kind === "openai-compatible" ? ["--help"] : ["--version"],
+    probeArgs: kind === "openai-compatible"
+      ? [join(PROJECT_ROOT, "dist", "openai-compatible-harness.js"), "--help"]
+      : ["--version"],
     features: featureSet(false),
     notes: kind === "openai-compatible"
-      ? "Generic OpenAI-compatible chat-completions endpoint. This is a text model lane, not a coding harness with native MCP tools."
+      ? "Generic OpenAI-compatible chat-completions endpoint. Text-only lane: no native Agent Bus MCP tools."
       : "Generic command-template harness. Use a native adapter when deeper tool integration exists.",
   };
 
@@ -144,6 +147,7 @@ export function addOrUpdateIntegration(
 
   const args = kind === "openai-compatible"
     ? [
+        join(PROJECT_ROOT, "dist", "openai-compatible-harness.js"),
         "--base-url",
         String(input.baseUrl ?? "http://127.0.0.1:1234/v1"),
         "--model",
@@ -166,7 +170,7 @@ export function addOrUpdateIntegration(
     autoStart: Boolean(input.autoStart),
     permissions: {
       canDelegate: manager,
-      canReview: manager || role === "reviewer",
+      canReview: kind !== "openai-compatible" && (manager || role === "reviewer"),
       filesystem: kind === "openai-compatible" ? "read" : (role === "implementation" || role === "tester" ? "write" : "read"),
       shell: kind !== "openai-compatible",
       network: kind === "openai-compatible" || role === "research",
