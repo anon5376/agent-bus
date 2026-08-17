@@ -34,6 +34,10 @@ function parseArgs(): Args {
 }
 
 async function main(): Promise<void> {
+  if (process.argv.includes("--help") || process.argv.includes("-h")) {
+    process.stdout.write("agent-bus OpenAI-compatible harness\n\n--base-url URL --model MODEL --prompt TEXT [--api-key-env NAME]\n");
+    return;
+  }
   const args = parseArgs();
   const apiKey = process.env[args.apiKeyEnv] ?? "";
   const headers: Record<string, string> = { "content-type": "application/json" };
