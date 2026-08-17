@@ -19,6 +19,7 @@ import {
   loadConfig,
   validateConfig,
 } from "./config.js";
+import { addOrUpdateIntegration, IntegrationInput } from "./integrations.js";
 import { BUS_HOME, BUS_URL } from "./protocol.js";
 import {
   OPERATOR_TOKEN_PATH,
@@ -165,10 +166,7 @@ function requireOperatorToken(path: string): string {
   return token;
 }
 
-function requireDashboardSession(
-  req: IncomingMessage,
-  sessionCookie: string,
-): void {
+function requireDashboardSession(req: IncomingMessage, sessionCookie: string): void {
   if (parseCookies(req).agent_bus_dashboard !== sessionCookie) {
     throw new DashboardAuthError("dashboard session missing or expired");
   }
@@ -362,6 +360,19 @@ export async function startDashboard(options: DashboardOptions = {}): Promise<Da
 
       if (path === "/api/catalog" && req.method === "GET") {
         return sendJson(res, 200, await postBroker(brokerUrl, "/catalog", {}));
+      }
+
+      if (path === "/api/integrations" && req.method === "POST") {
+        const body = await readJson(req);
+        const result = addOrUpdateIntegration(configPath, body as unknown as IntegrationInput);
+        return sendJson(res, 200, {
+          provider: result.provider,
+          harness: result.harness,
+          model: result.model,
+          agent: result.agent,
+          restartRequired: true,
+          message: "Integration saved. Restart Agent Bus to load it into the broker roster and router.",
+        });
       }
 
       if (path === "/api/providers/status" && req.method === "GET") {
