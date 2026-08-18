@@ -130,8 +130,16 @@ try {
   unrelated.kill("SIGTERM");
   await new Promise((resolve) => unrelated.once("exit", resolve));
 
+  const malformedPath = join(temp, "malformed-config.json");
+  writeFileSync(malformedPath, "{ definitely-not-json\n");
+  const malformed = runCli({ ...env, AGENT_BUS_CONFIG: malformedPath }, "start", "--no-open");
+  assert.notEqual(malformed.status, 0, "malformed configuration must fail startup");
+  const diagnostic = `${malformed.stderr}${malformed.stdout}`;
+  assert.match(diagnostic, /Broker log tail:/i, "startup must surface the useful broker log tail");
+  assert.match(diagnostic, /could not parse|invalid JSON/i, "startup must surface the configuration parse failure");
+
   process.stdout.write("CLI lifecycle smoke passed\n");
 } finally {
   runCli(env, "stop");
-  rmSync(temp, { recursive: true, force: true });
+  rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 }
