@@ -17,10 +17,14 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Apply staged runtime instrumentation
-        if: github.event_name == 'push' && github.ref == 'refs/heads/fix/installed-dashboard-runtime'
+        if: (github.event_name == 'push' && github.ref == 'refs/heads/fix/installed-dashboard-runtime') || (github.event_name == 'pull_request' && github.head_ref == 'fix/installed-dashboard-runtime')
         run: |
           if [[ -f scripts/apply-runtime-instrumentation.mjs ]]; then
+            git fetch origin fix/installed-dashboard-runtime
+            git checkout -B fix/installed-dashboard-runtime origin/fix/installed-dashboard-runtime
             node scripts/apply-runtime-instrumentation.mjs
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
