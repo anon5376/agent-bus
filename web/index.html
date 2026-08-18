@@ -4,8 +4,9 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1.0" />
     <meta name="color-scheme" content="dark" />
-    <meta name="agent-bus-bootstrap" content="checkpoint-v2" />
+    <meta name="agent-bus-bootstrap" content="checkpoint-v3" />
     <title>Agent Bus</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/boot.css" />
   </head>
   <body>
@@ -21,11 +22,11 @@
           <li data-boot-stage="2"><b>2</b><span>entry module loaded</span><small>waiting</small></li>
           <li data-boot-stage="3"><b>3</b><span>app module imported</span><small>waiting</small></li>
           <li data-boot-stage="4"><b>4</b><span>React runtime loaded</span><small>waiting</small></li>
-          <li data-boot-stage="5"><b>5</b><span>createRoot called</span><small>waiting</small></li>
-          <li data-boot-stage="6"><b>6</b><span>render called</span><small>waiting</small></li>
+          <li data-boot-stage="5"><b>5</b><span>createRoot returned</span><small>waiting</small></li>
+          <li data-boot-stage="6"><b>6</b><span>render returned</span><small>waiting</small></li>
           <li data-boot-stage="7"><b>7</b><span>first React component executed</span><small>waiting</small></li>
-          <li data-boot-stage="8"><b>8</b><span>ticket exchange started</span><small>waiting</small></li>
-          <li data-boot-stage="9"><b>9</b><span>ticket exchange completed</span><small>waiting</small></li>
+          <li data-boot-stage="8"><b>8</b><span>ticket/session request started</span><small>waiting</small></li>
+          <li data-boot-stage="9"><b>9</b><span>ticket/session request completed</span><small>waiting</small></li>
           <li data-boot-stage="10"><b>10</b><span>dashboard mounted</span><small>waiting</small></li>
         </ol>
         <pre id="agent-bus-runtime" class="boot-runtime">Loading installed runtime identity…</pre>
