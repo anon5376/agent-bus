@@ -6,24 +6,34 @@ Agent Bus keeps independent model CLIs behind one durable broker: SQLite persist
 
 ## Quick start
 
-Requires Node.js 22.5 or newer.
+Requires macOS and Node.js 22.5 or newer.
 
 ```bash
 git clone https://github.com/anon5376/agent-bus.git
 cd agent-bus
-npm install
-npm run build
-npm link
+npm run install:global
 agent-bus start
 ```
 
-`agent-bus start` starts or reuses the localhost broker and opens the dashboard at:
+`npm run install:global` does the full local installation:
+
+- stops previous Agent Bus broker/dashboard/supervisor processes from older checkouts
+- removes stale `agent-bus`, `agent-bus-mcp`, and `agent-bus-openai-compatible` global launchers
+- runs `npm install` and builds the TypeScript broker plus React/Vite dashboard
+- installs stable launchers into `/usr/local/bin`, using `sudo` only when that directory requires it
+- preserves `~/.agent-bus`, including operator/agent credentials, SQLite state, run history, logs, and configuration
+
+After installation, `agent-bus` can be launched from any directory. Re-running the installer replaces the previous installation rather than stacking another one.
+
+`agent-bus start` starts or reuses the current localhost product server and opens the dashboard at:
 
 ```text
 http://127.0.0.1:7717
 ```
 
-Use `agent-bus open` to open an already-running dashboard. Directly visiting the URL does not grant operator privileges; the CLI issues a short-lived one-time browser login ticket derived from the private local operator credential.
+`agent-bus start` also detects and replaces an incompatible legacy broker/dashboard process before launching the current product server. Use `agent-bus stop` to terminate the broker/dashboard and supervised agents, and `agent-bus open` to open an already-running dashboard.
+
+Directly visiting the dashboard URL does not grant operator privileges. The CLI issues a short-lived one-time browser login ticket derived from the private local operator credential.
 
 Each real provider CLI must still be installed and authenticated through its own normal login flow. Finding a binary proves only that the executable exists. It does not prove subscription entitlement, login state, quota, or access to a particular model.
 
@@ -53,92 +63,117 @@ Ordinary agent configuration changes are validated, persisted to the configured 
 ```text
 agent-bus start [--no-open]               start/reuse Agent Bus and open the dashboard
 agent-bus open                            create a browser session and open the dashboard
+agent-bus stop                            stop broker/dashboard and supervised agents
 agent-bus run <project> --goal "..."      create a durable project run
 agent-bus broker                          run the localhost product server in foreground
 agent-bus provision <agent-id> [--rotate] provision/rotate an agent credential
 agent-bus supervise <agent-id> [workdir]  run one persistent supervisor
 agent-bus route <role> [options]          preview an inspectable routing decision
-agent-bus models [--discover]             inspect registry/discovered models
-agent-bus doctor                          probe harness executables
+agent-bus models [--discover]             inspect configured/discovered models
+agent-bus doctor                          probe harness executables only
 agent-bus status                          one-shot state view
-agent-bus watch                           live terminal state view
+agent-bus watch                           terminal live view
 agent-bus usage                           usage and latency totals
 agent-bus send <to> <subject> [body]      send an operator message
 ```
 
-Example:
+The old broker/MCP HTTP routes remain available on the same localhost server, so existing supervisors, MCP clients and CLI commands operate on exactly the same state as the dashboard.
+
+## Browser authentication
+
+The browser never receives the raw operator token.
+
+1. The broker keeps the operator credential in its private local token file and SQLite stores only its hash.
+2. `agent-bus start` or `agent-bus open` authenticates locally and requests a random, short-lived one-time browser ticket.
+3. The ticket is placed in the localhost URL and exchanged once for an HttpOnly `SameSite=Strict` session cookie.
+4. The ticket is immediately invalidated and removed from browser history with `history.replaceState`.
+5. Mutation APIs additionally require a matching same-origin `Origin` header.
+
+Simply requesting `/` or `/api/*` from another localhost process does not mint operator authority.
+
+## Projects and runs
+
+Add a local project path in the dashboard or start directly from the CLI:
 
 ```bash
-agent-bus doctor
-agent-bus models
 agent-bus run ~/code/project --goal "Implement X and validate it"
-agent-bus watch
 ```
 
-## Architecture
+Runs, tasks, messages, routing decisions, path leases and telemetry are persisted in SQLite. Recent projects are derived from durable runs plus explicitly added project paths.
+
+Stopping a run marks it cancelled and cancels every open task in that run through the broker's existing cancellation path.
+
+## Agents and models
+
+The repository registry preserves the existing hierarchy:
 
 ```text
-browser dashboard ─┐
-CLI / MCP agents ──┼── 127.0.0.1:7717
-                   │
-                   ▼
-              Agent Bus broker
-                   │
-        SQLite + JSONL audit state
-                   │
-   task DAG / routing / leases / telemetry
-                   │
-          independent supervisors
-                   │
-     normalized provider/harness adapters
+Provider → Harness → Model → Family → Agent → Role
 ```
 
-The model is explicit:
+The dashboard agent editor covers normal configuration including model, exact model selector, model family, role, reasoning/effort controls, permissions, enabled state and auto-start. Saved changes update the JSON registry and live broker roster; agent credentials are never exposed to React.
 
-`Provider → Harness → Model → Family → Agent → Role`
+Custom command and OpenAI-compatible endpoint integrations remain available through the config-driven integration layer. Raw text endpoints are intentionally not promoted to manager/reviewer agents because they lack the Agent Bus tool contract.
 
-Routing is deterministic and inspectable. It considers role requirements, complexity, context size, configured capability profiles, permissions, availability, provider/family policy, subscription preference, cost class, observed success/failure/latency, and independent-family review requirements.
+## Provider status
 
-Capability values are configuration/heuristics, not benchmark truth. Runtime observations are stored separately rather than silently rewriting model profiles.
+`agent-bus doctor` and the dashboard probe executables. They do **not** infer account entitlement from that result.
 
-## Authentication and local security
+Status is intentionally separated into:
 
-The broker stores hashes for operator/agent bearer credentials; raw credentials live only in private local files. Existing agent IDs cannot be reclaimed through unauthenticated registration.
+- configured/enabled
+- CLI executable found or unavailable
+- authentication source: subscription, API profile, or local runtime
+- live verification unknown/not required
+- safely discovered models where the harness exposes enumeration
 
-Browser authentication is separate from agent authentication:
+Real provider verification remains dependent on the installed CLI version, authenticated account, quota and exact model access.
 
-1. `agent-bus open` or `agent-bus start` reads the private operator credential locally.
-2. The CLI asks the broker for a short-lived, one-time browser ticket.
-3. The browser exchanges that ticket for an HttpOnly, SameSite=Strict session.
-4. Dashboard mutation APIs additionally require same-origin requests.
-5. Simply loading `/` never authenticates the browser.
+See [`docs/provider-support.md`](docs/provider-support.md) for the support matrix.
 
-The service binds to `127.0.0.1` by default. It does not silently bind to `0.0.0.0`.
+## Runtime architecture
 
-Path leases protect overlapping broker-scheduled write scopes, but they are not an OS sandbox. Coding CLIs may still have host permissions granted by their own invocation flags.
+```text
+browser dashboard / CLI / MCP
+             │
+             ▼
+127.0.0.1:7717
+single Agent Bus HTTP server
+             │
+             ├── React production assets
+             ├── /api/* + SSE /api/events
+             └── existing broker protocol routes
+                       │
+                       ▼
+          BrokerService / SQLite / router
+                       │
+                 supervisors
+                       │
+           normalized harness adapters
+```
 
-## Providers and models
-
-The repository contains normalized integration paths for Claude Code, Codex CLI, Gemini CLI, Kimi Code and OpenCode, plus adapter/configuration surfaces for local/custom command harnesses, OpenAI-compatible endpoints, Hermes and disabled Grok/xAI paths.
-
-Automated tests do not make real provider calls. The deterministic fake harness covers orchestration behavior without consuming subscription/API usage.
-
-See [`docs/provider-support.md`](docs/provider-support.md) for the explicit support vocabulary: implemented/tested, implemented/live-unverified, adapter-ready, researched path and unsupported.
+The browser does not own task, agent, run, routing or authorization state.
 
 ## Validation
 
 ```bash
-npm run build
 npm test
 ```
 
-The test suite covers the existing broker/harness behavior plus the product server: static SPA serving, browser authorization, one-time ticket replay prevention, same-origin mutation checks, project/run persistence, run stop semantics, SSE delivery, live agent configuration, malformed requests, registration security, task lifecycle, path leases, retries/rerouting, routing, persistence and deterministic harness execution.
+Automated tests use deterministic fake harnesses and do not consume Claude/OpenAI/Gemini/Kimi/etc. usage. Coverage includes the original routing/orchestration tests plus SPA serving, dashboard authentication, one-time ticket replay prevention, same-origin mutation enforcement, projects/runs, run stop, SSE, live agent configuration and malformed requests.
 
-GitHub Actions runs Node 22 build and test verification. Real provider entitlement and macOS browser/process behavior remain local verification items.
+CI is defined in [`.github/workflows/universal-harness-ci.yml`](.github/workflows/universal-harness-ci.yml).
 
-## More documentation
+## Security and limitations
+
+Agent Bus binds to `127.0.0.1` by default. It does not silently bind to `0.0.0.0`.
+
+Path leases coordinate writes but are not an OS sandbox. Powerful coding CLIs may have wider host permissions than their task contract, depending on harness settings.
+
+Real provider subscriptions are not exercised by CI. Claude Code, Codex, Gemini, Kimi and OpenCode therefore remain live-unverified against your specific local accounts until tested on the target Mac.
+
+See:
 
 - [`docs/architecture.md`](docs/architecture.md)
 - [`docs/provider-support.md`](docs/provider-support.md)
 - [`docs/security.md`](docs/security.md)
-- [`docs/prototype-report.md`](docs/prototype-report.md)
