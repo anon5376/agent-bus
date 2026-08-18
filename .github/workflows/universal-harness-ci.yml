@@ -5,16 +5,16 @@ on:
   push:
     branches:
       - main
-      - agent/universal-harness-prototype
-      - agent/web-dashboard
+      - fix/product-stability
 
 permissions:
   contents: read
 
 jobs:
   build-and-test:
+    name: Ubuntu build, browser, lifecycle
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -22,6 +22,58 @@ jobs:
           node-version: 22
           cache: npm
       - run: bash -n install.sh scripts/cleanup-old-installations.sh
-      - run: npm install
-      - run: npm run build
+      - run: google-chrome --version
+      - run: command -v lsof
+      - run: npm ci
+      - run: npm audit --audit-level=high
       - run: npm test
+
+  macos-install-smoke:
+    name: macOS global install and restart
+    runs-on: macos-14
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: command -v lsof && command -v open
+      - name: Install, launch from another directory, reinstall while running, and stop
+        run: |
+          set -euo pipefail
+          export AGENT_BUS_HOME="$RUNNER_TEMP/agent-bus-home"
+          export AGENT_BUS_INSTALL_DIR="$RUNNER_TEMP/agent-bus-bin"
+          mkdir -p "$AGENT_BUS_INSTALL_DIR" "$AGENT_BUS_HOME"
+          printf 'preserve-me\n' > "$AGENT_BUS_HOME/install-sentinel"
+
+          bash install.sh
+          export PATH="$AGENT_BUS_INSTALL_DIR:$PATH"
+          test "$(command -v agent-bus)" = "$AGENT_BUS_INSTALL_DIR/agent-bus"
+
+          cleanup() { agent-bus stop >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+
+          cd "$RUNNER_TEMP"
+          agent-bus start --no-open
+          health="$(curl -fsS http://127.0.0.1:7717/health)"
+          printf '%s\n' "$health" | grep '"product":"agent-bus"'
+          printf '%s\n' "$health" | grep '"dashboard":true'
+
+          agent-bus start --no-open
+
+          cd "$GITHUB_WORKSPACE"
+          bash install.sh
+          test "$(cat "$AGENT_BUS_HOME/install-sentinel")" = "preserve-me"
+
+          cd "$RUNNER_TEMP"
+          agent-bus start --no-open
+          curl -fsS http://127.0.0.1:7717/health | grep '"product":"agent-bus"'
+          agent-bus stop
+          sleep 0.3
+          if lsof -nP -iTCP:7717 -sTCP:LISTEN; then
+            echo "port 7717 is still listening after agent-bus stop" >&2
+            exit 1
+          fi
+          trap - EXIT

@@ -1,1 +1,20 @@
-<!doctype html><html><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/><meta name="color-scheme" content="dark"/><title>Agent Bus</title></head><body><div id="root"></div><script type="module" src="/src/main.tsx"></script></body></html>
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>Agent Bus</title>
+    <link rel="stylesheet" href="/boot.css" />
+  </head>
+  <body>
+    <div id="root">
+      <div id="agent-bus-boot" class="boot-fallback" role="status" aria-live="polite">
+        <strong>Starting Agent Bus…</strong>
+        <span>If this message remains visible, the dashboard JavaScript did not start. Run `agent-bus open` again or check browser JavaScript permissions for 127.0.0.1.</span>
+      </div>
+    </div>
+    <noscript>Agent Bus requires JavaScript. Enable JavaScript for 127.0.0.1 and run `agent-bus open` again.</noscript>
+    <script type="module" src="/src/entry.ts"></script>
+  </body>
+</html>

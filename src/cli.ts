@@ -1,68 +1,151 @@
 #!/usr/bin/env node
-import { execFileSync, spawn } from "node:child_process";
-import { mkdirSync, openSync } from "node:fs";
+import { spawn } from "node:child_process";
+import {
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+} from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { discoverHarnessModels, probeHarness } from "./adapters.js";
 import { BusConfig, enabledAgents, loadConfig } from "./config.js";
+import {
+  fetchHealth,
+  inspectPort,
+  stopAgentBusProcesses,
+  waitForPortFree,
+} from "./process-management.js";
 import { BUS_HOME, BUS_PORT, BUS_URL, Run, Task, brokerAlive, brokerCall } from "./protocol.js";
+import { productBuildId, PRODUCT_NAME, PRODUCT_PROTOCOL_VERSION } from "./product-runtime.js";
 import { OPERATOR_TOKEN_PATH, agentTokenPath, readTokenFile, writePrivateToken } from "./security.js";
 import { DASHBOARD_URL, startProductServer } from "./product-server.js";
 
 const ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 const CLI_PATH = join(ROOT, "cli.js");
+const STATIC_INDEX = join(ROOT, "dist", "web", "index.html");
+const BROKER_LOG = join(BUS_HOME, "broker.log");
+const BROKER_LOG_MAX_BYTES = 512 * 1024;
+const EXPECTED_BUILD_ID = productBuildId(join(ROOT, "dist", "web"));
 
 function flag(name:string):string|null{const i=process.argv.indexOf(name);return i>=0?String(process.argv[i+1]??""):null}
 function hasFlag(name:string):boolean{return process.argv.includes(name)}
-function operatorToken():string{const token=readTokenFile(OPERATOR_TOKEN_PATH);if(!token)throw new Error(`operator token missing at ${OPERATOR_TOKEN_PATH}; start the broker first`);return token}
+function operatorToken():string{const token=readTokenFile(OPERATOR_TOKEN_PATH);if(!token)throw new Error(`operator token missing at ${OPERATOR_TOKEN_PATH}; start Agent Bus first`);return token}
 
-async function productAlive():Promise<boolean>{
-  try{const response=await fetch(`${BUS_URL}/health`,{signal:AbortSignal.timeout(1200)});if(!response.ok)return false;const body=await response.json() as {dashboard?:boolean};return body.dashboard===true}catch{return false}
+function isCurrentHealth(health: Awaited<ReturnType<typeof fetchHealth>>): boolean {
+  return health?.product === PRODUCT_NAME
+    && health.productProtocol === PRODUCT_PROTOCOL_VERSION
+    && health.buildId === EXPECTED_BUILD_ID
+    && health.dashboard === true
+    && health.uiBuilt === true;
 }
 
-function agentBusPortListenerPids():number[]{
-  if(process.platform==="win32")return[];
-  try{
-    const output=execFileSync("lsof",["-nP","-t",`-iTCP:${BUS_PORT}`,"-sTCP:LISTEN"],{encoding:"utf8"});
-    return output.split("\n").map(line=>Number(line.trim())).filter(pid=>{
-      if(!Number.isFinite(pid)||pid<=0||pid===process.pid)return false;
-      try{
-        const command=execFileSync("ps",["-p",String(pid),"-o","command="],{encoding:"utf8"});
-        return /agent-bus|dist\/broker\.js|src\/broker\.(?:ts|js)/i.test(command);
-      }catch{return false}
-    });
-  }catch{return[]}
+function rotateBrokerLog(): void {
+  mkdirSync(BUS_HOME, { recursive: true });
+  if (!existsSync(BROKER_LOG)) return;
+  try {
+    if (statSync(BROKER_LOG).size <= BROKER_LOG_MAX_BYTES) return;
+    const previous = `${BROKER_LOG}.1`;
+    try { unlinkSync(previous); } catch {}
+    renameSync(BROKER_LOG, previous);
+  } catch {}
 }
 
-function legacyServicePids(includeSupervisors=false):number[]{
-  if(process.platform==="win32")return[];
-  try{
-    const output=execFileSync("ps",["-axo","pid=,command="],{encoding:"utf8"});
-    const action=includeSupervisors?"(?:broker|dashboard|supervise)":"(?:broker|dashboard)";
-    const pattern=new RegExp(`(?:\\/agent-bus\\/.*(?:dist\\/cli\\.js|cli\\.js)\\s+${action}(?:\\s|$)|\\/agent-bus\\/.*(?:dist\\/broker\\.js|src\\/broker\\.(?:ts|js))(?:\\s|$))`);
-    return output.split("\n").map(line=>{const match=line.trim().match(/^(\d+)\s+(.+)$/);if(!match||!pattern.test(match[2]))return 0;return Number(match[1])}).filter(pid=>pid>0&&pid!==process.pid);
-  }catch{return[]}
+function brokerLogTail(maxBytes = 16_000): string {
+  try {
+    const content = readFileSync(BROKER_LOG, "utf8");
+    return content.slice(-maxBytes).trim();
+  } catch {
+    return "";
+  }
 }
 
-async function stopLegacyServices(includeSupervisors=false):Promise<number>{
-  const pids=[...new Set([...legacyServicePids(includeSupervisors),...agentBusPortListenerPids()])];
-  for(const pid of pids){try{process.kill(-pid,"SIGTERM")}catch{try{process.kill(pid,"SIGTERM")}catch{/* already gone */}}}
-  if(pids.length)await new Promise(resolve=>setTimeout(resolve,500));
-  return pids.length;
+function unrelatedDiagnostic(owners: Awaited<ReturnType<typeof inspectPort>>): string | null {
+  const owner = owners.find((item) => item.kind === "unrelated");
+  if (!owner) return null;
+  return `Port ${BUS_PORT} is already owned by an unrelated process (PID ${owner.pid}${owner.command ? `: ${owner.command}` : ""}). Agent Bus will not terminate it.`;
 }
 
 async function ensureBrokerStarted():Promise<void>{
-  if(await productAlive())return;
-  if(await brokerAlive()||legacyServicePids(false).length||agentBusPortListenerPids().length){const stopped=await stopLegacyServices(false);if(stopped)process.stderr.write(`replaced ${stopped} legacy Agent Bus service process(es)\n`);for(let i=0;i<25&&(await brokerAlive()||agentBusPortListenerPids().length);i+=1)await new Promise(r=>setTimeout(r,80))}
-  mkdirSync(BUS_HOME,{recursive:true});
-  const log=openSync(join(BUS_HOME,"broker.log"),"a");
-  spawn(process.execPath,[CLI_PATH,"broker"],{detached:true,stdio:["ignore",log,log]}).unref();
-  for(let i=0;i<60;i+=1){await new Promise(r=>setTimeout(r,120));if(await productAlive())return}
-  throw new Error(`could not start Agent Bus; see ${join(BUS_HOME,"broker.log")}`);
+  if (!existsSync(STATIC_INDEX)) {
+    throw new Error(`dashboard build missing at ${STATIC_INDEX}; run \`npm run build\` and reinstall Agent Bus`);
+  }
+
+  const initialHealth = await fetchHealth(BUS_URL);
+  if (isCurrentHealth(initialHealth)) return;
+
+  const initialOwners = await inspectPort(BUS_PORT, BUS_URL, EXPECTED_BUILD_ID);
+  const unrelated = unrelatedDiagnostic(initialOwners);
+  if (unrelated) throw new Error(unrelated);
+
+  const stopped = await stopAgentBusProcesses({
+    port: BUS_PORT,
+    url: BUS_URL,
+    expectedBuildId: EXPECTED_BUILD_ID,
+    includeSupervisors: false,
+  });
+  if (stopped.unrelated.length) throw new Error(unrelatedDiagnostic(stopped.unrelated) ?? "Port is occupied by an unrelated process.");
+  if (stopped.stoppedPids.length) {
+    process.stderr.write(`replaced ${stopped.stoppedPids.length} previous Agent Bus service process(es)${stopped.forcedPids.length ? ` (${stopped.forcedPids.length} required SIGKILL)` : ""}\n`);
+  }
+  if (!(await waitForPortFree(BUS_PORT, 5000))) {
+    const owners = await inspectPort(BUS_PORT, BUS_URL, EXPECTED_BUILD_ID);
+    throw new Error(unrelatedDiagnostic(owners) ?? `Agent Bus could not release port ${BUS_PORT} after stopping the previous instance.`);
+  }
+
+  rotateBrokerLog();
+  const log = openSync(BROKER_LOG, "a");
+  const child = spawn(process.execPath, [CLI_PATH, "broker"], {
+    detached: true,
+    stdio: ["ignore", log, log],
+  });
+  child.unref();
+
+  for(let i=0;i<80;i+=1){
+    await new Promise(r=>setTimeout(r,120));
+    if (isCurrentHealth(await fetchHealth(BUS_URL))) return;
+    if (child.exitCode !== null) break;
+    const owners = await inspectPort(BUS_PORT, BUS_URL, EXPECTED_BUILD_ID);
+    const conflict = unrelatedDiagnostic(owners);
+    if (conflict) throw new Error(conflict);
+  }
+
+  const finalOwners = await inspectPort(BUS_PORT, BUS_URL, EXPECTED_BUILD_ID);
+  const conflict = unrelatedDiagnostic(finalOwners);
+  const tail = brokerLogTail();
+  throw new Error([
+    `Agent Bus failed to start at ${BUS_URL}.`,
+    conflict ?? "The broker process did not become healthy.",
+    tail ? `Broker log tail:\n${tail}` : "Broker log did not contain an error.",
+    `Log: ${BROKER_LOG}`,
+  ].join("\n"));
 }
 
-function openUrl(url:string):void{const command=process.platform==="darwin"?"open":process.platform==="win32"?"cmd":"xdg-open";const args=process.platform==="win32"?["/c","start","",url]:[url];spawn(command,args,{detached:true,stdio:"ignore"}).unref()}
-async function browserUrl():Promise<string>{await ensureBrokerStarted();const response=await fetch(`${BUS_URL}/dashboard/login`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({token:operatorToken()}),signal:AbortSignal.timeout(3000)});const text=await response.text();if(!response.ok)throw new Error(`could not create dashboard session: ${text}`);const body=JSON.parse(text) as {ticket:string};return `${DASHBOARD_URL}/?ticket=${encodeURIComponent(body.ticket)}`}
+function openUrl(url:string):void{const command=process.platform==="darwin"?"open":process.platform==="win32"?"cmd":"xdg-open";const args=process.platform==="win32"?["/c","start","",url]:[url];const child=spawn(command,args,{detached:true,stdio:"ignore"});child.unref()}
+
+async function browserUrl():Promise<string>{
+  await ensureBrokerStarted();
+  let response: Response;
+  try {
+    response = await fetch(`${BUS_URL}/dashboard/login`, {
+      method:"POST",
+      headers:{"content-type":"application/json"},
+      body:JSON.stringify({token:operatorToken()}),
+      signal:AbortSignal.timeout(3000),
+    });
+  } catch (error) {
+    throw new Error(`could not create browser session: ${(error as Error).message}`);
+  }
+  const text=await response.text();
+  if(!response.ok)throw new Error(`could not create browser session (${response.status}): ${text}`);
+  let body: {ticket?: string};
+  try { body=JSON.parse(text); } catch { throw new Error(`dashboard login returned malformed JSON: ${text.slice(0,500)}`); }
+  if(!body.ticket)throw new Error("dashboard login did not return a one-time ticket");
+  return `${DASHBOARD_URL}/?ticket=${encodeURIComponent(body.ticket)}`;
+}
 
 async function provisionAgent(id:string,rotate=false):Promise<string>{await ensureBrokerStarted();const existing=readTokenFile(agentTokenPath(id));if(existing&&!rotate)return existing;const response=await brokerCall<{token:string|null;message?:string}>("/agent/provision",{token:operatorToken(),id,rotate});if(!response.token)throw new Error(`${response.message??`identity ${id} already exists`} and ${agentTokenPath(id)} is missing; rerun with --rotate to replace it`);writePrivateToken(agentTokenPath(id),response.token);return response.token}
 function startSupervisor(agentId:string,workdir:string):number{mkdirSync(join(BUS_HOME,"logs"),{recursive:true});const log=openSync(join(BUS_HOME,"logs",`${agentId}.out`),"a");const child=spawn(process.execPath,[CLI_PATH,"supervise",agentId,workdir],{detached:true,stdio:["ignore",log,log]});child.unref();return child.pid??0}
@@ -74,7 +157,7 @@ function printModels(config:BusConfig):void{console.log("MODEL REGISTRY (capabil
 async function main():Promise<void>{const command=process.argv[2]??"status";switch(command){
 case "start":{await ensureBrokerStarted();const url=await browserUrl();if(!hasFlag("--no-open"))openUrl(url);console.log("Agent Bus is running.");console.log(`Dashboard: ${DASHBOARD_URL}`);return}
 case "open":{const url=await browserUrl();openUrl(url);console.log(DASHBOARD_URL);return}
-case "stop":{const stopped=await stopLegacyServices(true);console.log(stopped?`Stopped ${stopped} Agent Bus process(es).`:"Agent Bus is not running.");return}
+case "stop":{const result=await stopAgentBusProcesses({port:BUS_PORT,url:BUS_URL,expectedBuildId:EXPECTED_BUILD_ID,includeSupervisors:true});if(result.unrelated.length)console.log(`Preserved unrelated listener on port ${BUS_PORT}: PID ${result.unrelated[0].pid}${result.unrelated[0].command?` · ${result.unrelated[0].command}`:""}`);console.log(result.stoppedPids.length?`Stopped ${result.stoppedPids.length} Agent Bus process(es)${result.forcedPids.length?` (${result.forcedPids.length} forced)`:""}.`:"Agent Bus is not running.");return}
 case "broker":{const handle=await startProductServer();const shutdown=async()=>{await handle.close().catch(()=>{});process.exit(0)};process.on("SIGINT",shutdown);process.on("SIGTERM",shutdown);return}
 case "provision":{const id=process.argv[3];if(!id)throw new Error("usage: agent-bus provision <agent-id> [--rotate]");await provisionAgent(id,hasFlag("--rotate"));console.log(`${id} token stored at ${agentTokenPath(id)} (mode 0600)`);return}
 case "supervise":{const id=process.argv[3];const workdir=resolve(process.argv[4]??process.cwd());if(!id)throw new Error("usage: agent-bus supervise <agent-id> [workdir]");const {supervise}=await import("./supervisor.js");await supervise(id,workdir);return}
