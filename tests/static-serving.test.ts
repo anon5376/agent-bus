@@ -87,8 +87,9 @@ test("production static server separates SPA routes from assets and APIs", async
   assert.equal(healthBody.dashboard, true);
   assert.equal(healthBody.uiBuilt, true);
   assert.equal(healthBody.runtime.staticRoot, f.staticRoot);
-  assert.equal(healthBody.runtime.ui.scripts[0].url, "/assets/app-AbC123xY.js");
-  assert.equal(typeof healthBody.runtime.ui.scripts[0].sha256, "string");
+  const applicationScript = healthBody.runtime.ui.scripts.find((entry: any) => entry.url.startsWith("/assets/"));
+  assert.equal(applicationScript.url, "/assets/app-AbC123xY.js");
+  assert.equal(typeof applicationScript.sha256, "string");
 
   const diagnostics = await fetch(`${f.handle.url}/diagnostics/runtime`);
   assert.equal(diagnostics.status, 200);
