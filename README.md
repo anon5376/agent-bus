@@ -12,18 +12,21 @@ Requires macOS and Node.js 22.5 or newer.
 git clone https://github.com/anon5376/agent-bus.git
 cd agent-bus
 npm run install:global
+cd ~
 agent-bus start
 ```
 
 `npm run install:global` does the full local installation:
 
-- stops previous Agent Bus broker/dashboard/supervisor processes from older checkouts
-- removes stale `agent-bus`, `agent-bus-mcp`, and `agent-bus-openai-compatible` global launchers
-- runs `npm install` and builds the TypeScript broker plus React/Vite dashboard
-- installs stable launchers into `/usr/local/bin`, using `sudo` only when that directory requires it
-- preserves `~/.agent-bus`, including operator/agent credentials, SQLite state, run history, logs, and configuration
+- runs reproducible `npm ci` and builds the TypeScript broker plus production React/Vite dashboard
+- uses the newly built lifecycle code to stop previous Agent Bus broker/dashboard/supervisor processes safely
+- refuses to kill an unrelated application merely because it owns port `7717`
+- removes stale `agent-bus`, `agent-bus-mcp`, and `agent-bus-openai-compatible` launchers
+- installs stable launchers into an existing executable directory already on your `PATH` (`/opt/homebrew/bin`, `/usr/local/bin`, an active nvm/npm bin, or `~/.local/bin`)
+- hardcodes the currently selected Node executable into the launchers, so the command keeps using the Node installation it was built with
+- preserves `~/.agent-bus`, including operator/agent credentials, SQLite state, run history, and logs
 
-After installation, `agent-bus` can be launched from any directory. Re-running the installer replaces the previous installation rather than stacking another one.
+After installation, `agent-bus` can be launched from any directory. Re-running the installer replaces the previous installation rather than stacking another one. The installed launcher points at this checkout, so keep the clone in place; if you move it, rerun the installer from the new location.
 
 `agent-bus start` starts or reuses the current localhost product server and opens the dashboard at:
 
@@ -31,7 +34,7 @@ After installation, `agent-bus` can be launched from any directory. Re-running t
 http://127.0.0.1:7717
 ```
 
-`agent-bus start` also detects and replaces an incompatible legacy broker/dashboard process before launching the current product server. Use `agent-bus stop` to terminate the broker/dashboard and supervised agents, and `agent-bus open` to open an already-running dashboard.
+`agent-bus start` is idempotent. It reuses the exact current Agent Bus build, safely replaces an identifiable legacy/different Agent Bus build, and gives a clear diagnostic without killing anything if an unrelated application owns port `7717`. Use `agent-bus stop` to terminate Agent Bus broker/dashboard/supervisor processes, and `agent-bus open` to create a fresh browser session for an already-running dashboard.
 
 Directly visiting the dashboard URL does not grant operator privileges. The CLI issues a short-lived one-time browser login ticket derived from the private local operator credential.
 
@@ -56,7 +59,7 @@ The dashboard exposes real SQLite-backed Agent Bus state for:
 - operator messages
 - agent configuration without manually editing JSON
 
-Ordinary agent configuration changes are validated, persisted to the configured JSON registry, and applied to the running broker. Provider status deliberately distinguishes configured integrations, executable discovery, authentication source, and live verification.
+Ordinary agent configuration changes are validated, persisted to the configured JSON registry, and applied to the running broker. Provider status deliberately distinguishes configured integrations, executable discovery, authentication source, authentication/entitlement uncertainty, live verification, and safely discovered models.
 
 ## CLI
 
@@ -79,7 +82,7 @@ agent-bus send <to> <subject> [body]      send an operator message
 
 The old broker/MCP HTTP routes remain available on the same localhost server, so existing supervisors, MCP clients and CLI commands operate on exactly the same state as the dashboard.
 
-## Browser authentication
+## Browser authentication and boot diagnostics
 
 The browser never receives the raw operator token.
 
@@ -88,6 +91,8 @@ The browser never receives the raw operator token.
 3. The ticket is placed in the localhost URL and exchanged once for an HttpOnly `SameSite=Strict` session cookie.
 4. The ticket is immediately invalidated and removed from browser history with `history.replaceState`.
 5. Mutation APIs additionally require a matching same-origin `Origin` header.
+
+The production HTML contains a pre-React boot indicator. Global script/promise handlers, a bootstrap module, and a React error boundary replace silent blank pages with an on-page diagnostic if the frontend cannot load or render.
 
 Simply requesting `/` or `/api/*` from another localhost process does not mint operator authority.
 
@@ -124,6 +129,7 @@ Status is intentionally separated into:
 - configured/enabled
 - CLI executable found or unavailable
 - authentication source: subscription, API profile, or local runtime
+- authentication/entitlement unknown until proven by the provider
 - live verification unknown/not required
 - safely discovered models where the harness exposes enumeration
 
@@ -154,13 +160,27 @@ single Agent Bus HTTP server
 
 The browser does not own task, agent, run, routing or authorization state.
 
+## Static asset and cache contract
+
+- `index.html` is always `no-store`.
+- Vite hashed assets under `/assets/` are immutable and cacheable long-term.
+- non-hashed boot assets are revalidated.
+- missing assets and paths with file extensions return `404`; they never fall back to SPA HTML.
+- `/api` and `/api/*` never fall back to frontend HTML.
+- the CSP allows only the same-origin scripts/styles/network operations the built dashboard needs.
+- Agent Bus does not register a service worker.
+
 ## Validation
 
 ```bash
+npm ci
+npm audit --audit-level=high
 npm test
 ```
 
-Automated tests use deterministic fake harnesses and do not consume Claude/OpenAI/Gemini/Kimi/etc. usage. Coverage includes the original routing/orchestration tests plus SPA serving, dashboard authentication, one-time ticket replay prevention, same-origin mutation enforcement, projects/runs, run stop, SSE, live agent configuration and malformed requests.
+Automated tests use deterministic fake harnesses and do not consume Claude/OpenAI/Gemini/Kimi/etc. usage. CI validates TypeScript, the Vite production bundle, static/MIME/cache behavior, existing orchestration tests, browser ticket/session behavior in real headless Chrome, production React mounting, SSE/auth/malformed requests/persistence, process ownership, repeated start, legacy replacement, unrelated-port protection, surfaced startup errors, and CLI stop. A macOS Actions job also runs the global installer, starts Agent Bus from outside the checkout, reinstalls over a running instance, verifies persistent state survives, and confirms port `7717` is released by `agent-bus stop`.
+
+The committed lockfile is the source of dependency resolution. CI uses `npm ci`; it does not mutate dependencies during validation.
 
 CI is defined in [`.github/workflows/universal-harness-ci.yml`](.github/workflows/universal-harness-ci.yml).
 
