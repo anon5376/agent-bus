@@ -67,7 +67,7 @@ function cdpSocket(url) {
   return { ws, send, events, ready };
 }
 
-async function runChrome(url, profileDir, verify, label) {
+async function runChrome(url, profileDir, verify, label, beforeNavigate = null) {
   const debugPort = await freePort();
   const browser = spawn(chromeBinary(), [
     "--headless=new",
@@ -90,6 +90,7 @@ async function runChrome(url, profileDir, verify, label) {
     await cdp.send("Page.enable");
     await cdp.send("Runtime.enable");
     await cdp.send("Network.enable");
+    if (beforeNavigate) await beforeNavigate(cdp);
     await cdp.send("Page.navigate", { url });
 
     const deadline = Date.now() + 12_000;
@@ -152,6 +153,7 @@ const root = mkdtempSync(join(tmpdir(), "agent-bus-browser-"));
 const profile = join(root, "profile");
 const replayProfile = join(root, "replay-profile");
 const expiredProfile = join(root, "expired-profile");
+const failureProfile = join(root, "failure-profile");
 const operatorTokenPath = join(root, "operator.token");
 const config = fakeConfig();
 
@@ -181,6 +183,15 @@ try {
 
   const replay = await runChrome(`${handle.url}/?ticket=${encodeURIComponent(ticket)}`, replayProfile, async (state) => state.rootChildren > 0 && state.text.includes("invalid or expired"), "replayed ticket diagnostic");
   assert.match(replay.state.text, /invalid or expired/i);
+
+  const failedModule = await runChrome(
+    handle.url,
+    failureProfile,
+    async (state) => state.rootChildren > 0 && state.text.includes("frontend module failed to load") && state.phase === "failed",
+    "blocked frontend module diagnostic",
+    async (cdp) => cdp.send("Network.setBlockedURLs", { urls: ["*/assets/main-*.js"] }),
+  );
+  assert.match(failedModule.state.text, /frontend module failed to load/i);
 
   const expiredTokenPath = join(root, "expired-operator.token");
   expiredHandle = await startProductServer({
