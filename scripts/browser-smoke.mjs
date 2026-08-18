@@ -146,8 +146,9 @@ try {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ token }),
   });
-  assert.equal(ticketResponse.status, 200, await ticketResponse.text());
-  const { ticket } = await ticketResponse.json();
+  const ticketText = await ticketResponse.text();
+  assert.equal(ticketResponse.status, 200, ticketText);
+  const { ticket } = JSON.parse(ticketText);
   assert.ok(ticket);
 
   const first = await runChrome(`${handle.url}/?ticket=${encodeURIComponent(ticket)}`, profile, async (state, cdp) => {
