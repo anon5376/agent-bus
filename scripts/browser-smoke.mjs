@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -73,6 +73,7 @@ function cdpSocket(url) {
 
 async function runChrome(url, profileDir, verify, label, options = {}) {
   const debugPort = await freePort();
+  mkdirSync(profileDir, { recursive: true });
   const browser = spawn(chromeBinary(), [
     "--headless=new",
     "--no-sandbox",
@@ -80,6 +81,7 @@ async function runChrome(url, profileDir, verify, label, options = {}) {
     "--disable-dev-shm-usage",
     "--no-first-run",
     "--no-default-browser-check",
+    `--remote-debugging-address=127.0.0.1`,
     `--remote-debugging-port=${debugPort}`,
     `--user-data-dir=${profileDir}`,
     "about:blank",
@@ -87,7 +89,11 @@ async function runChrome(url, profileDir, verify, label, options = {}) {
   let stderr = "";
   browser.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
   try {
-    await waitForJson(`http://127.0.0.1:${debugPort}/json/version`);
+    try {
+      await waitForJson(`http://127.0.0.1:${debugPort}/json/version`);
+    } catch (error) {
+      throw new Error(`${error.message}\nChrome exit=${browser.exitCode} signal=${browser.signalCode}\n${stderr.slice(-5000)}`);
+    }
     const targets = await waitForJson(`http://127.0.0.1:${debugPort}/json/list`);
     const page = targets.find((target) => target.type === "page");
     assert.ok(page?.webSocketDebuggerUrl, `${label}: no debuggable page target`);
@@ -206,7 +212,7 @@ async function verifyRuntimeAssets(baseUrl) {
   assert.match(bodies.get("/") ?? "", /data-boot-stage="10"/);
   const applicationScript = runtime.ui.scripts.find((entry) => entry.url.startsWith("/assets/"));
   const applicationBody = bodies.get(applicationScript.url) ?? "";
-  assert.match(applicationBody, /createRoot invocation reached/);
+  assert.match(applicationBody, /createRoot returned successfully/);
   assert.match(applicationBody, /POST \/api\/session started/);
   assert.match(applicationBody, /authenticated dashboard committed to the DOM/);
   return diagnostic;

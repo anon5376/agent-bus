@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -165,7 +165,7 @@ assert.equal(runtime.nodeVersion, process.version);
 assert.equal(resolve(runtime.cwd), resolve(process.cwd()));
 assert.equal(Number(runtime.pid), Number(command("lsof", "-nP", "-t", "-iTCP:7717", "-sTCP:LISTEN")));
 const processCommand = command("ps", "-p", String(runtime.pid), "-o", "command=");
-assert.match(processCommand, /\.agent-bus\/app\/current\/cli\.js broker|\.agent-bus\/app\/releases\/[^/]+\/cli\.js broker/);
+assert.ok(processCommand.includes(`${releaseRoot}/cli.js broker`), `running PID command mismatch: ${processCommand}`);
 const cwdOutput = command("lsof", "-a", "-p", String(runtime.pid), "-d", "cwd", "-Fn");
 assert.ok(cwdOutput.split("\n").some((line) => line === `n${runtime.cwd}`), `running PID cwd mismatch: ${cwdOutput}`);
 
@@ -183,7 +183,7 @@ for (const artifact of artifacts) {
 assert.match(artifactBodies.get("/").toString("utf8"), /data-boot-stage="10"/);
 const applicationScript = runtime.ui.scripts.find((entry) => entry.url.startsWith("/assets/"));
 assert.ok(applicationScript);
-assert.match(artifactBodies.get(applicationScript.url).toString("utf8"), /createRoot invocation reached/);
+assert.match(artifactBodies.get(applicationScript.url).toString("utf8"), /createRoot returned successfully/);
 
 const operatorToken = readFileSync(join(busHome, "operator.token"), "utf8").trim();
 const loginResponse = await fetch(`${baseUrl}/dashboard/login`, {
@@ -198,6 +198,8 @@ assert.ok(ticket);
 
 const browserRoot = mkdtempSync(join(tmpdir(), "agent-bus-installed-browser-"));
 const debugPort = await freePort();
+const profilePath = join(browserRoot, "profile");
+mkdirSync(profilePath, { recursive: true });
 const browser = spawn(chromeBinary(), [
   "--headless=new",
   "--no-sandbox",
@@ -205,15 +207,20 @@ const browser = spawn(chromeBinary(), [
   "--disable-dev-shm-usage",
   "--no-first-run",
   "--no-default-browser-check",
+  `--remote-debugging-address=127.0.0.1`,
   `--remote-debugging-port=${debugPort}`,
-  `--user-data-dir=${join(browserRoot, "profile")}`,
+  `--user-data-dir=${profilePath}`,
   "about:blank",
 ], { stdio: ["ignore", "pipe", "pipe"] });
 let browserError = "";
 browser.stderr.on("data", (chunk) => { browserError += chunk.toString(); });
 
 try {
-  await waitForJson(`http://127.0.0.1:${debugPort}/json/version`);
+  try {
+    await waitForJson(`http://127.0.0.1:${debugPort}/json/version`);
+  } catch (error) {
+    throw new Error(`${error.message}\nChrome exit=${browser.exitCode} signal=${browser.signalCode}\n${browserError.slice(-5000)}`);
+  }
   const targets = await waitForJson(`http://127.0.0.1:${debugPort}/json/list`);
   const page = targets.find((target) => target.type === "page");
   assert.ok(page?.webSocketDebuggerUrl);

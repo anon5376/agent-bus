@@ -112,7 +112,7 @@ function AgentModal({catalog,existing,close,onDone,onToast}:{catalog:Catalog;exi
 
 const rootElement=document.getElementById("root");
 if(!rootElement)throw new Error("Agent Bus root element is missing");
-checkpoint(5,"createRoot invocation reached");
 const reactRoot=createRoot(rootElement);
-checkpoint(6,"React root created; render invocation reached");
+checkpoint(5,"createRoot returned successfully");
 reactRoot.render(<AppErrorBoundary><App/></AppErrorBoundary>);
+checkpoint(6,"render returned successfully");
