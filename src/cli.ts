@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { mkdirSync, openSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,12 +16,34 @@ function flag(name:string):string|null{const i=process.argv.indexOf(name);return
 function hasFlag(name:string):boolean{return process.argv.includes(name)}
 function operatorToken():string{const token=readTokenFile(OPERATOR_TOKEN_PATH);if(!token)throw new Error(`operator token missing at ${OPERATOR_TOKEN_PATH}; start the broker first`);return token}
 
+async function productAlive():Promise<boolean>{
+  try{const response=await fetch(`${BUS_URL}/health`,{signal:AbortSignal.timeout(1200)});if(!response.ok)return false;const body=await response.json() as {dashboard?:boolean};return body.dashboard===true}catch{return false}
+}
+
+function legacyServicePids(includeSupervisors=false):number[]{
+  if(process.platform==="win32")return[];
+  try{
+    const output=execFileSync("ps",["-axo","pid=,command="],{encoding:"utf8"});
+    const action=includeSupervisors?"(?:broker|dashboard|supervise)":"(?:broker|dashboard)";
+    const pattern=new RegExp(`\\/agent-bus\\/.*(?:dist\\/cli\\.js|cli\\.js)\\s+${action}(?:\\s|$)`);
+    return output.split("\n").map(line=>{const match=line.trim().match(/^(\d+)\s+(.+)$/);if(!match||!pattern.test(match[2]))return 0;return Number(match[1])}).filter(pid=>pid>0&&pid!==process.pid);
+  }catch{return[]}
+}
+
+async function stopLegacyServices(includeSupervisors=false):Promise<number>{
+  const pids=[...new Set(legacyServicePids(includeSupervisors))];
+  for(const pid of pids){try{process.kill(-pid,"SIGTERM")}catch{try{process.kill(pid,"SIGTERM")}catch{/* already gone */}}}
+  if(pids.length)await new Promise(resolve=>setTimeout(resolve,500));
+  return pids.length;
+}
+
 async function ensureBrokerStarted():Promise<void>{
-  if(await brokerAlive())return;
+  if(await productAlive())return;
+  if(await brokerAlive()||legacyServicePids(false).length){const stopped=await stopLegacyServices(false);if(stopped)process.stderr.write(`replaced ${stopped} legacy Agent Bus service process(es)\n`);for(let i=0;i<25&&await brokerAlive();i+=1)await new Promise(r=>setTimeout(r,80))}
   mkdirSync(BUS_HOME,{recursive:true});
   const log=openSync(join(BUS_HOME,"broker.log"),"a");
   spawn(process.execPath,[CLI_PATH,"broker"],{detached:true,stdio:["ignore",log,log]}).unref();
-  for(let i=0;i<60;i+=1){await new Promise(r=>setTimeout(r,120));if(await brokerAlive())return}
+  for(let i=0;i<60;i+=1){await new Promise(r=>setTimeout(r,120));if(await productAlive())return}
   throw new Error(`could not start Agent Bus; see ${join(BUS_HOME,"broker.log")}`);
 }
 
@@ -38,6 +60,7 @@ function printModels(config:BusConfig):void{console.log("MODEL REGISTRY (capabil
 async function main():Promise<void>{const command=process.argv[2]??"status";switch(command){
 case "start":{await ensureBrokerStarted();const url=await browserUrl();if(!hasFlag("--no-open"))openUrl(url);console.log("Agent Bus is running.");console.log(`Dashboard: ${DASHBOARD_URL}`);return}
 case "open":{const url=await browserUrl();openUrl(url);console.log(DASHBOARD_URL);return}
+case "stop":{const stopped=await stopLegacyServices(true);console.log(stopped?`Stopped ${stopped} Agent Bus process(es).`:"Agent Bus is not running.");return}
 case "broker":{const handle=await startProductServer();const shutdown=async()=>{await handle.close().catch(()=>{});process.exit(0)};process.on("SIGINT",shutdown);process.on("SIGTERM",shutdown);return}
 case "provision":{const id=process.argv[3];if(!id)throw new Error("usage: agent-bus provision <agent-id> [--rotate]");await provisionAgent(id,hasFlag("--rotate"));console.log(`${id} token stored at ${agentTokenPath(id)} (mode 0600)`);return}
 case "supervise":{const id=process.argv[3];const workdir=resolve(process.argv[4]??process.cwd());if(!id)throw new Error("usage: agent-bus supervise <agent-id> [workdir]");const {supervise}=await import("./supervisor.js");await supervise(id,workdir);return}
@@ -49,5 +72,5 @@ case "status":{if(!(await brokerAlive()))throw new Error(`broker not running at 
 case "watch":{if(!(await brokerAlive()))throw new Error(`broker not running at ${BUS_URL}`);const tick=async()=>{const content=await renderState().catch(e=>`broker unreachable: ${e.message}`);process.stdout.write(`\x1b[2J\x1b[H\x1b[1magent-bus\x1b[0m ${new Date().toLocaleTimeString()}\n\n${content}\n`)};await tick();setInterval(tick,1500);return}
 case "usage":{if(!(await brokerAlive()))throw new Error(`broker not running at ${BUS_URL}`);const state=await brokerCall<any>("/state",{});for(const agent of state.roster.filter((x:any)=>x.id!=="operator")){const u=agent.usage;console.log(`${agent.id.padEnd(14)} ${agent.provider.padEnd(10)} ${agent.harness.padEnd(10)} ${u.turns} turns · ${u.totalTokens.toLocaleString()} tok · ${Math.round(u.latencyMs/1000)}s${u.costUSD?` · $${u.costUSD.toFixed(4)}`:""}`)}return}
 case "send":{await ensureBrokerStarted();const to=process.argv[3];const subject=process.argv[4];const body=process.argv.slice(5).join(" ")||subject;if(!to||!subject)throw new Error("usage: agent-bus send <to> <subject> [body]");console.log(JSON.stringify(await brokerCall("/send",{token:operatorToken(),to,subject,body,type:"info"}),null,2));return}
-default:console.log(["agent-bus — local multi-model agent control plane","","  agent-bus start [--no-open]","  agent-bus open","  agent-bus run <project> --goal \"...\"","  agent-bus broker","  agent-bus provision <agent-id> [--rotate]","  agent-bus supervise <agent-id> [workdir]","  agent-bus route <role> [--complexity 1..5] [--write]","  agent-bus models [--discover]","  agent-bus doctor","  agent-bus status | watch | usage","  agent-bus send <to> <subject> [body]","",`  dashboard + broker: ${DASHBOARD_URL} · state: ${BUS_HOME}`].join("\n"))}}
+default:console.log(["agent-bus — local multi-model agent control plane","","  agent-bus start [--no-open]","  agent-bus open","  agent-bus stop","  agent-bus run <project> --goal \"...\"","  agent-bus broker","  agent-bus provision <agent-id> [--rotate]","  agent-bus supervise <agent-id> [workdir]","  agent-bus route <role> [--complexity 1..5] [--write]","  agent-bus models [--discover]","  agent-bus doctor","  agent-bus status | watch | usage","  agent-bus send <to> <subject> [body]","",`  dashboard + broker: ${DASHBOARD_URL} · state: ${BUS_HOME}`].join("\n"))}}
 main().catch(error=>{console.error(error?.stack??error?.message??error);process.exit(1)});
