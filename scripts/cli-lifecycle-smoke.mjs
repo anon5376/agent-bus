@@ -88,6 +88,9 @@ function startFixtureServer(port, kind) {
           : {ok:true,pid:process.pid,service:'not-agent-bus'};
         res.end(JSON.stringify(body)); return;
       }
+      if(req.url==='/catalog'&&req.method==='POST'&&kind==='legacy'){
+        res.end(JSON.stringify({capabilityNotice:'legacy Agent Bus',providers:{},harnesses:{},models:{},roles:{},agents:{},constraints:{}}));return;
+      }
       if(req.url==='/state'&&req.method==='POST'){res.end(JSON.stringify({roster:[]}));return;}
       res.statusCode=404;res.end('{}');
     });
