@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Agent Bus">
+  <defs>
+    <linearGradient id="g" x1="8" y1="8" x2="56" y2="56" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#667fff"/>
+      <stop offset="1" stop-color="#916fff"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="16" fill="#090b0f"/>
+  <rect x="8" y="8" width="48" height="48" rx="13" fill="url(#g)"/>
+  <path d="M20 43 28.5 21h7L44 43h-6l-1.7-5H27.7L26 43h-6Zm9.3-10h5.4L32 25.6 29.3 33Z" fill="#fff"/>
+</svg>
