@@ -47,7 +47,7 @@ function Login({onReady}:{onReady:()=>void}){
       checkpoint(9,"one-time ticket exchanged for HttpOnly session");
       history.replaceState(null,"",location.pathname);
       onReady();
-    }).catch(e=>{bootMonitor()?.diagnose?.("Agent Bus ticket exchange failed",e);setError(e.message)});
+    }).catch(e=>{history.replaceState(null,"",location.pathname);bootMonitor()?.diagnose?.("Agent Bus ticket exchange failed",e);setError(e.message)});
   },[]);
   return <main className="lock"><div className="lock-card"><div className="logo">AB</div><h1>Agent Bus is locked</h1><p>Open this dashboard through the trusted CLI so the browser receives a one-time operator session.</p><code>agent-bus open</code>{error&&<p className="error">{error}</p>}</div></main>;
 }

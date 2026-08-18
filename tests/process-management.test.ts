@@ -65,6 +65,8 @@ test("different Agent Bus build is replaceable rather than reused", () => {
 test("known Agent Bus command matcher is narrow", () => {
   assert.equal(knownAgentBusCommand("/opt/homebrew/bin/node /Users/me/agent-bus/dist/cli.js broker"), true);
   assert.equal(knownAgentBusCommand("/opt/homebrew/bin/node /Users/me/agent-bus/dist/broker.js"), true);
+  assert.equal(knownAgentBusCommand("/opt/homebrew/bin/node /Users/me/.agent-bus/app/current/cli.js broker"), true);
+  assert.equal(knownAgentBusCommand("/opt/homebrew/bin/node /Users/me/.agent-bus/app/releases/abc123/dist/cli.js broker"), true);
   assert.equal(knownAgentBusCommand("python server.py --name agent-bus --port 7717"), false);
   assert.equal(knownAgentBusCommand("node /Users/me/other-agent-bus-project/server.js"), false);
 });

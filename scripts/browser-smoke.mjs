@@ -177,8 +177,9 @@ function sha256(value) {
 
 async function verifyRuntimeAssets(baseUrl) {
   const response = await fetch(`${baseUrl}/diagnostics/runtime?asset_probe=${Date.now()}`, { headers: { "cache-control": "no-cache" } });
-  assert.equal(response.status, 200, await response.text());
-  const diagnostic = await response.json();
+  const diagnosticText = await response.text();
+  assert.equal(response.status, 200, diagnosticText);
+  const diagnostic = JSON.parse(diagnosticText);
   const runtime = diagnostic.runtime;
   assert.equal(diagnostic.product, "agent-bus");
   assert.equal(typeof diagnostic.buildId, "string");
@@ -280,7 +281,7 @@ try {
   assertAllCheckpoints(reload.state, "session reload");
   assertCleanBrowser(reload, "session reload");
 
-  const replay = await runChrome(`${handle.url}/?ticket=${encodeURIComponent(ticket)}`, replayProfile, async (state) => state.rootChildren > 0 && state.text.includes("invalid or expired") && state.boot?.diagnostic === true, "replayed ticket diagnostic");
+  const replay = await runChrome(`${handle.url}/?ticket=${encodeURIComponent(ticket)}`, replayProfile, async (state) => state.rootChildren > 0 && state.text.includes("invalid or expired") && state.boot?.diagnostic === true && state.search === "", "replayed ticket diagnostic");
   assert.match(replay.state.text, /invalid or expired/i);
   assert.equal(replay.state.boot.stages[7] !== undefined, true);
   assert.equal(replay.state.boot.stages[8], undefined);
@@ -299,7 +300,7 @@ try {
   const expiredToken = readFileSync(expiredTokenPath, "utf8").trim();
   const expiredTicket = await issueTicket(expiredHandle, expiredToken);
   await new Promise((resolve) => setTimeout(resolve, 100));
-  const expired = await runChrome(`${expiredHandle.url}/?ticket=${encodeURIComponent(expiredTicket)}`, expiredProfile, async (state) => state.rootChildren > 0 && state.text.includes("invalid or expired") && state.boot?.diagnostic === true, "expired ticket diagnostic");
+  const expired = await runChrome(`${expiredHandle.url}/?ticket=${encodeURIComponent(expiredTicket)}`, expiredProfile, async (state) => state.rootChildren > 0 && state.text.includes("invalid or expired") && state.boot?.diagnostic === true && state.search === "", "expired ticket diagnostic");
   assert.match(expired.state.text, /invalid or expired/i);
   assertCleanBrowser(expired, "expired ticket diagnostic");
 
