@@ -1,147 +1,144 @@
 # agent-bus
 
-A local-first control plane and universal harness for heterogeneous autonomous coding and research agents.
+A local-first control plane for heterogeneous autonomous coding and research agents.
 
-`agent-bus` keeps the strongest part of the original project: independent CLI agents sleep on blocking broker waits, wake only when work arrives, operate inside the selected project, report concise structured results, and go back to sleep. The prototype adds a durable task graph, inspectable model routing, provider/harness/model separation, secure credentials, path ownership, telemetry, and a normalized adapter layer.
-
-> **Prototype status:** the control plane, fake-harness simulations, persistence, routing, authentication, task lifecycle, and adapter normalization are implemented. Real provider CLIs still require their normal local installation and login, and the repository does not claim that every configured model is available to every account.
-
-## What is implemented
-
-- Explicit `Provider → Harness → Model → Family → Agent → Role` configuration.
-- Subscription-first adapters for Claude Code, Codex CLI, Gemini CLI, Kimi Code and OpenCode.
-- Additional adapter surfaces for Hermes and Grok, plus local-model routes through OpenCode or Codex `--oss`.
-- Deterministic routing by role, complexity, context size, permissions, family/provider policy, configured capability profile, availability, subscription preference, cost class and observed task history.
-- SQLite persistence for identities, mail, agents, runs, graph tasks, routing decisions, path leases, usage and model telemetry.
-- Parent/child tasks, dependencies, retries, fallback routing, independent review, cancellation and escalation.
-- Cooperative path leases that prevent the broker from concurrently assigning overlapping write scopes.
-- Scoped briefs, file/artifact references and structured results instead of raw transcript forwarding.
-- Operator, manager and worker authority levels with operator-issued credentials.
-- A deterministic fake provider/harness for integration tests without consuming subscription usage.
+Agent Bus keeps independent model CLIs behind one durable broker: SQLite persistence, task DAGs, routing, supervisors, MCP, path leases, authentication, retries, reviews, telemetry, and project runs remain the orchestration engine. The browser dashboard and CLI are interfaces over that same state.
 
 ## Quick start
 
 Requires Node.js 22.5 or newer.
 
 ```bash
-npm ci
+git clone https://github.com/anon5376/agent-bus.git
+cd agent-bus
+npm install
 npm run build
-
-# Check configured CLI binaries. This does not infer account entitlement.
-node dist/cli.js doctor
-
-# Inspect the registry and optionally ask supported harnesses for model discovery.
-node dist/cli.js models
-node dist/cli.js models --discover
-
-# Start a project run. Enabled agents marked autoStart are provisioned and supervised.
-node dist/cli.js run ~/code/project --goal "Implement X and validate it"
-
-# Observe agents, runs, graph tasks, leases and routing reasons.
-node dist/cli.js watch
+npm link
+agent-bus start
 ```
 
-Each official CLI must be installed and authenticated through its own normal login flow. `agent-bus` does not bypass authentication, quotas, provider restrictions or terms.
-
-## Configuration model
-
-The repository-level [`agent-bus.config.json`](agent-bus.config.json) is the prototype registry.
-
-- **Provider** identifies the account/authentication source, such as an Anthropic subscription, ChatGPT/Codex login, Google account, Moonshot account, API profile or local runtime.
-- **Harness** identifies the executable integration, such as Claude Code, Codex CLI, Gemini CLI, Kimi Code, OpenCode or Hermes.
-- **Model** identifies the exact selector, model family, context profile, cost class and configurable capability estimates.
-- **Agent** instantiates one model through one harness with a role set and permissions.
-- **Role** defines routing requirements and capability weights such as manager, planner, implementation, research, reviewer, tester or cheap worker.
-
-Capability values are explicitly labelled as user configuration, heuristic defaults or observed telemetry. They are not treated as objective benchmark truth, and observed history does not silently overwrite user configuration.
-
-A role policy can constrain exact models, families or providers and can require subscription-backed authentication, write access, shell access, network access or independent-family review. Use the router directly to inspect a decision:
-
-```bash
-node dist/cli.js route implementation --complexity 2 --write --families gpt,claude
-node dist/cli.js route reviewer --complexity 5 --implementation-family gpt
-```
-
-The output includes the selected agent and every candidate's score or rejection reason.
-
-## Runtime architecture
+`agent-bus start` starts or reuses the localhost broker and opens the dashboard at:
 
 ```text
-operator / GUI / CLI
-        │
-        ▼
-local HTTP broker ─── SQLite state + append-only JSONL audit
-        │
-        ├── task graph / dependencies / retries / path leases
-        ├── deterministic router / telemetry / route explanations
-        └── durable mailboxes / blocking waiters
-                 │
-        independent supervisors
-                 │
-      normalized harness adapters
-                 │
- Claude Code · Codex · Gemini · Kimi · OpenCode · Hermes · fake
+http://127.0.0.1:7717
 ```
 
-`agent-bus run <project> --goal ...` creates a durable run and routes a root manager task. The manager inspects the project, creates scoped child tasks through MCP, declares dependencies and path scopes, and sleeps while workers execute. Workers receive only the brief, project root, permission boundary, validation contract and context references required for their task. Results return as summaries, changed paths, artifact references and validation observations.
+Use `agent-bus open` to open an already-running dashboard. Directly visiting the URL does not grant operator privileges; the CLI issues a short-lived one-time browser login ticket derived from the private local operator credential.
 
-## Authentication and authority
+Each real provider CLI must still be installed and authenticated through its own normal login flow. Finding a binary proves only that the executable exists. It does not prove subscription entitlement, login state, quota, or access to a particular model.
 
-The original unauthenticated `/register` bootstrap could be used to re-register an existing agent ID and obtain its bearer token. That path is removed.
+## Product surface
 
-The new flow is:
+The React + TypeScript + Vite dashboard is served by the broker itself. There is no second orchestration backend and no separate dashboard port.
 
-1. The broker creates or validates a private operator token.
-2. The operator explicitly provisions a configured agent with `agent-bus provision <id>`.
-3. The raw credential is written mode `0600`; SQLite stores only its hash.
-4. `/register` verifies that token against the already provisioned identity and never returns it.
-5. Message sender identity, authority and permissions come from the verified token, never from message fields.
+The dashboard exposes real SQLite-backed Agent Bus state for:
 
-Managers may delegate only within configured depth. Workers cannot delegate unless explicitly allowed. Reviews, cancellations, provisioning, token rotation and process kills are separately authorized. See [`docs/security.md`](docs/security.md).
+- local projects and previous runs
+- run creation and run stop
+- agents, roles, providers, harnesses, exact models and model families
+- idle / working / waiting / failed / offline status
+- task hierarchy, dependencies, submissions, reviews, retries and failures
+- routing decisions and candidate explanations
+- live events/messages over Server-Sent Events at `/api/events`
+- token, turn, latency and reported cost telemetry
+- start/stop agent and STOP ALL controls
+- accept task, request changes and cancel task controls
+- operator messages
+- agent configuration without manually editing JSON
 
-## Concurrency and project safety
+Ordinary agent configuration changes are validated, persisted to the configured JSON registry, and applied to the running broker. Provider status deliberately distinguishes configured integrations, executable discovery, authentication source, and live verification.
 
-The prototype uses broker-enforced **path leases**, not a pile of implicit shared writes. Two write tasks with overlapping scopes are not dispatched concurrently. A task without an explicit scope receives the configured default scope, normally the project root, which serializes writes conservatively. Read-only tasks do not acquire write leases.
-
-This is a scheduling boundary, not an operating-system sandbox. A powerful coding CLI may still have broader host access than its task contract. Run agents only inside trusted project directories and review each harness's effective permission flags.
-
-## Commands
+## CLI
 
 ```text
-agent-bus run <project> --goal "..."      create a durable run and route a manager
-agent-bus broker                           start the local broker
-agent-bus provision <agent-id> [--rotate] provision or deliberately rotate a credential
-agent-bus supervise <agent-id> [workdir]  run a persistent supervisor
+agent-bus start [--no-open]               start/reuse Agent Bus and open the dashboard
+agent-bus open                            create a browser session and open the dashboard
+agent-bus run <project> --goal "..."      create a durable project run
+agent-bus broker                          run the localhost product server in foreground
+agent-bus provision <agent-id> [--rotate] provision/rotate an agent credential
+agent-bus supervise <agent-id> [workdir]  run one persistent supervisor
 agent-bus route <role> [options]          preview an inspectable routing decision
-agent-bus models [--discover]             inspect configured/discovered models
-agent-bus doctor                          probe configured harness executables
+agent-bus models [--discover]             inspect registry/discovered models
+agent-bus doctor                          probe harness executables
 agent-bus status                          one-shot state view
-agent-bus watch                           live state view
+agent-bus watch                           live terminal state view
 agent-bus usage                           usage and latency totals
 agent-bus send <to> <subject> [body]      send an operator message
 ```
 
-Agents receive MCP tools for identity, messaging, blocking waits, route previews, graph-task creation, structured submissions, review, cancellation, task detail and project knowledge.
+Example:
+
+```bash
+agent-bus doctor
+agent-bus models
+agent-bus run ~/code/project --goal "Implement X and validate it"
+agent-bus watch
+```
+
+## Architecture
+
+```text
+browser dashboard ─┐
+CLI / MCP agents ──┼── 127.0.0.1:7717
+                   │
+                   ▼
+              Agent Bus broker
+                   │
+        SQLite + JSONL audit state
+                   │
+   task DAG / routing / leases / telemetry
+                   │
+          independent supervisors
+                   │
+     normalized provider/harness adapters
+```
+
+The model is explicit:
+
+`Provider → Harness → Model → Family → Agent → Role`
+
+Routing is deterministic and inspectable. It considers role requirements, complexity, context size, configured capability profiles, permissions, availability, provider/family policy, subscription preference, cost class, observed success/failure/latency, and independent-family review requirements.
+
+Capability values are configuration/heuristics, not benchmark truth. Runtime observations are stored separately rather than silently rewriting model profiles.
+
+## Authentication and local security
+
+The broker stores hashes for operator/agent bearer credentials; raw credentials live only in private local files. Existing agent IDs cannot be reclaimed through unauthenticated registration.
+
+Browser authentication is separate from agent authentication:
+
+1. `agent-bus open` or `agent-bus start` reads the private operator credential locally.
+2. The CLI asks the broker for a short-lived, one-time browser ticket.
+3. The browser exchanges that ticket for an HttpOnly, SameSite=Strict session.
+4. Dashboard mutation APIs additionally require same-origin requests.
+5. Simply loading `/` never authenticates the browser.
+
+The service binds to `127.0.0.1` by default. It does not silently bind to `0.0.0.0`.
+
+Path leases protect overlapping broker-scheduled write scopes, but they are not an OS sandbox. Coding CLIs may still have host permissions granted by their own invocation flags.
+
+## Providers and models
+
+The repository contains normalized integration paths for Claude Code, Codex CLI, Gemini CLI, Kimi Code and OpenCode, plus adapter/configuration surfaces for local/custom command harnesses, OpenAI-compatible endpoints, Hermes and disabled Grok/xAI paths.
+
+Automated tests do not make real provider calls. The deterministic fake harness covers orchestration behavior without consuming subscription/API usage.
+
+See [`docs/provider-support.md`](docs/provider-support.md) for the explicit support vocabulary: implemented/tested, implemented/live-unverified, adapter-ready, researched path and unsupported.
 
 ## Validation
 
 ```bash
+npm run build
 npm test
 ```
 
-The suite builds production TypeScript, compiles tests and runs fake-harness and broker simulations covering registration/authentication, impersonation, message delivery, task creation, dependencies, path conflicts, submit/review/revise cycles, persistence/restart recovery, routing, adapter normalization, malformed output, retries, fallback, cancellation and model telemetry.
+The test suite covers the existing broker/harness behavior plus the product server: static SPA serving, browser authorization, one-time ticket replay prevention, same-origin mutation checks, project/run persistence, run stop semantics, SSE delivery, live agent configuration, malformed requests, registration security, task lifecycle, path leases, retries/rerouting, routing, persistence and deterministic harness execution.
 
-CI is defined in [`.github/workflows/universal-harness-ci.yml`](.github/workflows/universal-harness-ci.yml).
+GitHub Actions runs Node 22 build and test verification. Real provider entitlement and macOS browser/process behavior remain local verification items.
 
-## Provider status and limitations
-
-The prototype deliberately distinguishes implemented code from live-provider verification. Claude Code and Codex are the strongest existing integrations; Gemini, Kimi and OpenCode are implemented but depend on installed CLI versions and local account state; Hermes is adapter-ready; Grok is disabled until a defensible official CLI/account path is configured; Ollama and LM Studio are reached through compatible harnesses rather than fake first-class support.
-
-See:
+## More documentation
 
 - [`docs/architecture.md`](docs/architecture.md)
 - [`docs/provider-support.md`](docs/provider-support.md)
 - [`docs/security.md`](docs/security.md)
 - [`docs/prototype-report.md`](docs/prototype-report.md)
-
-The prototype does not yet provide OS-level per-task isolation, transactional git worktree integration, automatic quota discovery for providers that do not expose it, or benchmark-trained adaptive routing. Those are explicit next steps, not hidden claims.
