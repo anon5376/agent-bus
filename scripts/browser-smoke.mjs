@@ -96,7 +96,7 @@ async function runChrome(url, profileDir, verify, label) {
     let lastState = null;
     while (Date.now() < deadline) {
       const result = await cdp.send("Runtime.evaluate", {
-        expression: `(() => ({ href: location.href, search: location.search, rootChildren: document.getElementById('root')?.childElementCount ?? -1, text: document.body.innerText, boot: document.getElementById('agent-bus-boot')?.innerText ?? '' }))()`,
+        expression: `(() => ({ href: location.href, search: location.search, rootChildren: document.getElementById('root')?.childElementCount ?? -1, mounted: Boolean(document.querySelector('[data-agent-bus-mounted="true"]')), text: document.body.innerText, boot: document.getElementById('agent-bus-boot')?.innerText ?? '', phase: globalThis.__AGENT_BUS_BOOTSTRAP__?.phase ?? '' }))()`,
         returnByValue: true,
       });
       lastState = result.result?.value ?? null;
@@ -120,52 +120,81 @@ async function runChrome(url, profileDir, verify, label) {
   }
 }
 
+function fakeConfig() {
+  const config = JSON.parse(readFileSync(new URL("../agent-bus.config.json", import.meta.url), "utf8"));
+  for (const [id, provider] of Object.entries(config.providers)) if (id !== "fake") provider.enabled = false;
+  for (const [id, harness] of Object.entries(config.harnesses)) if (id !== "fake") harness.enabled = false;
+  for (const [id, model] of Object.entries(config.models)) if (!id.startsWith("fake-")) model.enabled = false;
+  for (const [id, agent] of Object.entries(config.agents)) if (!id.startsWith("fake-")) agent.enabled = false;
+  return config;
+}
+
+async function issueTicket(handle, token) {
+  const response = await fetch(`${handle.url}/dashboard/login`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ token }),
+  });
+  const text = await response.text();
+  assert.equal(response.status, 200, text);
+  const body = JSON.parse(text);
+  assert.ok(body.ticket);
+  return body.ticket;
+}
+
 const root = mkdtempSync(join(tmpdir(), "agent-bus-browser-"));
 const profile = join(root, "profile");
 const replayProfile = join(root, "replay-profile");
+const expiredProfile = join(root, "expired-profile");
 const operatorTokenPath = join(root, "operator.token");
-const rawConfig = JSON.parse(readFileSync(new URL("../agent-bus.config.json", import.meta.url), "utf8"));
-for (const [id, provider] of Object.entries(rawConfig.providers)) if (id !== "fake") provider.enabled = false;
-for (const [id, harness] of Object.entries(rawConfig.harnesses)) if (id !== "fake") harness.enabled = false;
-for (const [id, model] of Object.entries(rawConfig.models)) if (!id.startsWith("fake-")) model.enabled = false;
-for (const [id, agent] of Object.entries(rawConfig.agents)) if (!id.startsWith("fake-")) agent.enabled = false;
+const config = fakeConfig();
 
 const handle = await startProductServer({
   host: "127.0.0.1",
   port: 0,
-  config: rawConfig,
+  config,
   statePath: join(root, "state.sqlite"),
   logPath: join(root, "bus.jsonl"),
   operatorTokenPath,
 });
 
+let expiredHandle = null;
 try {
   const token = readFileSync(operatorTokenPath, "utf8").trim();
-  const ticketResponse = await fetch(`${handle.url}/dashboard/login`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ token }),
-  });
-  const ticketText = await ticketResponse.text();
-  assert.equal(ticketResponse.status, 200, ticketText);
-  const { ticket } = JSON.parse(ticketText);
-  assert.ok(ticket);
+  const ticket = await issueTicket(handle, token);
 
   const first = await runChrome(`${handle.url}/?ticket=${encodeURIComponent(ticket)}`, profile, async (state, cdp) => {
-    if (!(state.rootChildren > 0 && state.text.includes("Agent Bus") && state.search === "")) return false;
+    if (!(state.rootChildren > 0 && state.mounted && state.text.includes("Agent Bus") && state.search === "")) return false;
     const cookies = await cdp.send("Network.getCookies", { urls: [handle.url] });
     return cookies.cookies.some((cookie) => cookie.name === "agent_bus_session" && cookie.httpOnly === true);
   }, "ticket login");
-  assert.ok(first.state.rootChildren > 0);
+  assert.equal(first.state.phase, "mounted");
 
-  const reload = await runChrome(handle.url, profile, async (state) => state.rootChildren > 0 && state.text.includes("Agent Bus") && state.search === "", "session reload");
+  const reload = await runChrome(handle.url, profile, async (state) => state.mounted && state.rootChildren > 0 && state.text.includes("Agent Bus") && state.search === "", "session reload");
   assert.ok(reload.state.text.includes("Agent Bus"));
 
   const replay = await runChrome(`${handle.url}/?ticket=${encodeURIComponent(ticket)}`, replayProfile, async (state) => state.rootChildren > 0 && state.text.includes("invalid or expired"), "replayed ticket diagnostic");
   assert.match(replay.state.text, /invalid or expired/i);
 
+  const expiredTokenPath = join(root, "expired-operator.token");
+  expiredHandle = await startProductServer({
+    host: "127.0.0.1",
+    port: 0,
+    config: fakeConfig(),
+    statePath: join(root, "expired-state.sqlite"),
+    logPath: join(root, "expired-bus.jsonl"),
+    operatorTokenPath: expiredTokenPath,
+    loginTicketTtlMs: 40,
+  });
+  const expiredToken = readFileSync(expiredTokenPath, "utf8").trim();
+  const expiredTicket = await issueTicket(expiredHandle, expiredToken);
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const expired = await runChrome(`${expiredHandle.url}/?ticket=${encodeURIComponent(expiredTicket)}`, expiredProfile, async (state) => state.rootChildren > 0 && state.text.includes("invalid or expired"), "expired ticket diagnostic");
+  assert.match(expired.state.text, /invalid or expired/i);
+
   process.stdout.write("production browser smoke passed\n");
 } finally {
+  if (expiredHandle) await expiredHandle.close().catch(() => {});
   await handle.close().catch(() => {});
   rmSync(root, { recursive: true, force: true });
 }
