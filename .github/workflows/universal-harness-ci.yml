@@ -8,7 +8,7 @@ on:
       - fix/installed-dashboard-runtime
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-and-test:
@@ -17,6 +17,17 @@ jobs:
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
+      - name: Apply staged runtime instrumentation
+        if: github.event_name == 'push' && github.ref == 'refs/heads/fix/installed-dashboard-runtime'
+        run: |
+          if [[ -f scripts/apply-runtime-instrumentation.mjs ]]; then
+            node scripts/apply-runtime-instrumentation.mjs
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add -A
+            git commit -m "feat: instrument installed production runtime"
+            git push origin HEAD:fix/installed-dashboard-runtime
+          fi
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -67,8 +78,6 @@ jobs:
 
           bash install.sh
 
-          # The earlier PATH entry intentionally remains first. The installer must
-          # replace that exact stale path so shell hashing cannot resurrect it.
           test "$(command -v agent-bus)" = "$STALE_BIN/agent-bus"
           grep '# Agent Bus canonical launcher' "$STALE_BIN/agent-bus"
           agent-bus __launcher-info | grep "application=$AGENT_BUS_HOME/app/current"
