@@ -15,7 +15,7 @@ import {
 } from "./config.js";
 import { addOrUpdateIntegration, IntegrationInput } from "./integrations.js";
 import { Agent, BUS_HOME, BUS_HOST, BUS_PORT, MAX_WAIT_MS, Run, Task } from "./protocol.js";
-import { productBuildId, PRODUCT_NAME, PRODUCT_PROTOCOL_VERSION } from "./product-runtime.js";
+import { productArtifactManifest, PRODUCT_NAME, PRODUCT_PROTOCOL_VERSION } from "./product-runtime.js";
 import {
   OPERATOR_TOKEN_PATH,
   agentTokenPath,
@@ -573,7 +573,22 @@ export async function startProductServer(options: ProductServerOptions = {}): Pr
   const sessionTtlMs = Math.max(1000, options.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS);
   const ticketTtlMs = Math.max(20, options.loginTicketTtlMs ?? DEFAULT_LOGIN_TICKET_TTL_MS);
   const sessions = new BrowserSessions(sessionTtlMs, ticketTtlMs);
-  const buildId = productBuildId(staticRoot);
+  const artifact = productArtifactManifest(staticRoot);
+  const buildId = artifact.buildId;
+  const runtime = {
+    pid: process.pid,
+    applicationRoot: resolve(ROOT),
+    staticRoot: resolve(staticRoot),
+    entrypoint: resolve(process.argv[1] ?? CLI_PATH),
+    modulePath: fileURLToPath(import.meta.url),
+    launcherPath: process.env.AGENT_BUS_LAUNCHER_PATH ?? null,
+    installRoot: process.env.AGENT_BUS_INSTALL_ROOT ?? null,
+    nodePath: process.execPath,
+    nodeVersion: process.version,
+    cwd: process.cwd(),
+    argv: process.argv.slice(1),
+    ui: { index: artifact.index, scripts: artifact.scripts, styles: artifact.styles },
+  };
 
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? `${host}:${requestedPort}`}`);
@@ -590,8 +605,12 @@ export async function startProductServer(options: ProductServerOptions = {}): Pr
         runs: service.runs.size,
         durable: true,
         dashboard: true,
-        uiBuilt: existsSync(join(staticRoot, "index.html")),
+        uiBuilt: artifact.uiBuilt,
+        runtime,
       });
+    }
+    if (pathname === "/diagnostics/runtime" && (req.method === "GET" || req.method === "HEAD")) {
+      return sendJson(res, 200, { ok: true, product: PRODUCT_NAME, productProtocol: PRODUCT_PROTOCOL_VERSION, buildId, runtime });
     }
 
     try {
