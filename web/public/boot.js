@@ -79,7 +79,7 @@
       if (detailNode && detail) detailNode.textContent = text(detail);
     }
     if (number === 10) {
-      document.documentElement.setAttribute("data-agent-bus-mounted", "true");
+      document.documentElement.setAttribute("data-agent-bus-boot-complete", "true");
     }
   }
 
