@@ -88,7 +88,7 @@ export function processCommand(pid: number): string {
 
 export async function fetchHealth(url: string): Promise<ProductHealth | null> {
   try {
-    const response = await fetch(`${url}/health`, { signal: AbortSignal.timeout(1200), cache: "no-store" });
+    const response = await fetch(`${url}/health`, { signal: AbortSignal.timeout(1200) });
     if (!response.ok) return null;
     const value = await response.json();
     return value && typeof value === "object" ? value as ProductHealth : null;
