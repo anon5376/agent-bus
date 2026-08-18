@@ -14,6 +14,7 @@ export interface ProductHealth {
   agents?: number;
   tasks?: number;
   runs?: number;
+  runtime?: { applicationRoot?: string; staticRoot?: string; entrypoint?: string; nodePath?: string; cwd?: string };
 }
 
 export interface PortOwner {
@@ -32,8 +33,11 @@ export interface StopResult {
 export function knownAgentBusCommand(command: string): boolean {
   const text = command.trim();
   if (!text) return false;
-  return /(?:^|\s)(?:\S*node\S*\s+)?\S*\/agent-bus\/(?:dist\/(?:cli|broker|product-server)\.js|cli\.js)(?:\s+(?:broker|dashboard|supervise)(?:\s|$)|\s*$)/i.test(text)
-    || /(?:^|\s)(?:\S*node\S*\s+)?\S*\/agent-bus\/src\/(?:broker|product-server)\.(?:js|ts)(?:\s|$)/i.test(text);
+  const checkout = String.raw`\S*/agent-bus/`;
+  const canonical = String.raw`\S*/\.agent-bus/app/(?:current|releases/[^/]+)/`;
+  const root = `(?:${checkout}|${canonical})`;
+  return new RegExp(String.raw`(?:^|\s)(?:\S*node\S*\s+)?${root}(?:dist/(?:cli|broker|product-server)\.js|cli\.js)(?:\s+(?:broker|dashboard|supervise)(?:\s|$)|\s*$)`, "i").test(text)
+    || new RegExp(String.raw`(?:^|\s)(?:\S*node\S*\s+)?${root}src/(?:broker|product-server)\.(?:js|ts)(?:\s|$)`, "i").test(text);
 }
 
 function legacyHealthShape(health: ProductHealth | null): boolean {

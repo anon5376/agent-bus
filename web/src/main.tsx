@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 
-const bootMonitor=()=>((window as any).__AGENT_BUS_BOOT__ as {checkpoint?:(number:number,detail?:unknown)=>void;fail?:(title:string,detail:unknown)=>void;record?:(kind:string,detail:unknown)=>void}|undefined);
+const bootMonitor=()=>((window as any).__AGENT_BUS_BOOT__ as {checkpoint?:(number:number,detail?:unknown)=>void;fail?:(title:string,detail:unknown)=>void;diagnose?:(title:string,detail:unknown)=>void;record?:(kind:string,detail:unknown)=>void}|undefined);
 const checkpoint=(number:number,detail?:unknown)=>bootMonitor()?.checkpoint?.(number,detail);
 checkpoint(3,"React application module evaluated");
 checkpoint(4,"React and react-dom/client imports resolved");
@@ -41,13 +41,13 @@ function Login({onReady}:{onReady:()=>void}){
   const [error,setError]=useState("");
   useEffect(()=>{
     const ticket=new URLSearchParams(location.search).get("ticket");
-    if(!ticket)return;
+    if(!ticket){window.setTimeout(()=>checkpoint(10,"locked dashboard committed to the DOM"),0);return;}
     checkpoint(8,"POST /api/session started");
     post("/api/session",{ticket}).then(()=>{
       checkpoint(9,"one-time ticket exchanged for HttpOnly session");
       history.replaceState(null,"",location.pathname);
       onReady();
-    }).catch(e=>{bootMonitor()?.record?.("ticket-exchange-error",e);setError(e.message)});
+    }).catch(e=>{bootMonitor()?.diagnose?.("Agent Bus ticket exchange failed",e);setError(e.message)});
   },[]);
   return <main className="lock"><div className="lock-card"><div className="logo">AB</div><h1>Agent Bus is locked</h1><p>Open this dashboard through the trusted CLI so the browser receives a one-time operator session.</p><code>agent-bus open</code>{error&&<p className="error">{error}</p>}</div></main>;
 }
@@ -57,7 +57,7 @@ function App(){
   const [auth,setAuth]=useState<boolean|null>(null); const [snap,setSnap]=useState<Snapshot>(empty); const [catalog,setCatalog]=useState<Catalog|null>(null); const [projects,setProjects]=useState<Project[]>([]); const [providers,setProviders]=useState<ProviderStatus[]>([]);
   const [runId,setRunId]=useState<string|null>(null); const [taskId,setTaskId]=useState<string|null>(null); const [toast,setToast]=useState(""); const [modal,setModal]=useState<string|null>(null);
   const ready=()=>setAuth(true);
-  useEffect(()=>{api("/api/session").then(()=>{checkpoint(9,"existing browser session restored");setAuth(true)}).catch(()=>setAuth(false))},[]);
+  useEffect(()=>{const hasTicket=new URLSearchParams(location.search).has("ticket");if(!hasTicket)checkpoint(8,"existing session validation started");api("/api/session").then(()=>{if(!hasTicket)checkpoint(9,"existing browser session restored");setAuth(true)}).catch(()=>setAuth(false))},[]);
   useEffect(()=>{if(auth)window.setTimeout(()=>checkpoint(10,"authenticated dashboard committed to the DOM"),0)},[auth]);
   useEffect(()=>{if(!auth)return;Promise.all([api<Snapshot>("/api/state"),api<Catalog>("/api/catalog"),api<any>("/api/projects"),api<any>("/api/providers/status")]).then(([s,c,p,ps])=>{setSnap(s);setCatalog(c);setProjects(p.projects||[]);setProviders(ps.providers||[]);setRunId(r=>r||s.runs[0]?.id||null)}).catch(e=>note(e.message));const es=new EventSource("/api/events");es.addEventListener("snapshot",e=>{const n=JSON.parse((e as MessageEvent).data);setSnap(prev=>mergeSnapshot(prev,n))});es.addEventListener("error",()=>note("Live event stream disconnected; reconnecting…"));return()=>es.close()},[auth]);
   const note=(s:string)=>{setToast(s);setTimeout(()=>setToast(""),2800)};
