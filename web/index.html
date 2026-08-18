@@ -1,20 +1,38 @@
 <!doctype html>
-<html>
+<html data-agent-bus-html="loaded">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1.0" />
     <meta name="color-scheme" content="dark" />
+    <meta name="agent-bus-bootstrap" content="checkpoint-v2" />
     <title>Agent Bus</title>
     <link rel="stylesheet" href="/boot.css" />
   </head>
   <body>
     <div id="root">
-      <div id="agent-bus-boot" class="boot-fallback" role="status" aria-live="polite">
-        <strong>Starting Agent Bus…</strong>
-        <span>If this message remains visible, the dashboard JavaScript did not start. Run `agent-bus open` again or check browser JavaScript permissions for 127.0.0.1.</span>
-      </div>
+      <main id="agent-bus-boot" class="boot-fallback" role="status" aria-live="polite">
+        <div class="boot-brand">AB</div>
+        <div>
+          <strong>Starting Agent Bus…</strong>
+          <p>The installed production dashboard is reporting each boot stage. This screen must never disappear into a silent blank page.</p>
+        </div>
+        <ol class="boot-stages">
+          <li data-boot-stage="1"><b>1</b><span>index HTML loaded</span><small>waiting</small></li>
+          <li data-boot-stage="2"><b>2</b><span>entry module loaded</span><small>waiting</small></li>
+          <li data-boot-stage="3"><b>3</b><span>app module imported</span><small>waiting</small></li>
+          <li data-boot-stage="4"><b>4</b><span>React runtime loaded</span><small>waiting</small></li>
+          <li data-boot-stage="5"><b>5</b><span>createRoot called</span><small>waiting</small></li>
+          <li data-boot-stage="6"><b>6</b><span>render called</span><small>waiting</small></li>
+          <li data-boot-stage="7"><b>7</b><span>first React component executed</span><small>waiting</small></li>
+          <li data-boot-stage="8"><b>8</b><span>ticket exchange started</span><small>waiting</small></li>
+          <li data-boot-stage="9"><b>9</b><span>ticket exchange completed</span><small>waiting</small></li>
+          <li data-boot-stage="10"><b>10</b><span>dashboard mounted</span><small>waiting</small></li>
+        </ol>
+        <pre id="agent-bus-runtime" class="boot-runtime">Loading installed runtime identity…</pre>
+      </main>
     </div>
     <noscript>Agent Bus requires JavaScript. Enable JavaScript for 127.0.0.1 and run `agent-bus open` again.</noscript>
-    <script type="module" src="/src/entry.ts"></script>
+    <script src="/boot.js"></script>
+    <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
