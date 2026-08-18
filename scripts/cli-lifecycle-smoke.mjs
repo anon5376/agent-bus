@@ -45,6 +45,20 @@ async function waitForDown(url, timeoutMs = 6000) {
   throw new Error(`${url} remained online`);
 }
 
+function processAlive(pid) {
+  if (!pid) return false;
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+async function waitForProcessDown(pid, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!processAlive(pid)) return;
+    await new Promise((resolve) => setTimeout(resolve, 80));
+  }
+  throw new Error(`process ${pid} remained alive`);
+}
+
 function runCli(env, ...args) {
   return spawnSync(process.execPath, ["dist/cli.js", ...args], {
     env,
@@ -117,7 +131,7 @@ try {
   assert.equal(replace.status, 0, `legacy replacement failed:\n${replace.stdout}\n${replace.stderr}`);
   const replacedHealth = await waitForHealth(url, (body) => body.product === "agent-bus" && body.dashboard === true);
   assert.notEqual(replacedHealth.pid, legacy.pid, "legacy listener should be replaced");
-  await new Promise((resolve) => legacy.once("exit", resolve));
+  await waitForProcessDown(legacy.pid);
   assert.equal(runCli(env, "stop").status, 0);
   await waitForDown(url);
 
@@ -126,9 +140,9 @@ try {
   const protectedStart = runCli(env, "start", "--no-open");
   assert.notEqual(protectedStart.status, 0, "Agent Bus must refuse to kill an unrelated port owner");
   assert.match(`${protectedStart.stderr}${protectedStart.stdout}`, /unrelated process/i);
-  assert.equal(unrelated.exitCode, null, "unrelated listener must remain alive");
+  assert.equal(processAlive(unrelated.pid), true, "unrelated listener must remain alive");
   unrelated.kill("SIGTERM");
-  await new Promise((resolve) => unrelated.once("exit", resolve));
+  await waitForProcessDown(unrelated.pid);
 
   const malformedPath = join(temp, "malformed-config.json");
   writeFileSync(malformedPath, "{ definitely-not-json\n");
