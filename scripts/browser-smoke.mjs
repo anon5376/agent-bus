@@ -158,10 +158,15 @@ async function runChrome(url, profileDir, verify, label, options = {}) {
   }
 }
 
-function assertCleanBrowser(result, label) {
+function assertCleanBrowser(result, label, options = {}) {
   const exceptions = result.events.filter((event) => event.method === "Runtime.exceptionThrown");
   const consoleErrors = result.events.filter((event) => event.method === "Runtime.consoleAPICalled" && event.params?.type === "error");
-  const logErrors = result.events.filter((event) => event.method === "Log.entryAdded" && event.params?.entry?.level === "error");
+  const allowedStatusUrls = new Set(options.allowedStatusUrls ?? []);
+  const logErrors = result.events.filter((event) => {
+    if (event.method !== "Log.entryAdded" || event.params?.entry?.level !== "error") return false;
+    const url = event.params?.entry?.url ? new URL(event.params.entry.url).pathname : "";
+    return !allowedStatusUrls.has(url);
+  });
   const failedRequests = result.events.filter((event) => event.method === "Network.loadingFailed" && !event.params?.canceled && event.params?.errorText !== "net::ERR_ABORTED");
   assert.equal(exceptions.length, 0, `${label}: uncaught browser exceptions: ${JSON.stringify(exceptions)}`);
   assert.equal(consoleErrors.length, 0, `${label}: console errors: ${JSON.stringify(consoleErrors)}`);
@@ -291,7 +296,7 @@ try {
   assert.match(replay.state.text, /invalid or expired/i);
   assert.equal(replay.state.boot.stages[7] !== undefined, true);
   assert.equal(replay.state.boot.stages[8], undefined);
-  assertCleanBrowser(replay, "replayed ticket diagnostic");
+  assertCleanBrowser(replay, "replayed ticket diagnostic", { allowedStatusUrls: ["/api/session"] });
 
   const expiredTokenPath = join(root, "expired-operator.token");
   expiredHandle = await startProductServer({
@@ -308,7 +313,7 @@ try {
   await new Promise((resolve) => setTimeout(resolve, 100));
   const expired = await runChrome(`${expiredHandle.url}/?ticket=${encodeURIComponent(expiredTicket)}`, expiredProfile, async (state) => state.rootChildren > 0 && state.text.includes("invalid or expired") && state.boot?.diagnostic === true && state.search === "", "expired ticket diagnostic");
   assert.match(expired.state.text, /invalid or expired/i);
-  assertCleanBrowser(expired, "expired ticket diagnostic");
+  assertCleanBrowser(expired, "expired ticket diagnostic", { allowedStatusUrls: ["/api/session"] });
 
   const blocked = await runChrome(handle.url, blockedProfile, async (state) => state.rootChildren > 0 && state.boot?.failed === true && state.text.includes("resource failed to load"), "blocked application module", {
     beforeNavigate: (cdp) => cdp.send("Network.setBlockedURLs", { urls: [`*${applicationScript.url}*`] }),
