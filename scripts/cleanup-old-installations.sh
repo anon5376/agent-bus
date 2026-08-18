@@ -4,16 +4,37 @@ set -euo pipefail
 # Stops previous Agent Bus service processes and removes stale global launchers.
 # Persistent state under ~/.agent-bus is intentionally preserved.
 
-if command -v ps >/dev/null 2>&1; then
-  PIDS="$(ps -axo pid=,command= 2>/dev/null | awk '
-    /\/agent-bus\// && /(dist\/cli\.js|cli\.js) (broker|dashboard|supervise)( |$)/ { print $1 }
-  ' | sort -u)"
-  if [[ -n "${PIDS}" ]]; then
-    echo "Stopping previous Agent Bus processes: ${PIDS//$'\n'/ }"
+collect_agent_bus_pids() {
+  {
+    if command -v ps >/dev/null 2>&1; then
+      ps -axo pid=,command= 2>/dev/null | awk '
+        /\/agent-bus\// && /((dist\/cli\.js|cli\.js) (broker|dashboard|supervise)( |$)|dist\/broker\.js( |$)|src\/broker\.(ts|js)( |$))/ { print $1 }
+      '
+    fi
+
+    if command -v lsof >/dev/null 2>&1; then
+      lsof -nP -t -iTCP:7717 -sTCP:LISTEN 2>/dev/null || true
+    fi
+  } | awk 'NF' | sort -u
+}
+
+PIDS="$(collect_agent_bus_pids)"
+if [[ -n "${PIDS}" ]]; then
+  SAFE_PIDS=""
+  while IFS= read -r pid; do
+    [[ -z "$pid" ]] && continue
+    command_line="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+    if [[ "$command_line" == *"agent-bus"* || "$command_line" == *"dist/broker.js"* ]]; then
+      SAFE_PIDS+="${SAFE_PIDS:+$'\n'}$pid"
+    fi
+  done <<< "$PIDS"
+
+  if [[ -n "$SAFE_PIDS" ]]; then
+    echo "Stopping previous Agent Bus processes: ${SAFE_PIDS//$'\n'/ }"
     while IFS= read -r pid; do
       [[ -z "$pid" ]] && continue
       kill -TERM "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
-    done <<< "$PIDS"
+    done <<< "$SAFE_PIDS"
     sleep 0.6
   fi
 fi

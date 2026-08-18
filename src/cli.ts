@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { discoverHarnessModels, probeHarness } from "./adapters.js";
 import { BusConfig, enabledAgents, loadConfig } from "./config.js";
-import { BUS_HOME, BUS_URL, Run, Task, brokerAlive, brokerCall } from "./protocol.js";
+import { BUS_HOME, BUS_PORT, BUS_URL, Run, Task, brokerAlive, brokerCall } from "./protocol.js";
 import { OPERATOR_TOKEN_PATH, agentTokenPath, readTokenFile, writePrivateToken } from "./security.js";
 import { DASHBOARD_URL, startProductServer } from "./product-server.js";
 
@@ -20,18 +20,32 @@ async function productAlive():Promise<boolean>{
   try{const response=await fetch(`${BUS_URL}/health`,{signal:AbortSignal.timeout(1200)});if(!response.ok)return false;const body=await response.json() as {dashboard?:boolean};return body.dashboard===true}catch{return false}
 }
 
+function agentBusPortListenerPids():number[]{
+  if(process.platform==="win32")return[];
+  try{
+    const output=execFileSync("lsof",["-nP","-t",`-iTCP:${BUS_PORT}`,"-sTCP:LISTEN"],{encoding:"utf8"});
+    return output.split("\n").map(line=>Number(line.trim())).filter(pid=>{
+      if(!Number.isFinite(pid)||pid<=0||pid===process.pid)return false;
+      try{
+        const command=execFileSync("ps",["-p",String(pid),"-o","command="],{encoding:"utf8"});
+        return /agent-bus|dist\/broker\.js|src\/broker\.(?:ts|js)/i.test(command);
+      }catch{return false}
+    });
+  }catch{return[]}
+}
+
 function legacyServicePids(includeSupervisors=false):number[]{
   if(process.platform==="win32")return[];
   try{
     const output=execFileSync("ps",["-axo","pid=,command="],{encoding:"utf8"});
     const action=includeSupervisors?"(?:broker|dashboard|supervise)":"(?:broker|dashboard)";
-    const pattern=new RegExp(`\\/agent-bus\\/.*(?:dist\\/cli\\.js|cli\\.js)\\s+${action}(?:\\s|$)`);
+    const pattern=new RegExp(`(?:\\/agent-bus\\/.*(?:dist\\/cli\\.js|cli\\.js)\\s+${action}(?:\\s|$)|\\/agent-bus\\/.*(?:dist\\/broker\\.js|src\\/broker\\.(?:ts|js))(?:\\s|$))`);
     return output.split("\n").map(line=>{const match=line.trim().match(/^(\d+)\s+(.+)$/);if(!match||!pattern.test(match[2]))return 0;return Number(match[1])}).filter(pid=>pid>0&&pid!==process.pid);
   }catch{return[]}
 }
 
 async function stopLegacyServices(includeSupervisors=false):Promise<number>{
-  const pids=[...new Set(legacyServicePids(includeSupervisors))];
+  const pids=[...new Set([...legacyServicePids(includeSupervisors),...agentBusPortListenerPids()])];
   for(const pid of pids){try{process.kill(-pid,"SIGTERM")}catch{try{process.kill(pid,"SIGTERM")}catch{/* already gone */}}}
   if(pids.length)await new Promise(resolve=>setTimeout(resolve,500));
   return pids.length;
@@ -39,7 +53,7 @@ async function stopLegacyServices(includeSupervisors=false):Promise<number>{
 
 async function ensureBrokerStarted():Promise<void>{
   if(await productAlive())return;
-  if(await brokerAlive()||legacyServicePids(false).length){const stopped=await stopLegacyServices(false);if(stopped)process.stderr.write(`replaced ${stopped} legacy Agent Bus service process(es)\n`);for(let i=0;i<25&&await brokerAlive();i+=1)await new Promise(r=>setTimeout(r,80))}
+  if(await brokerAlive()||legacyServicePids(false).length||agentBusPortListenerPids().length){const stopped=await stopLegacyServices(false);if(stopped)process.stderr.write(`replaced ${stopped} legacy Agent Bus service process(es)\n`);for(let i=0;i<25&&(await brokerAlive()||agentBusPortListenerPids().length);i+=1)await new Promise(r=>setTimeout(r,80))}
   mkdirSync(BUS_HOME,{recursive:true});
   const log=openSync(join(BUS_HOME,"broker.log"),"a");
   spawn(process.execPath,[CLI_PATH,"broker"],{detached:true,stdio:["ignore",log,log]}).unref();
