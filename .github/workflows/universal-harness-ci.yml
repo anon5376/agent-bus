@@ -6,6 +6,7 @@ on:
     branches:
       - main
       - agent/universal-harness-prototype
+      - agent/web-dashboard
 
 permissions:
   contents: read
@@ -16,16 +17,10 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - run: tar -czf agent-bus-source.tgz --exclude=.git --exclude=node_modules --exclude=dist --exclude=dist-test .
-      - uses: actions/upload-artifact@v4
-        with:
-          name: agent-bus-source
-          path: agent-bus-source.tgz
-          retention-days: 1
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
+      - run: npm install
       - run: npm run build
       - run: npm test
