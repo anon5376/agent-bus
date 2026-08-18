@@ -47,17 +47,22 @@ launcher_payload() {
 is_agent_bus_launcher() {
   local path="$1"
   [[ -L "$path" || -f "$path" ]] || return 1
-  local payload
+  local payload name expected
   payload="$(launcher_payload "$path")"
+  name="$(basename "$path")"
   [[ "$payload" == *"# Agent Bus canonical launcher"* ]] && return 0
   [[ "$payload" == *"node_modules/agent-bus/"* ]] && return 0
-  [[ "$payload" == *"/agent-bus/"*"dist/cli.js"* ]] && return 0
-  [[ "$payload" == *"/agent-bus/"*"dist/mcp-server.js"* ]] && return 0
-  [[ "$payload" == *"/agent-bus/"*"dist/openai-compatible-harness.js"* ]] && return 0
-  [[ "$payload" == *"/agent-bus-"*"dist/cli.js"* ]] && return 0
-  [[ "$payload" == *"/agent-bus-"*"dist/mcp-server.js"* ]] && return 0
-  [[ "$payload" == *"/agent-bus-"*"dist/openai-compatible-harness.js"* ]] && return 0
-  return 1
+  case "$name" in
+    agent-bus) expected="dist/cli.js" ;;
+    agent-bus-mcp) expected="dist/mcp-server.js" ;;
+    agent-bus-openai-compatible) expected="dist/openai-compatible-harness.js" ;;
+    *) return 1 ;;
+  esac
+  # Checkout directory names are not stable. An old clone may be named
+  # agent-bus-old, old-agent-bus, or anything else containing agent-bus.
+  # The executable name plus the exact permanent dist entrypoint keeps this
+  # narrow while still finding those installations.
+  [[ "$payload" == *"agent-bus"*"$expected"* ]]
 }
 
 install_at() {
