@@ -73,21 +73,23 @@ npm run build:web
 
 ARTIFACT_ID="$(node --input-type=module <<'NODE'
 import { createHash } from 'node:crypto';
-import { readFileSync, readdirSync, statSync } from 'node:fs';
-import { join, relative } from 'node:path';
-const root = 'dist';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
+const inputs = ['dist', 'cli.js', 'package.json', 'package-lock.json'];
 const files = [];
-function walk(dir) {
-  for (const name of readdirSync(dir).sort()) {
-    const path = join(dir, name);
-    const stat = statSync(path);
-    if (stat.isDirectory()) walk(path); else if (stat.isFile()) files.push(path);
+function walk(path) {
+  if (!existsSync(path)) return;
+  const stat = statSync(path);
+  if (stat.isDirectory()) {
+    for (const name of readdirSync(path).sort()) walk(join(path, name));
+  } else if (stat.isFile()) {
+    files.push(path);
   }
 }
-walk(root);
+for (const input of inputs) walk(input);
 const hash = createHash('sha256');
-for (const path of files) {
-  hash.update(relative(root, path));
+for (const path of files.sort()) {
+  hash.update(path);
   hash.update('\0');
   hash.update(readFileSync(path));
   hash.update('\0');
@@ -106,6 +108,7 @@ if [[ ! -d "$RELEASE_DIR" ]]; then
   STAGE_DIR="$(mktemp -d "$APP_ROOT/.stage.XXXXXX")"
   cp -R "$ROOT/dist" "$STAGE_DIR/dist"
   cp -R "$ROOT/node_modules" "$STAGE_DIR/node_modules"
+  install -m 0755 "$ROOT/cli.js" "$STAGE_DIR/cli.js"
   install -m 0644 "$ROOT/package.json" "$ROOT/package-lock.json" "$ROOT/agent-bus.config.json" "$STAGE_DIR/"
   printf '%s\n' "$ARTIFACT_ID" > "$STAGE_DIR/ARTIFACT_ID"
   mv "$STAGE_DIR" "$RELEASE_DIR"
