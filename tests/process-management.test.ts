@@ -22,24 +22,30 @@ test("process classification reuses only the exact current Agent Bus build", () 
   assert.equal(owner.kind, "current");
 });
 
-test("process classification recognizes old Agent Bus health without relying on process regex", () => {
-  const owner = classifyPortOwner(77, "node /some/renamed/location/server.js", {
+test("process classification recognizes legacy Agent Bus only with a broker fingerprint", () => {
+  const health = {
     ok: true,
     pid: 77,
     durable: true,
     agents: 1,
     tasks: 2,
     runs: 3,
-  }, buildId);
+  };
+  assert.equal(classifyPortOwner(77, "node /some/renamed/location/server.js", health, buildId, false).kind, "unrelated");
+  const owner = classifyPortOwner(77, "node /some/renamed/location/server.js", health, buildId, true);
   assert.equal(owner.kind, "agent-bus");
   assert.match(owner.reason, /legacy/i);
 });
 
-test("process classification protects unrelated port owners", () => {
+test("process classification protects unrelated port owners even if health superficially resembles a broker", () => {
   const owner = classifyPortOwner(99, "/usr/bin/python3 unrelated-server.py", {
     ok: true,
     pid: 99,
-  }, buildId);
+    durable: true,
+    agents: 0,
+    tasks: 0,
+    runs: 0,
+  }, buildId, false);
   assert.equal(owner.kind, "unrelated");
 });
 
