@@ -44,7 +44,13 @@ function legacyHealthShape(health: ProductHealth | null): boolean {
     && Number.isFinite(Number(health.runs));
 }
 
-export function classifyPortOwner(pid: number, command: string, health: ProductHealth | null, expectedBuildId: string): PortOwner {
+export function classifyPortOwner(
+  pid: number,
+  command: string,
+  health: ProductHealth | null,
+  expectedBuildId: string,
+  legacyCatalogFingerprint = false,
+): PortOwner {
   const healthBelongsToPid = Number(health?.pid) === pid;
   if (healthBelongsToPid && health?.product === PRODUCT_NAME) {
     const current = health.productProtocol === PRODUCT_PROTOCOL_VERSION
@@ -58,8 +64,8 @@ export function classifyPortOwner(pid: number, command: string, health: ProductH
       reason: current ? "current Agent Bus product" : "Agent Bus product with a different build/protocol",
     };
   }
-  if (healthBelongsToPid && legacyHealthShape(health)) {
-    return { pid, command, kind: "agent-bus", reason: "legacy Agent Bus health signature" };
+  if (healthBelongsToPid && legacyHealthShape(health) && legacyCatalogFingerprint) {
+    return { pid, command, kind: "agent-bus", reason: "legacy Agent Bus broker fingerprint" };
   }
   if (knownAgentBusCommand(command)) {
     return { pid, command, kind: "agent-bus", reason: "known Agent Bus executable" };
@@ -97,11 +103,34 @@ export async function fetchHealth(url: string): Promise<ProductHealth | null> {
   }
 }
 
+async function legacyCatalogFingerprint(url: string): Promise<boolean> {
+  try {
+    const response = await fetch(`${url}/catalog`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+      signal: AbortSignal.timeout(1200),
+    });
+    if (!response.ok) return false;
+    const body = await response.json() as Record<string, unknown>;
+    return typeof body.capabilityNotice === "string"
+      && body.providers !== null && typeof body.providers === "object"
+      && body.harnesses !== null && typeof body.harnesses === "object"
+      && body.models !== null && typeof body.models === "object"
+      && body.roles !== null && typeof body.roles === "object"
+      && body.agents !== null && typeof body.agents === "object"
+      && body.constraints !== null && typeof body.constraints === "object";
+  } catch {
+    return false;
+  }
+}
+
 export async function inspectPort(port: number, url: string, expectedBuildId: string): Promise<PortOwner[]> {
   const pids = listenerPids(port);
   if (!pids.length) return [];
   const health = await fetchHealth(url);
-  return pids.map((pid) => classifyPortOwner(pid, processCommand(pid), health, expectedBuildId));
+  const legacyFingerprint = legacyHealthShape(health) ? await legacyCatalogFingerprint(url) : false;
+  return pids.map((pid) => classifyPortOwner(pid, processCommand(pid), health, expectedBuildId, legacyFingerprint));
 }
 
 function knownServicePids(includeSupervisors: boolean): number[] {
@@ -183,7 +212,7 @@ export async function stopAgentBusProcesses(options: {
   const pids = [
     ...safeListenerPids,
     ...knownServicePids(options.includeSupervisors),
-    ...(options.includeSupervisors ? await supervisorPids(options.url, health) : []),
+    ...(options.includeSupervisors && !unrelated.length ? await supervisorPids(options.url, health) : []),
   ];
   const { stopped, forced } = await terminatePids(pids);
   return { stoppedPids: stopped, forcedPids: forced, unrelated };
