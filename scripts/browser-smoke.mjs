@@ -174,7 +174,7 @@ try {
     const cookieState = await cdp.send("Network.getCookies", { urls: [handle.url] });
     return cookieState.cookies.some((cookie) => cookie.name === "agent_bus_session" && cookie.httpOnly === true);
   }, "ticket login");
-  assert.equal(first.state.phase, "mounted");
+  assert.equal(first.state.mounted, true);
 
   const reload = await runChrome(handle.url, profile, async (state) => state.mounted && state.rootChildren > 0 && state.text.includes("Agent Bus") && state.search === "", "session reload");
   assert.ok(reload.state.text.includes("Agent Bus"));
