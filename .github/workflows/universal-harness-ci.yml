@@ -8,7 +8,7 @@ on:
       - fix/installed-dashboard-runtime
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build-and-test:
@@ -17,21 +17,6 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Apply staged browser launch patch
-        if: (github.event_name == 'push' && github.ref == 'refs/heads/fix/installed-dashboard-runtime') || (github.event_name == 'pull_request' && github.head_ref == 'fix/installed-dashboard-runtime')
-        run: |
-          if [[ -f scripts/apply-browser-launch-fixes.mjs ]]; then
-            git fetch origin fix/installed-dashboard-runtime
-            git checkout -B fix/installed-dashboard-runtime origin/fix/installed-dashboard-runtime
-            node scripts/apply-browser-launch-fixes.mjs
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add -A
-            git commit -m "test: make Chromium launch and checkpoints deterministic"
-            git push origin HEAD:fix/installed-dashboard-runtime
-          fi
       - uses: actions/setup-node@v4
         with:
           node-version: 22
