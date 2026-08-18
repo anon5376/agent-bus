@@ -24,6 +24,12 @@ function showBootFailure(title: string, detail: unknown): void {
   (globalThis as any).__AGENT_BUS_BOOTSTRAP__ = { phase: "failed", error: message.textContent };
 }
 
+function markMountedIfReady(): boolean {
+  const mounted = Boolean(document.querySelector('[data-agent-bus-mounted="true"]'));
+  if (mounted) (globalThis as any).__AGENT_BUS_BOOTSTRAP__ = { phase: "mounted" };
+  return mounted;
+}
+
 (globalThis as any).__AGENT_BUS_BOOTSTRAP__ = { phase: "entry-loaded" };
 
 window.onerror = (_message, _source, _line, _column, error) => {
@@ -38,12 +44,14 @@ window.addEventListener("unhandledrejection", (event) => {
 try {
   import("./main.tsx")
     .then(() => {
+      if (markMountedIfReady()) return;
       (globalThis as any).__AGENT_BUS_BOOTSTRAP__ = { phase: "react-module-loaded" };
       window.setTimeout(() => {
+        if (markMountedIfReady()) return;
         if (document.getElementById("agent-bus-boot")) {
           showBootFailure("Agent Bus frontend did not mount", "The React module loaded but did not replace the boot screen.");
         } else {
-          (globalThis as any).__AGENT_BUS_BOOTSTRAP__ = { phase: "mounted" };
+          showBootFailure("Agent Bus frontend did not finish booting", "The boot screen disappeared but the mounted application marker was not found.");
         }
       }, 1200);
     })
