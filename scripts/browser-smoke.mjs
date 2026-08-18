@@ -116,7 +116,13 @@ async function runChrome(url, profileDir, verify, label) {
       const timer = setTimeout(resolve, 1500);
       browser.once("exit", () => { clearTimeout(timer); resolve(); });
     });
-    if (browser.exitCode === null) browser.kill("SIGKILL");
+    if (browser.exitCode === null) {
+      browser.kill("SIGKILL");
+      await new Promise((resolve) => {
+        const timer = setTimeout(resolve, 1000);
+        browser.once("exit", () => { clearTimeout(timer); resolve(); });
+      });
+    }
   }
 }
 
@@ -165,8 +171,8 @@ try {
 
   const first = await runChrome(`${handle.url}/?ticket=${encodeURIComponent(ticket)}`, profile, async (state, cdp) => {
     if (!(state.rootChildren > 0 && state.mounted && state.text.includes("Agent Bus") && state.search === "")) return false;
-    const cookies = await cdp.send("Network.getCookies", { urls: [handle.url] });
-    return cookies.cookies.some((cookie) => cookie.name === "agent_bus_session" && cookie.httpOnly === true);
+    const cookieState = await cdp.send("Network.getCookies", { urls: [handle.url] });
+    return cookieState.cookies.some((cookie) => cookie.name === "agent_bus_session" && cookie.httpOnly === true);
   }, "ticket login");
   assert.equal(first.state.phase, "mounted");
 
@@ -196,5 +202,6 @@ try {
 } finally {
   if (expiredHandle) await expiredHandle.close().catch(() => {});
   await handle.close().catch(() => {});
-  rmSync(root, { recursive: true, force: true });
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }
