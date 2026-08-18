@@ -2,6 +2,10 @@ import { defineConfig } from "vite";
 
 export default defineConfig({
   root: "web",
+  esbuild: {
+    jsx: "automatic",
+    jsxImportSource: "react",
+  },
   build: {
     outDir: "../dist/web",
     emptyOutDir: true,
