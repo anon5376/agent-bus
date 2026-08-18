@@ -8,29 +8,47 @@ function replaceOnce(path, from, to) {
   writeFileSync(path, source.replace(from, to));
 }
 
-for (const path of ["scripts/browser-smoke.mjs", "scripts/installed-browser-smoke.mjs"]) {
-  replaceOnce(
-    path,
-    'import { mkdtempSync, readFileSync, rmSync } from "node:fs";',
-    'import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";',
-  );
-  replaceOnce(
-    path,
-    '  const debugPort = await freePort();\n  const browser = spawn(chromeBinary(), [',
-    '  const debugPort = await freePort();\n  mkdirSync(profileDir, { recursive: true });\n  const browser = spawn(chromeBinary(), [',
-  );
-  replaceOnce(
-    path,
-    '    `--remote-debugging-port=${debugPort}`,',
-    '    `--remote-debugging-address=127.0.0.1`,\n    `--remote-debugging-port=${debugPort}`,',
-  );
-  replaceOnce(
-    path,
-    '    await waitForJson(`http://127.0.0.1:${debugPort}/json/version`);',
-    '    try {\n      await waitForJson(`http://127.0.0.1:${debugPort}/json/version`);\n    } catch (error) {\n      throw new Error(`${error.message}\\nChrome exit=${browser.exitCode} signal=${browser.signalCode}\\n${stderr.slice(-5000)}`);\n    }',
-  );
-}
+replaceOnce(
+  "scripts/browser-smoke.mjs",
+  'import { mkdtempSync, readFileSync, rmSync } from "node:fs";',
+  'import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";',
+);
+replaceOnce(
+  "scripts/browser-smoke.mjs",
+  '  const debugPort = await freePort();\n  const browser = spawn(chromeBinary(), [',
+  '  const debugPort = await freePort();\n  mkdirSync(profileDir, { recursive: true });\n  const browser = spawn(chromeBinary(), [',
+);
+replaceOnce(
+  "scripts/browser-smoke.mjs",
+  '    `--remote-debugging-port=${debugPort}`,',
+  '    `--remote-debugging-address=127.0.0.1`,\n    `--remote-debugging-port=${debugPort}`,',
+);
+replaceOnce(
+  "scripts/browser-smoke.mjs",
+  '    await waitForJson(`http://127.0.0.1:${debugPort}/json/version`);',
+  '    try {\n      await waitForJson(`http://127.0.0.1:${debugPort}/json/version`);\n    } catch (error) {\n      throw new Error(`${error.message}\\nChrome exit=${browser.exitCode} signal=${browser.signalCode}\\n${stderr.slice(-5000)}`);\n    }',
+);
 
+replaceOnce(
+  "scripts/installed-browser-smoke.mjs",
+  'import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";',
+  'import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";',
+);
+replaceOnce(
+  "scripts/installed-browser-smoke.mjs",
+  'const debugPort = await freePort();\nconst browser = spawn(chromeBinary(), [',
+  'const debugPort = await freePort();\nconst profilePath = join(browserRoot, "profile");\nmkdirSync(profilePath, { recursive: true });\nconst browser = spawn(chromeBinary(), [',
+);
+replaceOnce(
+  "scripts/installed-browser-smoke.mjs",
+  '  `--remote-debugging-port=${debugPort}`,\n  `--user-data-dir=${join(browserRoot, "profile")}`,',
+  '  `--remote-debugging-address=127.0.0.1`,\n  `--remote-debugging-port=${debugPort}`,\n  `--user-data-dir=${profilePath}`,',
+);
+replaceOnce(
+  "scripts/installed-browser-smoke.mjs",
+  '  await waitForJson(`http://127.0.0.1:${debugPort}/json/version`);',
+  '  try {\n    await waitForJson(`http://127.0.0.1:${debugPort}/json/version`);\n  } catch (error) {\n    throw new Error(`${error.message}\\nChrome exit=${browser.exitCode} signal=${browser.signalCode}\\n${browserError.slice(-5000)}`);\n  }',
+);
 replaceOnce(
   "scripts/installed-browser-smoke.mjs",
   'const processCommand = command("ps", "-p", String(runtime.pid), "-o", "command=");\nassert.match(processCommand, /\\.agent-bus\\/app\\/current\\/cli\\.js broker|\\.agent-bus\\/app\\/releases\\/[^/]+\\/cli\\.js broker/);',
@@ -42,7 +60,6 @@ replaceOnce(
   'checkpoint(5,"createRoot invocation reached");\nconst reactRoot=createRoot(rootElement);\ncheckpoint(6,"React root created; render invocation reached");\nreactRoot.render(<AppErrorBoundary><App/></AppErrorBoundary>);',
   'const reactRoot=createRoot(rootElement);\ncheckpoint(5,"createRoot returned successfully");\nreactRoot.render(<AppErrorBoundary><App/></AppErrorBoundary>);\ncheckpoint(6,"render returned successfully");',
 );
-
 replaceOnce(
   "scripts/verify-production-bundle.mjs",
   'assert.ok(javascript.some(code=>code.includes("createRoot invocation reached")),"built application must contain createRoot checkpoint instrumentation");',
