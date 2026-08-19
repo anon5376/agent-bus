@@ -35,7 +35,12 @@ jobs:
           after = 'updated, count = re.subn(pattern, lambda _match: after, text, count=1, flags=re.S)'
           if text.count(before) != 1:
               raise SystemExit('regex helper patch target missing or ambiguous')
-          path.write_text(text.replace(before, after, 1))
+          text = text.replace(before, after, 1)
+          release_before = '''''' + '"$RESOLVED_AGENT_BUS" models'
+          if text.count(release_before) != 2:
+              raise SystemExit(f'release helper patch target count={text.count(release_before)}')
+          text = text.replace(release_before, '''''' + '$RESOLVED_AGENT_BUS models', 1)
+          path.write_text(text)
           PY
           python3 scripts/apply-review-fixes.py
       - run: npm ci
