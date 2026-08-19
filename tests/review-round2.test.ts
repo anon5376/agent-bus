@@ -32,6 +32,14 @@ test("explicit AGENT_BUS_CONFIG wins over project-local config for supervisor re
   }
 });
 
+test("CLI autostart supervisors are pinned to the broker config source", () => {
+  const source = readFileSync(join(process.cwd(), "src", "cli.ts"), "utf8");
+  assert.match(source, /function startSupervisor\(agentId:string,workdir:string,configPath:string\)/);
+  assert.match(source, /AGENT_BUS_CONFIG:configPath/);
+  assert.match(source, /const configPath=process\.env\.AGENT_BUS_CONFIG\?\?DEFAULT_CONFIG_PATH/);
+  assert.match(source, /startSupervisor\(agent\.id,workdir,configPath\)/);
+});
+
 test("scoped Agent Bus command matching does not claim a generic checkout", () => {
   const command = "/opt/homebrew/bin/node /Users/me/code/agent-bus/dist/cli.js broker";
   assert.equal(knownAgentBusCommand(command, { busHome: "/tmp/instance-a", applicationRoot: "/tmp/instance-a/app/current" }), false);
