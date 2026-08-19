@@ -6,15 +6,42 @@ on:
     branches:
       - main
       - fix/installed-dashboard-runtime
+      - fix/review-confirmed-issues
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
+  apply-review-fixes:
+    name: Apply and validate review fixes
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.ref == 'refs/heads/fix/review-confirmed-issues'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Apply deterministic fixes
+        run: python3 scripts/apply-review-fixes.py
+      - run: npm ci
+      - run: npm test
+      - name: Commit validated fixes
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'fix: close confirmed runtime review issues'
+          git push origin HEAD:fix/review-confirmed-issues
+
   build-and-test:
     name: Ubuntu build, browser, lifecycle
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    if: github.ref != 'refs/heads/fix/review-confirmed-issues'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -32,6 +59,7 @@ jobs:
     name: macOS installed Chromium and Safari
     runs-on: macos-14
     timeout-minutes: 35
+    if: github.ref != 'refs/heads/fix/review-confirmed-issues'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
