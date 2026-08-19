@@ -1,0 +1,97 @@
+name: Harden browser smoke
+
+on:
+  push:
+    branches:
+      - fix/review-confirmed-issues
+
+permissions:
+  contents: write
+
+jobs:
+  harden:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/review-confirmed-issues
+      - name: Make Chrome startup and profile shutdown deterministic
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('scripts/browser-smoke.mjs')
+          text = path.read_text()
+
+          before = '      await waitForJson(`http://127.0.0.1:${debugPort}/json/version`);'
+          after = '      await waitForJson(`http://127.0.0.1:${debugPort}/json/version`, 20_000);'
+          if text.count(before) != 1:
+              raise SystemExit('startup wait target missing or ambiguous')
+          text = text.replace(before, after, 1)
+
+          before = '''      if (lastState && await verify(lastState, cdp, iteration)) {
+        const events = cdp.events.slice();
+        cdp.ws.close();
+        return { state: lastState, events, stderr };
+      }
+'''
+          after = '''      if (lastState && await verify(lastState, cdp, iteration)) {
+        const events = cdp.events.slice();
+        const exited = new Promise((resolve) => {
+          if (browser.exitCode !== null) resolve();
+          else browser.once("exit", resolve);
+        });
+        void cdp.send("Browser.close").catch(() => {});
+        await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 1200))]);
+        cdp.ws.close();
+        return { state: lastState, events, stderr };
+      }
+'''
+          if text.count(before) != 1:
+              raise SystemExit('successful browser close target missing or ambiguous')
+          text = text.replace(before, after, 1)
+
+          before = '''  } finally {
+    browser.kill("SIGTERM");
+    await new Promise((resolve) => {
+      const timer = setTimeout(resolve, 1800);
+      browser.once("exit", () => { clearTimeout(timer); resolve(); });
+    });
+    if (browser.exitCode === null) {
+      browser.kill("SIGKILL");
+      await new Promise((resolve) => {
+        const timer = setTimeout(resolve, 1200);
+        browser.once("exit", () => { clearTimeout(timer); resolve(); });
+      });
+    }
+  }
+'''
+          after = '''  } finally {
+    if (browser.exitCode === null) {
+      browser.kill("SIGTERM");
+      await new Promise((resolve) => {
+        const timer = setTimeout(resolve, 1800);
+        browser.once("exit", () => { clearTimeout(timer); resolve(); });
+      });
+    }
+    if (browser.exitCode === null) {
+      browser.kill("SIGKILL");
+      await new Promise((resolve) => {
+        const timer = setTimeout(resolve, 1200);
+        browser.once("exit", () => { clearTimeout(timer); resolve(); });
+      });
+    }
+  }
+'''
+          if text.count(before) != 1:
+              raise SystemExit('browser fallback shutdown target missing or ambiguous')
+          text = text.replace(before, after, 1)
+          path.write_text(text)
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add scripts/browser-smoke.mjs
+          git rm .github/workflows/harden-browser-smoke.yml
+          git diff --cached --check
+          git commit -m 'test: make browser smoke lifecycle deterministic'
+          git push origin HEAD:fix/review-confirmed-issues
