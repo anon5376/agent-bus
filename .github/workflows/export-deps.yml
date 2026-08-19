@@ -1,0 +1,32 @@
+name: Export staging dependencies
+
+on:
+  push:
+    branches:
+      - debug/product-finish-mcp
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export-deps:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.ref == 'debug/product-finish-mcp'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: debug/product-finish-mcp
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Pack dependencies
+        run: tar -czf "$RUNNER_TEMP/agent-bus-node-modules.tgz" node_modules
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-bus-node-modules
+          path: ${{ runner.temp }}/agent-bus-node-modules.tgz
+          retention-days: 1
