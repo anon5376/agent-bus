@@ -16,9 +16,11 @@ jobs:
     name: Apply and validate review fixes
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    if: github.ref == 'refs/heads/fix/review-confirmed-issues'
+    if: github.ref == 'refs/heads/fix/review-confirmed-issues' || github.event.pull_request.head.ref == 'fix/review-confirmed-issues'
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: fix/review-confirmed-issues
       - uses: actions/setup-node@v4
         with:
           node-version: 22
