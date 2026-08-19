@@ -29,6 +29,7 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          import re
           path = Path('scripts/apply-review-fixes.py')
           text = path.read_text()
           before = 'updated, count = re.subn(pattern, after, text, count=1, flags=re.S)'
@@ -40,6 +41,13 @@ jobs:
           if text.count(release_marker) != 2:
               raise SystemExit(f'release helper patch target count={text.count(release_marker)}')
           text = text.replace(release_marker, "        r'''\"$RESOLVED_AGENT_BUS\" models", 2)
+          lifecycle_start = text.index('def patch_lifecycle')
+          lifecycle_end = text.index('update("scripts/cli-lifecycle-smoke.mjs", patch_lifecycle)', lifecycle_start)
+          lifecycle = text[lifecycle_start:lifecycle_end]
+          lifecycle, count = re.subn(r"(?m)^(\s*)'''(?=[^,\n])", r"\1r'''", lifecycle)
+          if count != 4:
+              raise SystemExit(f'lifecycle raw-string patch count={count}')
+          text = text[:lifecycle_start] + lifecycle + text[lifecycle_end:]
           workflow_call = 'update(".github/workflows/universal-harness-ci.yml", patch_workflow)'
           if text.count(workflow_call) != 1:
               raise SystemExit('workflow patch call missing or ambiguous')
