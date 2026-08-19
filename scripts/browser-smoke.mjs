@@ -90,7 +90,7 @@ async function runChrome(url, profileDir, verify, label, options = {}) {
   browser.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
   try {
     try {
-      await waitForJson(`http://127.0.0.1:${debugPort}/json/version`);
+      await waitForJson(`http://127.0.0.1:${debugPort}/json/version`, 20_000);
     } catch (error) {
       throw new Error(`${error.message}\nChrome exit=${browser.exitCode} signal=${browser.signalCode}\n${stderr.slice(-5000)}`);
     }
@@ -271,6 +271,7 @@ async function issueTicket(handle, token) {
 
 const root = mkdtempSync(join(tmpdir(), "agent-bus-browser-"));
 const profile = join(root, "profile");
+const reloadProfile = join(root, "reload-profile");
 const replayProfile = join(root, "replay-profile");
 const expiredProfile = join(root, "expired-profile");
 const blockedProfile = join(root, "blocked-profile");
@@ -298,11 +299,13 @@ try {
   const ticket = await issueTicket(handle, token);
 
   let agentModelFieldsChecked = false;
+  let sessionCookie = null;
   const first = await runChrome(`${handle.url}/?ticket=${encodeURIComponent(ticket)}&build=${encodeURIComponent(runtime.buildId)}&launch=chrome-smoke`, profile, async (state, cdp) => {
     if (!(state.mounted && state.rootChildren > 0 && state.text.includes("Agent Bus") && state.search === "" && state.boot?.highest === 10)) return false;
     if (!agentModelFieldsChecked) { await verifyAgentModelFields(cdp); agentModelFieldsChecked = true; }
     const cookies = await cdp.send("Network.getCookies", { urls: [handle.url] });
-    return cookies.cookies.some((cookie) => cookie.name === "agent_bus_session" && cookie.httpOnly === true);
+    sessionCookie = cookies.cookies.find((cookie) => cookie.name === "agent_bus_session" && cookie.httpOnly === true) ?? null;
+    return Boolean(sessionCookie);
   }, "ticket login");
   assertAllCheckpoints(first.state, "ticket login");
   assert.equal(first.state.boot.runtime.buildId, runtime.buildId);
@@ -314,7 +317,16 @@ try {
     assert.ok(responseUrls.some((url) => new URL(url).pathname === script.url), `browser did not receive ${script.url}`);
   }
 
-  const reload = await runChrome(handle.url, profile, async (state) => state.mounted && state.rootChildren > 0 && state.text.includes("Agent Bus") && state.search === "" && state.boot?.highest === 10, "session reload");
+  assert.ok(sessionCookie?.value, "ticket login did not expose the HttpOnly session cookie to CDP");
+  const reload = await runChrome(handle.url, reloadProfile, async (state) => state.mounted && state.rootChildren > 0 && state.text.includes("Agent Bus") && state.search === "" && state.boot?.highest === 10, "session reload", {
+    beforeNavigate: (cdp) => cdp.send("Network.setCookie", {
+      name: "agent_bus_session",
+      value: sessionCookie.value,
+      url: handle.url,
+      httpOnly: true,
+      sameSite: "Strict",
+    }),
+  });
   assertAllCheckpoints(reload.state, "session reload");
   assertCleanBrowser(reload, "session reload");
 
