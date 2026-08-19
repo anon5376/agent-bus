@@ -1,6 +1,7 @@
 name: Export staging checkout
 
 on:
+  pull_request:
   push:
     branches:
       - debug/product-finish-mcp
