@@ -67,6 +67,24 @@ test("known Agent Bus command matcher is narrow", () => {
   assert.equal(knownAgentBusCommand("/opt/homebrew/bin/node /Users/me/agent-bus/dist/broker.js"), true);
   assert.equal(knownAgentBusCommand("/opt/homebrew/bin/node /Users/me/.agent-bus/app/current/cli.js broker"), true);
   assert.equal(knownAgentBusCommand("/opt/homebrew/bin/node /Users/me/.agent-bus/app/releases/abc123/dist/cli.js broker"), true);
+  assert.equal(knownAgentBusCommand("/opt/homebrew/bin/node /tmp/custom-bus/app/releases/abc123/dist/cli.js broker", { busHome: "/tmp/custom-bus" }), true);
+  assert.equal(knownAgentBusCommand("/opt/homebrew/bin/node /tmp/other-bus/app/releases/abc123/dist/cli.js broker", { busHome: "/tmp/custom-bus" }), false);
   assert.equal(knownAgentBusCommand("python server.py --name agent-bus --port 7717"), false);
   assert.equal(knownAgentBusCommand("node /Users/me/other-agent-bus-project/server.js"), false);
+});
+
+
+test("product health from another Agent Bus home is not owned by this instance", () => {
+  const owner = classifyPortOwner(123, "node /tmp/other/app/current/dist/cli.js broker", {
+    ok: true,
+    pid: 123,
+    product: PRODUCT_NAME,
+    productProtocol: PRODUCT_PROTOCOL_VERSION,
+    buildId,
+    dashboard: true,
+    uiBuilt: true,
+    runtime: { busHome: "/tmp/other", applicationRoot: "/tmp/other/app/releases/abc" },
+  }, buildId, false, { busHome: "/tmp/mine", applicationRoot: "/tmp/mine/app/current" });
+  assert.equal(owner.kind, "unrelated");
+  assert.match(owner.reason, /different Agent Bus instance/i);
 });

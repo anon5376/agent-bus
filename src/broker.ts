@@ -739,6 +739,16 @@ export class BrokerService {
         agent.lastSeen = now;
         this.agents.set(id, agent);
         this.store.saveAgent(agent);
+        const supervisorPid = Number(body.pid);
+        if (Number.isFinite(supervisorPid) && supervisorPid > 0) {
+          this.supervisorMeta.set(id, {
+            pid: supervisorPid,
+            childPid: null,
+            workdir: String(body.workdir ?? ""),
+            cli: String(body.cli ?? agent.harness),
+            startedAt: Date.now(),
+          });
+        }
         this.audit("register", { id, role: agent.role, model: agent.model, harness: agent.harness });
         return { agent, pendingMessages: this.store.pendingMessages(id).length, roster: this.roster() };
       }

@@ -1,5 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
+import { join, resolve, sep } from "node:path";
+import { ownedAgentBusPids, processCommand } from "./instance-processes.js";
 import { PRODUCT_NAME, PRODUCT_PROTOCOL_VERSION } from "./product-runtime.js";
 
 export interface ProductHealth {
@@ -14,7 +16,7 @@ export interface ProductHealth {
   agents?: number;
   tasks?: number;
   runs?: number;
-  runtime?: { applicationRoot?: string; staticRoot?: string; entrypoint?: string; nodePath?: string; cwd?: string };
+  runtime?: { applicationRoot?: string; staticRoot?: string; entrypoint?: string; nodePath?: string; cwd?: string; busHome?: string };
 }
 
 export interface PortOwner {
@@ -30,12 +32,35 @@ export interface StopResult {
   unrelated: PortOwner[];
 }
 
-export function knownAgentBusCommand(command: string): boolean {
+export interface AgentBusCommandScope {
+  applicationRoot?: string;
+  busHome?: string;
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function runtimeBelongsToScope(health: ProductHealth, scope: AgentBusCommandScope): boolean {
+  if (!scope.busHome) return true;
+  const targetHome = resolve(scope.busHome);
+  const reportedHome = String(health.runtime?.busHome ?? "").trim();
+  if (reportedHome) return resolve(reportedHome) === targetHome;
+  const applicationRoot = String(health.runtime?.applicationRoot ?? "").trim();
+  if (!applicationRoot) return false;
+  const appRoot = join(targetHome, "app");
+  const resolvedApplication = resolve(applicationRoot);
+  return resolvedApplication === appRoot || resolvedApplication.startsWith(`${appRoot}${sep}`);
+}
+
+export function knownAgentBusCommand(command: string, scope: AgentBusCommandScope = {}): boolean {
   const text = command.trim();
   if (!text) return false;
-  const checkout = String.raw`\S*/agent-bus/`;
-  const canonical = String.raw`\S*/\.agent-bus/app/(?:current|releases/[^/]+)/`;
-  const root = `(?:${checkout}|${canonical})`;
+  const roots = [String.raw`\S*/agent-bus/`];
+  if (scope.busHome) roots.push(`${escapeRegex(resolve(scope.busHome))}/app/(?:current|releases/[^/]+)/`);
+  else roots.push(String.raw`\S*/\.agent-bus/app/(?:current|releases/[^/]+)/`);
+  if (scope.applicationRoot) roots.push(`${escapeRegex(resolve(scope.applicationRoot))}/`);
+  const root = `(?:${[...new Set(roots)].join("|")})`;
   return new RegExp(String.raw`(?:^|\s)(?:\S*node\S*\s+)?${root}(?:dist/(?:cli|broker|product-server)\.js|cli\.js)(?:\s+(?:broker|dashboard|supervise)(?:\s|$)|\s*$)`, "i").test(text)
     || new RegExp(String.raw`(?:^|\s)(?:\S*node\S*\s+)?${root}src/(?:broker|product-server)\.(?:js|ts)(?:\s|$)`, "i").test(text);
 }
@@ -54,9 +79,13 @@ export function classifyPortOwner(
   health: ProductHealth | null,
   expectedBuildId: string,
   legacyCatalogFingerprint = false,
+  scope: AgentBusCommandScope = {},
 ): PortOwner {
   const healthBelongsToPid = Number(health?.pid) === pid;
   if (healthBelongsToPid && health?.product === PRODUCT_NAME) {
+    if (!runtimeBelongsToScope(health, scope)) {
+      return { pid, command, kind: "unrelated", reason: "different Agent Bus instance/home" };
+    }
     const current = health.productProtocol === PRODUCT_PROTOCOL_VERSION
       && health.buildId === expectedBuildId
       && health.dashboard === true
@@ -71,7 +100,7 @@ export function classifyPortOwner(
   if (healthBelongsToPid && legacyHealthShape(health) && legacyCatalogFingerprint) {
     return { pid, command, kind: "agent-bus", reason: "legacy Agent Bus broker fingerprint" };
   }
-  if (knownAgentBusCommand(command)) {
+  if (knownAgentBusCommand(command, scope)) {
     return { pid, command, kind: "agent-bus", reason: "known Agent Bus executable" };
   }
   return { pid, command, kind: "unrelated", reason: "listener does not identify as Agent Bus" };
@@ -87,14 +116,6 @@ export function listenerPids(port: number): number[] {
   }
 }
 
-export function processCommand(pid: number): string {
-  if (process.platform === "win32") return "";
-  try {
-    return execFileSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
-  } catch {
-    return "";
-  }
-}
 
 export async function fetchHealth(url: string): Promise<ProductHealth | null> {
   try {
@@ -129,25 +150,28 @@ async function legacyCatalogFingerprint(url: string): Promise<boolean> {
   }
 }
 
-export async function inspectPort(port: number, url: string, expectedBuildId: string): Promise<PortOwner[]> {
+export async function inspectPort(port: number, url: string, expectedBuildId: string, scope: AgentBusCommandScope = {}): Promise<PortOwner[]> {
   const pids = listenerPids(port);
   if (!pids.length) return [];
   const health = await fetchHealth(url);
   const legacyFingerprint = legacyHealthShape(health) ? await legacyCatalogFingerprint(url) : false;
-  return pids.map((pid) => classifyPortOwner(pid, processCommand(pid), health, expectedBuildId, legacyFingerprint));
+  return pids.map((pid) => classifyPortOwner(pid, processCommand(pid), health, expectedBuildId, legacyFingerprint, scope));
 }
 
-function knownServicePids(includeSupervisors: boolean): number[] {
-  if (process.platform === "win32") return [];
+
+
+function installedServicePids(scope: AgentBusCommandScope, includeSupervisors: boolean): number[] {
+  if (process.platform === "win32" || !scope.busHome) return [];
+  const installedRoot = `${join(resolve(scope.busHome), "app")}${sep}`;
   try {
     const output = execFileSync("ps", ["-axo", "pid=,command="], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
     return output.split("\n").flatMap((line) => {
       const match = line.trim().match(/^(\d+)\s+(.+)$/);
       if (!match) return [];
       const pid = Number(match[1]);
-      if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) return [];
       const command = match[2];
-      if (!knownAgentBusCommand(command)) return [];
+      if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) return [];
+      if (!command.includes(installedRoot) || !knownAgentBusCommand(command, scope)) return [];
       if (!includeSupervisors && /\s+supervise(?:\s|$)/.test(command)) return [];
       return [pid];
     });
@@ -156,8 +180,8 @@ function knownServicePids(includeSupervisors: boolean): number[] {
   }
 }
 
-async function supervisorPids(url: string, health: ProductHealth | null): Promise<number[]> {
-  if (!health || !(health.product === PRODUCT_NAME || legacyHealthShape(health))) return [];
+async function brokerSupervisorPids(url: string, health: ProductHealth | null, scope: AgentBusCommandScope): Promise<number[]> {
+  if (!health || health.product !== PRODUCT_NAME || !runtimeBelongsToScope(health, scope)) return [];
   try {
     const response = await fetch(`${url}/state`, {
       method: "POST",
@@ -166,8 +190,17 @@ async function supervisorPids(url: string, health: ProductHealth | null): Promis
       signal: AbortSignal.timeout(1200),
     });
     if (!response.ok) return [];
-    const body = await response.json() as { roster?: Array<{ supervisorPid?: number }> };
-    return (body.roster ?? []).map((item) => Number(item.supervisorPid)).filter((pid) => Number.isInteger(pid) && pid > 0);
+    const body = await response.json() as { roster?: Array<{ id?: string; supervisorPid?: number }> };
+    const applicationRoot = health.runtime?.applicationRoot || scope.applicationRoot;
+    return (body.roster ?? []).flatMap((item) => {
+      const pid = Number(item.supervisorPid);
+      const id = String(item.id ?? "");
+      if (!Number.isInteger(pid) || pid <= 0 || !id) return [];
+      const command = processCommand(pid);
+      if (!knownAgentBusCommand(command, { ...scope, applicationRoot })) return [];
+      if (!new RegExp(`\\ssupervise\\s+${escapeRegex(id)}(?:\\s|$)`).test(command)) return [];
+      return [pid];
+    });
   } catch {
     return [];
   }
@@ -208,16 +241,22 @@ export async function stopAgentBusProcesses(options: {
   url: string;
   expectedBuildId: string;
   includeSupervisors: boolean;
+  busHome?: string;
+  applicationRoot?: string;
 }): Promise<StopResult> {
+  const scope: AgentBusCommandScope = { busHome: options.busHome, applicationRoot: options.applicationRoot };
   const health = await fetchHealth(options.url);
-  const owners = await inspectPort(options.port, options.url, options.expectedBuildId);
+  const owners = await inspectPort(options.port, options.url, options.expectedBuildId, scope);
   const unrelated = owners.filter((owner) => owner.kind === "unrelated");
   const safeListenerPids = owners.filter((owner) => owner.kind !== "unrelated").map((owner) => owner.pid);
-  const pids = [
-    ...safeListenerPids,
-    ...knownServicePids(options.includeSupervisors),
-    ...(options.includeSupervisors && !unrelated.length ? await supervisorPids(options.url, health) : []),
-  ];
+  const registeredPids = options.busHome
+    ? ownedAgentBusPids({ busHome: options.busHome, port: options.port, includeSupervisors: options.includeSupervisors })
+    : [];
+  const installedPids = installedServicePids(scope, options.includeSupervisors);
+  const legacySupervisorPids = options.includeSupervisors && !unrelated.length
+    ? await brokerSupervisorPids(options.url, health, scope)
+    : [];
+  const pids = [...safeListenerPids, ...registeredPids, ...installedPids, ...legacySupervisorPids];
   const { stopped, forced } = await terminatePids(pids);
   return { stoppedPids: stopped, forcedPids: forced, unrelated };
 }

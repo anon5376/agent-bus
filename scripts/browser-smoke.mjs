@@ -182,6 +182,30 @@ function assertAllCheckpoints(state, label) {
   }
 }
 
+async function verifyAgentModelFields(cdp) {
+  await cdp.send("Runtime.evaluate", { expression: "document.querySelector('.right .pane-head button')?.click()" });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  async function selectModel(id) {
+    const changed = await cdp.send("Runtime.evaluate", {
+      expression: `(() => { const select=document.querySelector('[data-agent-model-select="true"]'); if(!select)return false; select.value=${JSON.stringify(id)}; select.dispatchEvent(new Event('change',{bubbles:true})); return true; })()`,
+      returnByValue: true,
+    });
+    assert.equal(changed.result?.value, true, "agent model selector was not found");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const result = await cdp.send("Runtime.evaluate", {
+      expression: `(() => ({exact:document.querySelector('[data-agent-model-exact="true"]')?.value??null,family:document.querySelector('[data-agent-model-family="true"]')?.value??null}))()`,
+      returnByValue: true,
+    });
+    return result.result?.value;
+  }
+  const small = await selectModel("fake-small");
+  assert.equal(small?.exact, "fake-small");
+  const strong = await selectModel("fake-strong");
+  assert.equal(strong?.exact, "fake-strong", "model metadata must update when model selection changes");
+  assert.equal(strong?.family, "fake");
+  await cdp.send("Runtime.evaluate", { expression: "document.querySelector('.modal .modal-head button')?.click()" });
+}
+
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -273,8 +297,10 @@ try {
   const token = readFileSync(operatorTokenPath, "utf8").trim();
   const ticket = await issueTicket(handle, token);
 
+  let agentModelFieldsChecked = false;
   const first = await runChrome(`${handle.url}/?ticket=${encodeURIComponent(ticket)}&build=${encodeURIComponent(runtime.buildId)}&launch=chrome-smoke`, profile, async (state, cdp) => {
     if (!(state.mounted && state.rootChildren > 0 && state.text.includes("Agent Bus") && state.search === "" && state.boot?.highest === 10)) return false;
+    if (!agentModelFieldsChecked) { await verifyAgentModelFields(cdp); agentModelFieldsChecked = true; }
     const cookies = await cdp.send("Network.getCookies", { urls: [handle.url] });
     return cookies.cookies.some((cookie) => cookie.name === "agent_bus_session" && cookie.httpOnly === true);
   }, "ticket login");

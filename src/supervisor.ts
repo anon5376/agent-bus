@@ -219,16 +219,18 @@ export async function supervise(agentId: string, workdir: string): Promise<void>
   mkdirSync(LOG_DIR, { recursive: true });
   mkdirSync(TRANSCRIPT_DIR, { recursive: true });
   mkdirSync(SESSION_DIR, { recursive: true });
-  const config = loadConfig(configPathFromProject(workdir));
-  const agent = resolveAgent(config, agentId);
-  if (!agent.enabled) throw new Error(`agent ${agentId} is disabled in configuration`);
+  const configPath = configPathFromProject(workdir);
+  const preflight = resolveAgent(loadConfig(configPath), agentId);
+  if (!preflight.enabled) throw new Error(`agent ${agentId} is disabled in configuration`);
   if (!(await brokerAlive())) throw new Error("broker is not running — start it with: agent-bus broker");
 
   const token = readTokenFile(agentTokenPath(agentId));
   if (!token) {
     throw new Error(`no token for ${agentId}; provision it explicitly with: agent-bus provision ${agentId}`);
   }
-  await brokerCall("/register", { token, id: agentId });
+  await brokerCall("/register", { token, id: agentId, pid: process.pid, workdir, cli: preflight.harnessDefinition.id });
+  const agent = resolveAgent(loadConfig(configPath), agentId);
+  if (!agent.enabled) throw new Error(`agent ${agentId} was disabled while the supervisor was starting`);
   await reportPresence(token, agent, workdir, null);
 
   const adapter = getHarnessAdapter(agent.harnessDefinition.adapter);
