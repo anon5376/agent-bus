@@ -20,11 +20,19 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - name: Apply fixes
+      - name: Apply fixes without mutating workflows
         run: |
           set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('scripts/apply-review-round2.mjs')
+          text = path.read_text()
+          start = text.index('\nupdate(".github/workflows/universal-harness-ci.yml",')
+          end = text.index('\n\nprocess.stdout.write("review round2 fixes applied', start)
+          path.write_text(text[:start] + text[end:])
+          PY
           node scripts/apply-review-round2.mjs
-          rm scripts/apply-review-round2.mjs .github/workflows/apply-review-round2.yml
+          rm scripts/apply-review-round2.mjs
       - run: npm ci
       - run: npm test
       - name: Commit validated source
