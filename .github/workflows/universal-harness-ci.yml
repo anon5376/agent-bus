@@ -8,41 +8,9 @@ on:
       - fix/installed-dashboard-runtime
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  apply-review-round2:
-    name: Apply latest PR6 review fixes
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    if: github.event.pull_request.head.ref == 'debug/pr6-review-round2'
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: debug/pr6-review-round2
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - name: Apply, test, and publish validated source
-        run: |
-          set -euo pipefail
-          if [[ ! -f scripts/apply-review-round2.mjs ]]; then
-            echo 'round2 patch already applied'
-            exit 0
-          fi
-          node scripts/apply-review-round2.mjs
-          rm -f scripts/apply-review-round2.mjs .github/workflows/apply-review-round2.yml
-          npm ci
-          npm test
-          rm -rf dist-test
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -A
-          git diff --cached --check
-          git commit -m 'fix: close latest PR6 review issues'
-          git push origin HEAD:debug/pr6-review-round2
-
   build-and-test:
     name: Ubuntu build, browser, lifecycle
     runs-on: ubuntu-latest
@@ -84,6 +52,7 @@ jobs:
           export CHROME_BIN='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
           STALE_BIN="$RUNNER_TEMP/stale-bin"
           OLD_APP="$RUNNER_TEMP/old-agent-bus"
+          alt_port=""
           mkdir -p "$AGENT_BUS_INSTALL_DIR" "$AGENT_BUS_HOME" "$STALE_BIN" "$OLD_APP/dist"
           printf 'preserve-me\n' > "$AGENT_BUS_HOME/install-sentinel"
 
@@ -143,7 +112,12 @@ jobs:
           fi
           grep "Node.js 22.5+" "$RUNNER_TEMP/old-node-launch.out"
 
-          cleanup() { agent-bus stop >/dev/null 2>&1 || true; }
+          cleanup() {
+            agent-bus stop >/dev/null 2>&1 || true
+            if [[ -n "$alt_port" ]]; then
+              AGENT_BUS_PORT="$alt_port" AGENT_BUS_URL="http://127.0.0.1:$alt_port" agent-bus stop >/dev/null 2>&1 || true
+            fi
+          }
           trap cleanup EXIT
 
           cd "$RUNNER_TEMP"
@@ -164,6 +138,28 @@ jobs:
           agent-bus start --no-open
           second_pid="$(curl -fsS http://127.0.0.1:7717/health | node -pe 'JSON.parse(require("fs").readFileSync(0,"utf8")).pid')"
           test "$first_pid" = "$second_pid"
+
+          # Same home, different ports must be isolated by the process registry's port identity.
+          alt_port="$(python3 - <<'PY'
+          import socket
+          sock = socket.socket()
+          sock.bind(('127.0.0.1', 0))
+          print(sock.getsockname()[1])
+          sock.close()
+          PY
+          )"
+          alt_url="http://127.0.0.1:$alt_port"
+          AGENT_BUS_PORT="$alt_port" AGENT_BUS_URL="$alt_url" agent-bus start --no-open
+          alt_health="$(curl -fsS "$alt_url/health")"
+          alt_pid="$(printf '%s' "$alt_health" | node -pe 'JSON.parse(require("fs").readFileSync(0,"utf8")).pid')"
+          agent-bus stop
+          alt_after="$(curl -fsS "$alt_url/health")"
+          test "$(printf '%s' "$alt_after" | node -pe 'JSON.parse(require("fs").readFileSync(0,"utf8")).pid')" = "$alt_pid"
+          AGENT_BUS_PORT="$alt_port" AGENT_BUS_URL="$alt_url" agent-bus stop
+          alt_port=""
+          agent-bus start --no-open
+          health="$(curl -fsS http://127.0.0.1:7717/health)"
+          first_pid="$(printf '%s' "$health" | node -pe 'JSON.parse(require("fs").readFileSync(0,"utf8")).pid')"
 
           for release_id in 11111111111111111111 22222222222222222222 33333333333333333333; do
             mkdir -p "$AGENT_BUS_HOME/app/releases/$release_id"
