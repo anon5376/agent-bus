@@ -36,10 +36,14 @@ jobs:
           if text.count(before) != 1:
               raise SystemExit('regex helper patch target missing or ambiguous')
           text = text.replace(before, after, 1)
-          release_before = "'''\"$RESOLVED_AGENT_BUS\" models"
-          if text.count(release_before) != 2:
-              raise SystemExit(f'release helper patch target count={text.count(release_before)}')
-          text = text.replace(release_before, "'''$RESOLVED_AGENT_BUS models", 1)
+          release_marker = "        '''\"$RESOLVED_AGENT_BUS\" models"
+          if text.count(release_marker) != 2:
+              raise SystemExit(f'release helper patch target count={text.count(release_marker)}')
+          text = text.replace(release_marker, "        r'''\"$RESOLVED_AGENT_BUS\" models", 2)
+          workflow_call = 'update(".github/workflows/universal-harness-ci.yml", patch_workflow)'
+          if text.count(workflow_call) != 1:
+              raise SystemExit('workflow patch call missing or ambiguous')
+          text = text.replace(workflow_call, '# workflow is restored separately after product validation', 1)
           path.write_text(text)
           PY
           python3 scripts/apply-review-fixes.py
