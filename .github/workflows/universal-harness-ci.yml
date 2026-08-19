@@ -37,6 +37,10 @@ jobs:
           if text.count(before) != 1:
               raise SystemExit('regex helper patch target missing or ambiguous')
           text = text.replace(before, after, 1)
+          scope_marker = "        '''export interface StopResult {"
+          first_scope = text.index(scope_marker)
+          second_scope = text.index(scope_marker, first_scope + len(scope_marker))
+          text = text[:second_scope] + text[second_scope:].replace(scope_marker, "        r'''export interface StopResult {", 1)
           release_marker = "        '''\"$RESOLVED_AGENT_BUS\" models"
           if text.count(release_marker) != 2:
               raise SystemExit(f'release helper patch target count={text.count(release_marker)}')
