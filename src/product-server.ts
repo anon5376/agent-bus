@@ -176,7 +176,7 @@ function errorStatus(error: unknown): number {
   if (message.startsWith("unauthorized")) return 401;
   if (message.includes("not authorized") || message.startsWith("only ")) return 403;
   if (message.startsWith("no route") || message.startsWith("unknown run") || message.startsWith("unknown task")) return 404;
-  if (message.includes("already") || message.includes("not submitted") || message.includes("not eligible")) return 409;
+  if (message.includes("already") || message.includes("not submitted") || message.includes("not eligible") || message.includes("stop it before editing")) return 409;
   return 400;
 }
 
@@ -223,10 +223,8 @@ function saveAgent(configPath: string, body: Record<string, unknown>): { agent: 
   if (!model) throw new Error(`unknown model: ${modelId}`);
   if (!config.roles[role]) throw new Error(`unknown role: ${role}`);
 
-  if (body.modelFamily !== undefined) model.family = String(body.modelFamily).trim() || model.family;
-  if (body.exactModel !== undefined) {
-    const exact = String(body.exactModel).trim();
-    if (exact) model.exactModel = exact; else delete model.exactModel;
+  if (body.modelFamily !== undefined || body.exactModel !== undefined) {
+    throw new Error("model definitions are shared; agent edits cannot change model family or exact model");
   }
 
   const authority = String(body.authority ?? existing?.authority ?? (role === "manager" ? "manager" : "worker"));
@@ -434,6 +432,7 @@ async function handleApi(
   operatorTokenPath: string,
   configPath: string | null,
   sessionTtlMs: number,
+  eventStreams: Set<ServerResponse>,
 ): Promise<void> {
   if (pathname === "/api/session" && req.method === "POST") {
     requireSameOrigin(req);
@@ -462,26 +461,37 @@ async function handleApi(
       "x-accel-buffering": "no",
     });
     res.write(": connected\n\n");
+    eventStreams.add(res);
     let since = Math.max(0, Number(params.get("since") ?? 0) || 0);
     let closed = false;
     let running = false;
+    let timer: NodeJS.Timeout | null = null;
+    const cleanup = () => {
+      if (closed) return;
+      closed = true;
+      if (timer) clearInterval(timer);
+      eventStreams.delete(res);
+    };
     const tick = async () => {
       if (closed || running) return;
       running = true;
       try {
         const snapshot = await service.handle("/snapshot", { sinceSeq: since }) as Record<string, unknown> & { seq?: number };
         since = Number(snapshot.seq ?? since);
-        res.write(`event: snapshot\ndata: ${JSON.stringify({ ...snapshot, incremental: true })}\n\n`);
+        if (!closed) res.write(`event: snapshot\ndata: ${JSON.stringify({ ...snapshot, incremental: true })}\n\n`);
       } catch (error) {
-        res.write(`event: error\ndata: ${JSON.stringify({ error: (error as Error).message })}\n\n`);
+        if (!closed) res.write(`event: error\ndata: ${JSON.stringify({ error: (error as Error).message })}\n\n`);
       } finally {
         running = false;
       }
     };
+    req.once("close", cleanup);
+    res.once("close", cleanup);
     await tick();
-    const timer = setInterval(tick, 800);
-    timer.unref();
-    req.on("close", () => { closed = true; clearInterval(timer); });
+    if (!closed) {
+      timer = setInterval(tick, 800);
+      timer.unref();
+    }
     return;
   }
   if (pathname === "/api/state" && req.method === "GET") return sendJson(res, 200, await service.handle("/snapshot", { sinceSeq: 0 }));
@@ -526,7 +536,10 @@ async function handleApi(
   }
   if (pathname === "/api/agents" && req.method === "POST") {
     if (!configPath) throw new Error("agent configuration editing is unavailable with an in-memory config");
-    const result = saveAgent(configPath, await readJson(req));
+    const body = await readJson(req);
+    const id = String(body.id ?? "").trim();
+    if (service.supervisorMeta.has(id)) throw new Error(`agent ${id} is supervised; stop it before editing its configuration`);
+    const result = saveAgent(configPath, body);
     applyConfig(service, result.config);
     return sendJson(res, 200, { agent: result.agent, applied: true });
   }
@@ -573,10 +586,12 @@ export async function startProductServer(options: ProductServerOptions = {}): Pr
   const sessionTtlMs = Math.max(1000, options.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS);
   const ticketTtlMs = Math.max(20, options.loginTicketTtlMs ?? DEFAULT_LOGIN_TICKET_TTL_MS);
   const sessions = new BrowserSessions(sessionTtlMs, ticketTtlMs);
+  const eventStreams = new Set<ServerResponse>();
   const artifact = productArtifactManifest(staticRoot);
   const buildId = artifact.buildId;
   const runtime = {
     pid: process.pid,
+    busHome: resolve(BUS_HOME),
     applicationRoot: resolve(ROOT),
     staticRoot: resolve(staticRoot),
     entrypoint: resolve(process.argv[1] ?? CLI_PATH),
@@ -620,7 +635,7 @@ export async function startProductServer(options: ProductServerOptions = {}): Pr
         return sendJson(res, 200, { ...sessions.issue(), dashboardUrl: DASHBOARD_URL });
       }
       if (pathname === "/api" || pathname.startsWith("/api/")) {
-        return await handleApi(req, res, pathname, url.searchParams, service, sessions, operatorTokenPath, configPath, sessionTtlMs);
+        return await handleApi(req, res, pathname, url.searchParams, service, sessions, operatorTokenPath, configPath, sessionTtlMs, eventStreams);
       }
       if ((req.method === "GET" || req.method === "HEAD") && !pathname.startsWith("/agent/") && pathname !== "/register") {
         return serveDashboardStatic(req, res, staticRoot, pathname);
@@ -650,9 +665,14 @@ export async function startProductServer(options: ProductServerOptions = {}): Pr
     port,
     url,
     buildId,
-    close: () => new Promise<void>((resolveClose, reject) => server.close((error) => {
-      service.close();
-      if (error) reject(error); else resolveClose();
-    })),
+    close: () => new Promise<void>((resolveClose, reject) => {
+      for (const stream of eventStreams) {
+        try { stream.end(); } catch {}
+      }
+      server.close((error) => {
+        service.close();
+        if (error) reject(error); else resolveClose();
+      });
+    }),
   };
 }

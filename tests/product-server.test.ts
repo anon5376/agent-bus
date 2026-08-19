@@ -68,6 +68,33 @@ test("agent editor updates config and live catalog without broker restart",async
   const disk=JSON.parse(readFileSync(f.configPath,"utf8"));assert.equal(disk.agents["fake-small"].description,"edited live");
 });
 
+test("closing the product server terminates an open SSE stream without lifecycle escalation",async()=>{
+  const f=await fixture();const cookie=await login(f);
+  const response=await fetch(`${f.handle.url}/api/events`,{headers:{cookie}});assert.equal(response.status,200);
+  const reader=response.body!.getReader();await reader.read();
+  await Promise.race([f.handle.close(),new Promise((_,reject)=>setTimeout(()=>reject(new Error("product server close hung on SSE")),1500))]);
+});
+
+test("agent edits cannot mutate a shared model definition",async t=>{
+  const f=await fixture();t.after(()=>f.handle.close());const cookie=await login(f);
+  const createPeer=await fetch(`${f.handle.url}/api/agents`,{method:"POST",headers:{cookie,origin:f.handle.url,"content-type":"application/json"},body:JSON.stringify({id:"fake-peer",model:"fake-small",role:"cheap-worker",description:"shares fake-small",enabled:true,autoStart:false,permissions:{filesystem:"read",shell:false,network:false,canReview:false,canDelegate:false,maxDelegationDepth:0,allowedPaths:["."]}})});
+  const createPeerText=await createPeer.text();assert.equal(createPeer.status,200,createPeerText);
+  const before=JSON.parse(readFileSync(f.configPath,"utf8"));
+  const response=await fetch(`${f.handle.url}/api/agents`,{method:"POST",headers:{cookie,origin:f.handle.url,"content-type":"application/json"},body:JSON.stringify({id:"fake-small",model:"fake-small",role:"cheap-worker",exactModel:"silently-mutated",modelFamily:"silently-mutated-family"})});
+  const responseText=await response.text();assert.equal(response.status,400,responseText);assert.match(responseText,/model definitions are shared/i);
+  const after=JSON.parse(readFileSync(f.configPath,"utf8"));assert.deepEqual(after.models["fake-small"],before.models["fake-small"]);assert.equal(after.agents["fake-peer"].model,"fake-small");
+});
+
+test("running supervisors reject agent configuration edits instead of creating split-brain state",async t=>{
+  const f=await fixture();t.after(()=>f.handle.close());const cookie=await login(f);
+  const before=JSON.parse(readFileSync(f.configPath,"utf8"));
+  (f.handle.service.supervisorMeta as any).set("fake-small",{pid:424242,childPid:null,workdir:f.root,cli:"fake",startedAt:Date.now()});
+  const response=await fetch(`${f.handle.url}/api/agents`,{method:"POST",headers:{cookie,origin:f.handle.url,"content-type":"application/json"},body:JSON.stringify({id:"fake-small",model:"fake-strong",role:"cheap-worker",description:"would diverge",enabled:true,autoStart:false,permissions:{filesystem:"read",shell:false,network:false,canReview:false,canDelegate:false,maxDelegationDepth:0,allowedPaths:["."]}})});
+  const responseText=await response.text();assert.equal(response.status,409,responseText);assert.match(responseText,/stop it before editing/i);
+  const after=JSON.parse(readFileSync(f.configPath,"utf8"));assert.deepEqual(after.agents["fake-small"],before.agents["fake-small"]);
+  const catalog=await fetch(`${f.handle.url}/api/catalog`,{headers:{cookie}});const body=await catalog.json() as any;assert.equal(body.agents["fake-small"].model,before.agents["fake-small"].model);
+});
+
 test("malformed JSON is rejected without crashing the product server",async t=>{
   const f=await fixture();t.after(()=>f.handle.close());const cookie=await login(f);
   const response=await fetch(`${f.handle.url}/api/messages`,{method:"POST",headers:{cookie,origin:f.handle.url,"content-type":"application/json"},body:"{"});assert.equal(response.status,400);assert.equal((await fetch(`${f.handle.url}/health`)).status,200);

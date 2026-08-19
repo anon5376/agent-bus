@@ -44,7 +44,7 @@ jobs:
           command -v open
           command -v safaridriver
           test -x '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
-      - name: Install, replace stale launcher, mount installed UI in Chromium and Safari, reinstall, and stop
+      - name: Install, replace stale launcher, validate runtime ownership, Chromium and Safari
         run: |
           set -euo pipefail
           export AGENT_BUS_HOME="$RUNNER_TEMP/agent-bus-home"
@@ -81,12 +81,35 @@ jobs:
           export PATH="$STALE_BIN:$AGENT_BUS_INSTALL_DIR:$PATH"
           test "$(command -v agent-bus)" = "$STALE_BIN/agent-bus"
 
+          REAL_NODE="$(command -v node)"
+          OLD_NODE_DIR="$RUNNER_TEMP/old-node-bin"
+          mkdir -p "$OLD_NODE_DIR"
+          cat > "$OLD_NODE_DIR/node" <<OLDNODE
+          #!/bin/sh
+          case "\${1:-}" in
+            -e) exit 1 ;;
+            --version|-v) echo v22.4.0; exit 0 ;;
+            *) exec "$REAL_NODE" "\$@" ;;
+          esac
+          OLDNODE
+          chmod +x "$OLD_NODE_DIR/node"
+          if PATH="$OLD_NODE_DIR:$PATH" bash install.sh >"$RUNNER_TEMP/old-node-install.out" 2>&1; then
+            echo "installer accepted Node 22.4" >&2
+            exit 1
+          fi
+          grep "Node.js 22.5+" "$RUNNER_TEMP/old-node-install.out"
+
           bash install.sh
 
           test "$(command -v agent-bus)" = "$STALE_BIN/agent-bus"
           grep '# Agent Bus canonical launcher' "$STALE_BIN/agent-bus"
           agent-bus __launcher-info | grep "application=$AGENT_BUS_HOME/app/current"
           test -L "$AGENT_BUS_HOME/app/current"
+          if AGENT_BUS_NODE_BIN="$OLD_NODE_DIR/node" agent-bus models >"$RUNNER_TEMP/old-node-launch.out" 2>&1; then
+            echo "launcher accepted unsupported AGENT_BUS_NODE_BIN" >&2
+            exit 1
+          fi
+          grep "Node.js 22.5+" "$RUNNER_TEMP/old-node-launch.out"
 
           cleanup() { agent-bus stop >/dev/null 2>&1 || true; }
           trap cleanup EXIT
@@ -97,6 +120,7 @@ jobs:
           printf '%s\n' "$health" | grep '"product":"agent-bus"'
           printf '%s\n' "$health" | grep '"dashboard":true'
           printf '%s\n' "$health" | grep '"runtime"'
+          printf '%s\n' "$health" | grep "\"busHome\":\"$AGENT_BUS_HOME\""
           curl -fsS 'http://127.0.0.1:7717/?install-smoke=1' | grep 'data-boot-stage="10"'
           agent-bus runtime --json | tee "$RUNNER_TEMP/runtime-before-reinstall.json"
 
@@ -109,10 +133,25 @@ jobs:
           second_pid="$(curl -fsS http://127.0.0.1:7717/health | node -pe 'JSON.parse(require("fs").readFileSync(0,"utf8")).pid')"
           test "$first_pid" = "$second_pid"
 
+          for release_id in 11111111111111111111 22222222222222222222 33333333333333333333; do
+            mkdir -p "$AGENT_BUS_HOME/app/releases/$release_id"
+            printf '%s\n' "$release_id" > "$AGENT_BUS_HOME/app/releases/$release_id/ARTIFACT_ID"
+            sleep 0.05
+          done
+          mkdir -p "$AGENT_BUS_HOME/app/releases/keep-me"
+          kill -STOP "$first_pid"
+
           cd "$GITHUB_WORKSPACE"
           bash install.sh
           test "$(cat "$AGENT_BUS_HOME/install-sentinel")" = "preserve-me"
           grep '# Agent Bus canonical launcher' "$STALE_BIN/agent-bus"
+          if kill -0 "$first_pid" 2>/dev/null; then
+            echo "unhealthy previous custom-home broker survived reinstall" >&2
+            exit 1
+          fi
+          test -d "$AGENT_BUS_HOME/app/releases/keep-me"
+          valid_release_count="$(find "$AGENT_BUS_HOME/app/releases" -mindepth 1 -maxdepth 1 -type d -name '????????????????????' | wc -l | tr -d ' ')"
+          test "$valid_release_count" -le 2
 
           cd "$RUNNER_TEMP"
           agent-bus start --no-open

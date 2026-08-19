@@ -15,9 +15,8 @@ if ! command -v node >/dev/null 2>&1; then
 fi
 
 FALLBACK_NODE_BIN="$(command -v node)"
-NODE_MAJOR="$(node -p 'Number(process.versions.node.split(".")[0])')"
-if [[ "$NODE_MAJOR" -lt 22 ]]; then
-  echo "Agent Bus requires Node.js 22.5+; found $(node --version) at $FALLBACK_NODE_BIN" >&2
+if ! "$FALLBACK_NODE_BIN" -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major > 22 || (major === 22 && minor >= 5) ? 0 : 1)'; then
+  echo "Agent Bus requires Node.js 22.5+; found $("$FALLBACK_NODE_BIN" --version 2>/dev/null || echo unknown) at $FALLBACK_NODE_BIN" >&2
   exit 1
 fi
 
@@ -132,13 +131,24 @@ if [ "\${1:-}" = "__launcher-info" ]; then
   printf 'launcher=%s\napplication=%s\nentrypoint=%s\n' "\$0" "\$APP_CURRENT" "\$APP_CURRENT/$target"
   exit 0
 fi
-NODE_BIN="\${AGENT_BUS_NODE_BIN:-\$(command -v node 2>/dev/null || true)}"
-if [ -z "\$NODE_BIN" ] || [ ! -x "\$NODE_BIN" ]; then
-  NODE_BIN="$FALLBACK_NODE_BIN"
-fi
-if [ ! -x "\$NODE_BIN" ]; then
-  echo "Agent Bus requires Node.js 22.5+; no executable Node binary was found." >&2
-  exit 1
+node_supported() {
+  "\$1" -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major > 22 || (major === 22 && minor >= 5) ? 0 : 1)' >/dev/null 2>&1
+}
+NODE_BIN="\${AGENT_BUS_NODE_BIN:-}"
+if [ -n "\$NODE_BIN" ]; then
+  if [ ! -x "\$NODE_BIN" ] || ! node_supported "\$NODE_BIN"; then
+    echo "Agent Bus requires Node.js 22.5+; AGENT_BUS_NODE_BIN is unsupported: \$NODE_BIN" >&2
+    exit 1
+  fi
+else
+  NODE_BIN="\$(command -v node 2>/dev/null || true)"
+  if [ -z "\$NODE_BIN" ] || [ ! -x "\$NODE_BIN" ] || ! node_supported "\$NODE_BIN"; then
+    NODE_BIN="$FALLBACK_NODE_BIN"
+  fi
+  if [ ! -x "\$NODE_BIN" ] || ! node_supported "\$NODE_BIN"; then
+    echo "Agent Bus requires Node.js 22.5+; no supported Node binary was found." >&2
+    exit 1
+  fi
 fi
 export AGENT_BUS_LAUNCHER_PATH="\$0"
 export AGENT_BUS_INSTALL_ROOT="\$APP_CURRENT"
@@ -197,6 +207,22 @@ if [[ "$LAUNCHER_INFO" != *"application=$APP_ROOT/current"* ]]; then
 fi
 
 "$RESOLVED_AGENT_BUS" models >/dev/null
+
+# Retain the active release plus one previous valid immutable release. Unknown,
+# malformed, or symlinked entries are deliberately left untouched.
+previous_kept=""
+while IFS= read -r release_name; do
+  [[ "$release_name" == "$ARTIFACT_ID" ]] && continue
+  [[ "$release_name" =~ ^[0-9a-f]{20}$ ]] || continue
+  release_path="$RELEASES_DIR/$release_name"
+  [[ -d "$release_path" && ! -L "$release_path" && -f "$release_path/ARTIFACT_ID" ]] || continue
+  [[ "$(cat "$release_path/ARTIFACT_ID" 2>/dev/null || true)" == "$release_name" ]] || continue
+  if [[ -z "$previous_kept" ]]; then
+    previous_kept="$release_name"
+    continue
+  fi
+  rm -rf -- "$release_path"
+done < <(ls -1t "$RELEASES_DIR" 2>/dev/null || true)
 
 printf '\nAgent Bus installed globally:\n'
 printf '  resolved launcher: %s\n' "$RESOLVED_AGENT_BUS"

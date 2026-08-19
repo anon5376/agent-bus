@@ -124,9 +124,20 @@ try {
   const secondHealth = await waitForHealth(url, (body) => body.product === "agent-bus" && body.dashboard === true);
   assert.equal(secondHealth.pid, firstHealth.pid, "repeated start should reuse the current matching product");
 
+  const secondPort = await freePort();
+  const secondUrl = `http://127.0.0.1:${secondPort}`;
+  const secondEnv = { ...env, AGENT_BUS_HOME: join(temp, "home-b"), AGENT_BUS_PORT: String(secondPort), AGENT_BUS_URL: secondUrl };
+  const secondInstanceStart = runCli(secondEnv, "start", "--no-open");
+  assert.equal(secondInstanceStart.status, 0, `second isolated instance failed:\n${secondInstanceStart.stdout}\n${secondInstanceStart.stderr}`);
+  const secondInstanceHealth = await waitForHealth(secondUrl, (body) => body.product === "agent-bus");
+
   const stop = runCli(env, "stop");
   assert.equal(stop.status, 0, `stop failed:\n${stop.stdout}\n${stop.stderr}`);
   await waitForDown(url);
+  const secondAfterStop = await waitForHealth(secondUrl, (body) => body.product === "agent-bus");
+  assert.equal(secondAfterStop.pid, secondInstanceHealth.pid, "stopping instance A must not terminate instance B");
+  assert.equal(runCli(secondEnv, "stop").status, 0);
+  await waitForDown(secondUrl);
 
   const legacy = startFixtureServer(port, "legacy");
   await waitForHealth(url, (body) => body.durable === true && !body.product);
@@ -136,6 +147,16 @@ try {
   assert.notEqual(replacedHealth.pid, legacy.pid, "legacy listener should be replaced");
   await waitForProcessDown(legacy.pid);
   assert.equal(runCli(env, "stop").status, 0);
+  await waitForDown(url);
+
+  const unhealthyStart = runCli(env, "start", "--no-open");
+  assert.equal(unhealthyStart.status, 0, `unhealthy recovery setup failed:\n${unhealthyStart.stdout}\n${unhealthyStart.stderr}`);
+  const unhealthyHealth = await waitForHealth(url, (body) => body.product === "agent-bus");
+  process.kill(unhealthyHealth.pid, "SIGSTOP");
+  const unhealthyStop = runCli(env, "stop");
+  assert.equal(unhealthyStop.status, 0, `unhealthy instance stop failed:\n${unhealthyStop.stdout}\n${unhealthyStop.stderr}`);
+  assert.match(`${unhealthyStop.stdout}${unhealthyStop.stderr}`, /forced/i);
+  await waitForProcessDown(unhealthyHealth.pid);
   await waitForDown(url);
 
   const unrelated = startFixtureServer(port, "unrelated");

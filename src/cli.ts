@@ -14,6 +14,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { discoverHarnessModels, probeHarness } from "./adapters.js";
 import { BusConfig, enabledAgents, loadConfig } from "./config.js";
+import { recordCurrentAgentBusProcess } from "./instance-processes.js";
 import {
   fetchHealth,
   inspectPort,
@@ -32,6 +33,7 @@ const BROKER_LOG = join(BUS_HOME, "broker.log");
 const BROKER_LOG_MAX_BYTES = 512 * 1024;
 const EXPECTED_MANIFEST = productArtifactManifest(join(ROOT, "dist", "web"));
 const EXPECTED_BUILD_ID = EXPECTED_MANIFEST.buildId;
+const PROCESS_SCOPE = { applicationRoot: ROOT, busHome: BUS_HOME };
 
 function flag(name:string):string|null{const i=process.argv.indexOf(name);return i>=0?String(process.argv[i+1]??""):null}
 function hasFlag(name:string):boolean{return process.argv.includes(name)}
@@ -39,12 +41,13 @@ function operatorToken():string{const token=readTokenFile(OPERATOR_TOKEN_PATH);i
 
 function isCurrentHealth(health: Awaited<ReturnType<typeof fetchHealth>>): boolean {
   if (!health) return false;
-  const runtime = (health as typeof health & { runtime?: { applicationRoot?: string; staticRoot?: string } }).runtime;
+  const runtime = (health as typeof health & { runtime?: { applicationRoot?: string; staticRoot?: string; busHome?: string } }).runtime;
   return health.product === PRODUCT_NAME
     && health.productProtocol === PRODUCT_PROTOCOL_VERSION
     && health.buildId === EXPECTED_BUILD_ID
     && health.dashboard === true
     && health.uiBuilt === true
+    && resolve(runtime?.busHome ?? "") === resolve(BUS_HOME)
     && resolve(runtime?.applicationRoot ?? "") === resolve(ROOT)
     && resolve(runtime?.staticRoot ?? "") === resolve(join(ROOT, "dist", "web"));
 }
@@ -123,7 +126,7 @@ async function ensureBrokerStarted():Promise<void>{
   const initialHealth = await fetchHealth(BUS_URL);
   if (isCurrentHealth(initialHealth)) { await verifyServedDashboard(); return; }
 
-  const initialOwners = await inspectPort(BUS_PORT, BUS_URL, EXPECTED_BUILD_ID);
+  const initialOwners = await inspectPort(BUS_PORT, BUS_URL, EXPECTED_BUILD_ID, PROCESS_SCOPE);
   const unrelated = unrelatedDiagnostic(initialOwners);
   if (unrelated) throw new Error(unrelated);
 
@@ -132,13 +135,15 @@ async function ensureBrokerStarted():Promise<void>{
     url: BUS_URL,
     expectedBuildId: EXPECTED_BUILD_ID,
     includeSupervisors: false,
+    busHome: BUS_HOME,
+    applicationRoot: ROOT,
   });
   if (stopped.unrelated.length) throw new Error(unrelatedDiagnostic(stopped.unrelated) ?? "Port is occupied by an unrelated process.");
   if (stopped.stoppedPids.length) {
     process.stderr.write(`replaced ${stopped.stoppedPids.length} previous Agent Bus service process(es)${stopped.forcedPids.length ? ` (${stopped.forcedPids.length} required SIGKILL)` : ""}\n`);
   }
   if (!(await waitForPortFree(BUS_PORT, 5000))) {
-    const owners = await inspectPort(BUS_PORT, BUS_URL, EXPECTED_BUILD_ID);
+    const owners = await inspectPort(BUS_PORT, BUS_URL, EXPECTED_BUILD_ID, PROCESS_SCOPE);
     throw new Error(unrelatedDiagnostic(owners) ?? `Agent Bus could not release port ${BUS_PORT} after stopping the previous instance.`);
   }
 
@@ -154,12 +159,12 @@ async function ensureBrokerStarted():Promise<void>{
     await new Promise(r=>setTimeout(r,120));
     if (isCurrentHealth(await fetchHealth(BUS_URL))) { await verifyServedDashboard(); return; }
     if (child.exitCode !== null) break;
-    const owners = await inspectPort(BUS_PORT, BUS_URL, EXPECTED_BUILD_ID);
+    const owners = await inspectPort(BUS_PORT, BUS_URL, EXPECTED_BUILD_ID, PROCESS_SCOPE);
     const conflict = unrelatedDiagnostic(owners);
     if (conflict) throw new Error(conflict);
   }
 
-  const finalOwners = await inspectPort(BUS_PORT, BUS_URL, EXPECTED_BUILD_ID);
+  const finalOwners = await inspectPort(BUS_PORT, BUS_URL, EXPECTED_BUILD_ID, PROCESS_SCOPE);
   const conflict = unrelatedDiagnostic(finalOwners);
   const tail = brokerLogTail();
   throw new Error([
@@ -203,10 +208,10 @@ function printModels(config:BusConfig):void{console.log("MODEL REGISTRY (capabil
 async function main():Promise<void>{const command=process.argv[2]??"status";switch(command){
 case "start":{await ensureBrokerStarted();const url=await browserUrl();if(!hasFlag("--no-open"))openUrl(url);console.log("Agent Bus is running.");console.log(`Dashboard: ${DASHBOARD_URL}`);return}
 case "open":{const url=await browserUrl();openUrl(url);console.log(DASHBOARD_URL);return}
-case "stop":{const result=await stopAgentBusProcesses({port:BUS_PORT,url:BUS_URL,expectedBuildId:EXPECTED_BUILD_ID,includeSupervisors:true});if(result.unrelated.length)console.log(`Preserved unrelated listener on port ${BUS_PORT}: PID ${result.unrelated[0].pid}${result.unrelated[0].command?` · ${result.unrelated[0].command}`:""}`);console.log(result.stoppedPids.length?`Stopped ${result.stoppedPids.length} Agent Bus process(es)${result.forcedPids.length?` (${result.forcedPids.length} forced)`:""}.`:"Agent Bus is not running.");return}
-case "broker":{const handle=await startProductServer();const shutdown=async()=>{await handle.close().catch(()=>{});process.exit(0)};process.on("SIGINT",shutdown);process.on("SIGTERM",shutdown);return}
+case "stop":{const result=await stopAgentBusProcesses({port:BUS_PORT,url:BUS_URL,expectedBuildId:EXPECTED_BUILD_ID,includeSupervisors:true,busHome:BUS_HOME,applicationRoot:ROOT});if(result.unrelated.length)console.log(`Preserved unrelated listener on port ${BUS_PORT}: PID ${result.unrelated[0].pid}${result.unrelated[0].command?` · ${result.unrelated[0].command}`:""}`);console.log(result.stoppedPids.length?`Stopped ${result.stoppedPids.length} Agent Bus process(es)${result.forcedPids.length?` (${result.forcedPids.length} forced)`:""}.`:"Agent Bus is not running.");return}
+case "broker":{const removeProcessRecord=recordCurrentAgentBusProcess({busHome:BUS_HOME,port:BUS_PORT,applicationRoot:ROOT,kind:"broker"});try{const handle=await startProductServer();let shuttingDown=false;const shutdown=async()=>{if(shuttingDown)return;shuttingDown=true;await handle.close().catch(()=>{});removeProcessRecord();process.exit(0)};process.on("SIGINT",shutdown);process.on("SIGTERM",shutdown);return}catch(error){removeProcessRecord();throw error}}
 case "provision":{const id=process.argv[3];if(!id)throw new Error("usage: agent-bus provision <agent-id> [--rotate]");await provisionAgent(id,hasFlag("--rotate"));console.log(`${id} token stored at ${agentTokenPath(id)} (mode 0600)`);return}
-case "supervise":{const id=process.argv[3];const workdir=resolve(process.argv[4]??process.cwd());if(!id)throw new Error("usage: agent-bus supervise <agent-id> [workdir]");const {supervise}=await import("./supervisor.js");await supervise(id,workdir);return}
+case "supervise":{const id=process.argv[3];const workdir=resolve(process.argv[4]??process.cwd());if(!id)throw new Error("usage: agent-bus supervise <agent-id> [workdir]");const removeProcessRecord=recordCurrentAgentBusProcess({busHome:BUS_HOME,port:BUS_PORT,applicationRoot:ROOT,kind:"supervisor",agentId:id});try{const {supervise}=await import("./supervisor.js");await supervise(id,workdir)}finally{removeProcessRecord()}return}
 case "run":{const workdir=resolve(process.argv[3]??"");const goal=flag("--goal");if(!process.argv[3]||!goal)throw new Error("usage: agent-bus run <project-dir> --goal \"Implement X\" [--role manager] [--no-autostart]");await ensureBrokerStarted();const config=loadConfig();const started:{id:string;pid:number}[]=[];if(!hasFlag("--no-autostart")){for(const agent of enabledAgents(config).filter(a=>a.autoStart)){await provisionAgent(agent.id);started.push({id:agent.id,pid:startSupervisor(agent.id,workdir)})}if(started.length)await new Promise(r=>setTimeout(r,900))}const response=await brokerCall<{run:Run;rootTask:Task}>("/run/create",{token:operatorToken(),projectRoot:workdir,goal,role:flag("--role")??"manager",network:!hasFlag("--no-network")});console.log(`run: ${response.run.id}`);console.log(`project: ${response.run.projectRoot}`);console.log(`root task: ${response.rootTask.id} → ${response.rootTask.assignee}`);console.log(`routing: ${response.rootTask.routing?.reason??"unavailable"}`);if(started.length)console.log(`supervisors: ${started.map(x=>`${x.id}:${x.pid}`).join(", ")}`);console.log(`dashboard: ${DASHBOARD_URL}`);return}
 case "route":{await ensureBrokerStarted();const role=process.argv[3]??"implementation";const response=await brokerCall<any>("/route/preview",{role,complexity:Number(flag("--complexity")??3),contextTokens:Number(flag("--context")??8000),writeAccess:hasFlag("--write"),shell:hasFlag("--shell")||hasFlag("--write"),network:hasFlag("--network"),families:flag("--families")?.split(",").filter(Boolean),providers:flag("--providers")?.split(",").filter(Boolean),exactModel:flag("--model")??undefined,exactAgent:flag("--agent")??undefined,implementationFamily:flag("--implementation-family")??undefined});console.log(response.decision.reason);for(const c of response.decision.candidates)console.log(`  ${c.eligible?"✓":"×"} ${c.agentId.padEnd(14)} ${c.score.toFixed(3)} ${c.rejectedBy.join("; ")}`);return}
 case "runtime":{
