@@ -47,7 +47,7 @@ function featureSet(mcp) {
         usageReporting: false,
     };
 }
-export function addOrUpdateIntegration(configPath, input) {
+export function addOrUpdateIntegration(configPath, input, options = {}) {
     const config = structuredClone(loadConfig(configPath));
     const kind = input.kind ?? "command";
     const providerId = safeId(input.providerId, "providerId");
@@ -139,7 +139,8 @@ export function addOrUpdateIntegration(configPath, input) {
     config.models[modelId] = model;
     config.agents[agentId] = agent;
     validateConfig(config);
-    writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+    if (options.persist !== false)
+        writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
     return { provider, harness, model, agent, config };
 }
 //# sourceMappingURL=integrations.js.map

@@ -24,13 +24,15 @@ export function knownAgentBusCommand(command, scope = {}) {
     const text = command.trim();
     if (!text)
         return false;
-    const roots = [String.raw `\S*/agent-bus/`];
+    const roots = [];
     if (scope.busHome)
         roots.push(`${escapeRegex(resolve(scope.busHome))}/app/(?:current|releases/[^/]+)/`);
-    else
-        roots.push(String.raw `\S*/\.agent-bus/app/(?:current|releases/[^/]+)/`);
-    if (scope.applicationRoot)
+    else if (scope.applicationRoot)
         roots.push(`${escapeRegex(resolve(scope.applicationRoot))}/`);
+    else {
+        roots.push(String.raw `\S*/agent-bus/`);
+        roots.push(String.raw `\S*/\.agent-bus/app/(?:current|releases/[^/]+)/`);
+    }
     const root = `(?:${[...new Set(roots)].join("|")})`;
     return new RegExp(String.raw `(?:^|\s)(?:\S*node\S*\s+)?${root}(?:dist/(?:cli|broker|product-server)\.js|cli\.js)(?:\s+(?:broker|dashboard|supervise)(?:\s|$)|\s*$)`, "i").test(text)
         || new RegExp(String.raw `(?:^|\s)(?:\S*node\S*\s+)?${root}src/(?:broker|product-server)\.(?:js|ts)(?:\s|$)`, "i").test(text);
@@ -61,6 +63,9 @@ export function classifyPortOwner(pid, command, health, expectedBuildId, legacyC
         };
     }
     if (healthBelongsToPid && legacyHealthShape(health) && legacyCatalogFingerprint) {
+        if (scope.busHome && !knownAgentBusCommand(command, scope)) {
+            return { pid, command, kind: "unrelated", reason: "legacy Agent Bus listener cannot be tied to the requested instance" };
+        }
         return { pid, command, kind: "agent-bus", reason: "legacy Agent Bus broker fingerprint" };
     }
     if (knownAgentBusCommand(command, scope)) {
@@ -118,65 +123,14 @@ export async function inspectPort(port, url, expectedBuildId, scope = {}) {
     const pids = listenerPids(port);
     if (!pids.length)
         return [];
+    const registered = scope.busHome
+        ? new Set(ownedAgentBusPids({ busHome: scope.busHome, port, includeSupervisors: false }))
+        : new Set();
     const health = await fetchHealth(url);
     const legacyFingerprint = legacyHealthShape(health) ? await legacyCatalogFingerprint(url) : false;
-    return pids.map((pid) => classifyPortOwner(pid, processCommand(pid), health, expectedBuildId, legacyFingerprint, scope));
-}
-function installedServicePids(scope, includeSupervisors) {
-    if (process.platform === "win32" || !scope.busHome)
-        return [];
-    const installedRoot = `${join(resolve(scope.busHome), "app")}${sep}`;
-    try {
-        const output = execFileSync("ps", ["-axo", "pid=,command="], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
-        return output.split("\n").flatMap((line) => {
-            const match = line.trim().match(/^(\d+)\s+(.+)$/);
-            if (!match)
-                return [];
-            const pid = Number(match[1]);
-            const command = match[2];
-            if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid)
-                return [];
-            if (!command.includes(installedRoot) || !knownAgentBusCommand(command, scope))
-                return [];
-            if (!includeSupervisors && /\s+supervise(?:\s|$)/.test(command))
-                return [];
-            return [pid];
-        });
-    }
-    catch {
-        return [];
-    }
-}
-async function brokerSupervisorPids(url, health, scope) {
-    if (!health || health.product !== PRODUCT_NAME || !runtimeBelongsToScope(health, scope))
-        return [];
-    try {
-        const response = await fetch(`${url}/state`, {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: "{}",
-            signal: AbortSignal.timeout(1200),
-        });
-        if (!response.ok)
-            return [];
-        const body = await response.json();
-        const applicationRoot = health.runtime?.applicationRoot || scope.applicationRoot;
-        return (body.roster ?? []).flatMap((item) => {
-            const pid = Number(item.supervisorPid);
-            const id = String(item.id ?? "");
-            if (!Number.isInteger(pid) || pid <= 0 || !id)
-                return [];
-            const command = processCommand(pid);
-            if (!knownAgentBusCommand(command, { ...scope, applicationRoot }))
-                return [];
-            if (!new RegExp(`\\ssupervise\\s+${escapeRegex(id)}(?:\\s|$)`).test(command))
-                return [];
-            return [pid];
-        });
-    }
-    catch {
-        return [];
-    }
+    return pids.map((pid) => registered.has(pid)
+        ? { pid, command: processCommand(pid), kind: "agent-bus", reason: "validated instance process registry" }
+        : classifyPortOwner(pid, processCommand(pid), health, expectedBuildId, legacyFingerprint, scope));
 }
 function alive(pid) {
     try {
@@ -222,18 +176,13 @@ export async function terminatePids(pids) {
 }
 export async function stopAgentBusProcesses(options) {
     const scope = { busHome: options.busHome, applicationRoot: options.applicationRoot };
-    const health = await fetchHealth(options.url);
     const owners = await inspectPort(options.port, options.url, options.expectedBuildId, scope);
     const unrelated = owners.filter((owner) => owner.kind === "unrelated");
     const safeListenerPids = owners.filter((owner) => owner.kind !== "unrelated").map((owner) => owner.pid);
     const registeredPids = options.busHome
         ? ownedAgentBusPids({ busHome: options.busHome, port: options.port, includeSupervisors: options.includeSupervisors })
         : [];
-    const installedPids = installedServicePids(scope, options.includeSupervisors);
-    const legacySupervisorPids = options.includeSupervisors && !unrelated.length
-        ? await brokerSupervisorPids(options.url, health, scope)
-        : [];
-    const pids = [...safeListenerPids, ...registeredPids, ...installedPids, ...legacySupervisorPids];
+    const pids = [...safeListenerPids, ...registeredPids];
     const { stopped, forced } = await terminatePids(pids);
     return { stoppedPids: stopped, forcedPids: forced, unrelated };
 }

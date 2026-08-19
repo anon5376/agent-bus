@@ -57,7 +57,8 @@ RELEASES_DIR="$APP_ROOT/releases"
 PERSISTENT_CONFIG="$BUS_HOME/config.json"
 TMP_DIR="$(mktemp -d)"
 STAGE_DIR=""
-trap 'rm -rf "$TMP_DIR"; [[ -n "$STAGE_DIR" ]] && rm -rf "$STAGE_DIR"' EXIT
+CURRENT_LINK_NEXT=""
+trap 'rm -rf "$TMP_DIR"; [[ -n "$STAGE_DIR" ]] && rm -rf "$STAGE_DIR"; [[ -n "$CURRENT_LINK_NEXT" ]] && rm -f "$CURRENT_LINK_NEXT"' EXIT
 
 printf 'Installing Agent Bus from %s\n' "$ROOT"
 printf 'Canonical application directory: %s\n' "$APP_ROOT/current"
@@ -114,10 +115,12 @@ if [[ ! -d "$RELEASE_DIR" ]]; then
   STAGE_DIR=""
 fi
 
-rm -f "$APP_ROOT/current.next"
-ln -s "$RELEASE_DIR" "$APP_ROOT/current.next"
-rm -f "$APP_ROOT/current"
-mv "$APP_ROOT/current.next" "$APP_ROOT/current"
+CURRENT_LINK_NEXT="$APP_ROOT/.current.next.$$"
+rm -f "$CURRENT_LINK_NEXT"
+ln -s "$RELEASE_DIR" "$CURRENT_LINK_NEXT"
+# rename(2) replaces the old symlink atomically on the same filesystem.
+"$FALLBACK_NODE_BIN" -e 'require("node:fs").renameSync(process.argv[1], process.argv[2])' "$CURRENT_LINK_NEXT" "$APP_ROOT/current"
+CURRENT_LINK_NEXT=""
 
 make_wrapper() {
   local name="$1"
