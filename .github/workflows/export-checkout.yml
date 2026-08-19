@@ -17,10 +17,15 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: debug/product-finish-mcp
-      - name: Pack source checkout
-        run: tar --exclude=.git -czf "$RUNNER_TEMP/agent-bus-source.tgz" .
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Pack runnable checkout
+        run: tar --exclude=.git -czf "$RUNNER_TEMP/agent-bus-workspace.tgz" .
       - uses: actions/upload-artifact@v4
         with:
-          name: agent-bus-source
-          path: ${{ runner.temp }}/agent-bus-source.tgz
+          name: agent-bus-workspace
+          path: ${{ runner.temp }}/agent-bus-workspace.tgz
           retention-days: 1
