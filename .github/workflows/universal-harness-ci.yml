@@ -26,7 +26,18 @@ jobs:
           node-version: 22
           cache: npm
       - name: Apply deterministic fixes
-        run: python3 scripts/apply-review-fixes.py
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('scripts/apply-review-fixes.py')
+          text = path.read_text()
+          before = 'updated, count = re.subn(pattern, after, text, count=1, flags=re.S)'
+          after = 'updated, count = re.subn(pattern, lambda _match: after, text, count=1, flags=re.S)'
+          if text.count(before) != 1:
+              raise SystemExit('regex helper patch target missing or ambiguous')
+          path.write_text(text.replace(before, after, 1))
+          PY
+          python3 scripts/apply-review-fixes.py
       - run: npm ci
       - run: npm test
       - name: Commit validated fixes
