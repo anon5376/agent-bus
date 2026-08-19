@@ -8,9 +8,41 @@ on:
       - fix/installed-dashboard-runtime
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
+  apply-review-round2:
+    name: Apply latest PR6 review fixes
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: github.event.pull_request.head.ref == 'debug/pr6-review-round2'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: debug/pr6-review-round2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Apply, test, and publish validated source
+        run: |
+          set -euo pipefail
+          if [[ ! -f scripts/apply-review-round2.mjs ]]; then
+            echo 'round2 patch already applied'
+            exit 0
+          fi
+          node scripts/apply-review-round2.mjs
+          rm -f scripts/apply-review-round2.mjs .github/workflows/apply-review-round2.yml
+          npm ci
+          npm test
+          rm -rf dist-test
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'fix: close latest PR6 review issues'
+          git push origin HEAD:debug/pr6-review-round2
+
   build-and-test:
     name: Ubuntu build, browser, lifecycle
     runs-on: ubuntu-latest
