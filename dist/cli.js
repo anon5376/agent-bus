@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, openSync, readFileSync, renameSync, statSync, un
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { discoverHarnessModels, probeHarness } from "./adapters.js";
-import { enabledAgents, loadConfig } from "./config.js";
+import { DEFAULT_CONFIG_PATH, enabledAgents, loadConfig } from "./config.js";
 import { recordCurrentAgentBusProcess } from "./instance-processes.js";
 import { fetchHealth, inspectPort, stopAgentBusProcesses, waitForPortFree, } from "./process-management.js";
 import { BUS_HOME, BUS_PORT, BUS_URL, brokerAlive, brokerCall } from "./protocol.js";
@@ -205,7 +205,7 @@ async function browserUrl() {
 async function provisionAgent(id, rotate = false) { await ensureBrokerStarted(); const existing = readTokenFile(agentTokenPath(id)); if (existing && !rotate)
     return existing; const response = await brokerCall("/agent/provision", { token: operatorToken(), id, rotate }); if (!response.token)
     throw new Error(`${response.message ?? `identity ${id} already exists`} and ${agentTokenPath(id)} is missing; rerun with --rotate to replace it`); writePrivateToken(agentTokenPath(id), response.token); return response.token; }
-function startSupervisor(agentId, workdir) { mkdirSync(join(BUS_HOME, "logs"), { recursive: true }); const log = openSync(join(BUS_HOME, "logs", `${agentId}.out`), "a"); const child = spawn(process.execPath, [CLI_PATH, "supervise", agentId, workdir], { detached: true, stdio: ["ignore", log, log] }); child.unref(); return child.pid ?? 0; }
+function startSupervisor(agentId, workdir, configPath) { mkdirSync(join(BUS_HOME, "logs"), { recursive: true }); const log = openSync(join(BUS_HOME, "logs", `${agentId}.out`), "a"); const child = spawn(process.execPath, [CLI_PATH, "supervise", agentId, workdir], { detached: true, stdio: ["ignore", log, log], env: { ...process.env, AGENT_BUS_CONFIG: configPath } }); child.unref(); return child.pid ?? 0; }
 function fmtAgo(ts) { const s = Math.max(0, Math.round((Date.now() - ts) / 1000)); return s < 60 ? `${s}s` : s < 3600 ? `${Math.round(s / 60)}m` : `${Math.round(s / 3600)}h`; }
 async function renderState() { const state = await brokerCall("/state", {}); const out = []; out.push("\x1b[1mAGENTS\x1b[0m"); for (const agent of state.roster) {
     if (agent.id === "operator")
@@ -294,13 +294,14 @@ async function main() {
             const goal = flag("--goal");
             if (!process.argv[3] || !goal)
                 throw new Error("usage: agent-bus run <project-dir> --goal \"Implement X\" [--role manager] [--no-autostart]");
+            const configPath = process.env.AGENT_BUS_CONFIG ?? DEFAULT_CONFIG_PATH;
             await ensureBrokerStarted();
-            const config = loadConfig();
+            const config = loadConfig(configPath);
             const started = [];
             if (!hasFlag("--no-autostart")) {
                 for (const agent of enabledAgents(config).filter(a => a.autoStart)) {
                     await provisionAgent(agent.id);
-                    started.push({ id: agent.id, pid: startSupervisor(agent.id, workdir) });
+                    started.push({ id: agent.id, pid: startSupervisor(agent.id, workdir, configPath) });
                 }
                 if (started.length)
                     await new Promise(r => setTimeout(r, 900));
