@@ -38,7 +38,7 @@ test("scoped Agent Bus command matching does not claim a generic checkout", () =
 });
 
 test("installer replaces app/current without an unlink window", () => {
-  const script = readFileSync(new URL("../install.sh", import.meta.url), "utf8");
+  const script = readFileSync(join(process.cwd(), "install.sh"), "utf8");
   assert.doesNotMatch(script, /rm -f "\$APP_ROOT\/current"\s*\n\s*mv "\$APP_ROOT\/current\.next" "\$APP_ROOT\/current"/);
   assert.match(script, /renameSync|mv\s+-h|atomic/i);
 });
