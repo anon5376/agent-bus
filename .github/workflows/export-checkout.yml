@@ -1,0 +1,25 @@
+name: Export staging checkout
+
+on:
+  push:
+    branches:
+      - debug/product-finish-mcp
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: debug/product-finish-mcp
+      - name: Pack source checkout
+        run: tar --exclude=.git -czf "$RUNNER_TEMP/agent-bus-source.tgz" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-bus-source
+          path: ${{ runner.temp }}/agent-bus-source.tgz
+          retention-days: 1
