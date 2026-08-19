@@ -270,6 +270,8 @@ export function enabledAgents(config: BusConfig): ResolvedAgent[] {
 }
 
 export function configPathFromProject(projectRoot: string): string {
+  const explicit = process.env.AGENT_BUS_CONFIG?.trim();
+  if (explicit) return explicit;
   const local = join(projectRoot, ".agent-bus", "config.json");
-  return existsSync(local) ? local : (process.env.AGENT_BUS_CONFIG ?? DEFAULT_CONFIG_PATH);
+  return existsSync(local) ? local : DEFAULT_CONFIG_PATH;
 }

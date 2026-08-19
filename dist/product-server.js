@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import { existsSync, mkdirSync, openSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 import { discoverHarnessModels, probeHarness } from "./adapters.js";
 import { DEFAULT_CONFIG_PATH, loadConfig, resolveAgent, validateConfig, } from "./config.js";
 import { addOrUpdateIntegration } from "./integrations.js";
@@ -215,6 +216,59 @@ function saveAgent(configPath, body) {
     writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
     return { agent, config };
 }
+function executionConfigSnapshot(config, id) {
+    const resolved = resolveAgent(config, id);
+    return {
+        agent: {
+            id: resolved.id,
+            model: resolved.model,
+            role: resolved.role,
+            authority: resolved.authority,
+            enabled: resolved.enabled,
+            permissions: resolved.permissions,
+            harnessOptions: resolved.harnessOptions ?? null,
+        },
+        model: {
+            id: resolved.modelDefinition.id,
+            provider: resolved.modelDefinition.provider,
+            harness: resolved.modelDefinition.harness,
+            family: resolved.modelDefinition.family,
+            exactModel: resolved.modelDefinition.exactModel ?? null,
+            enabled: resolved.modelDefinition.enabled,
+            capabilities: resolved.modelDefinition.capabilities,
+        },
+        provider: {
+            id: resolved.providerDefinition.id,
+            authKind: resolved.providerDefinition.authKind,
+            authSource: resolved.providerDefinition.authSource,
+            subscriptionBacked: resolved.providerDefinition.subscriptionBacked,
+            enabled: resolved.providerDefinition.enabled,
+        },
+        harness: {
+            id: resolved.harnessDefinition.id,
+            adapter: resolved.harnessDefinition.adapter,
+            command: resolved.harnessDefinition.command,
+            providers: resolved.harnessDefinition.providers,
+            enabled: resolved.harnessDefinition.enabled,
+            probeArgs: resolved.harnessDefinition.probeArgs ?? [],
+            modelDiscovery: resolved.harnessDefinition.modelDiscovery ?? null,
+            features: resolved.harnessDefinition.features,
+        },
+    };
+}
+function supervisedExecutionChanges(service, before, after) {
+    const changed = [];
+    for (const [id] of service.supervisorMeta) {
+        try {
+            if (!isDeepStrictEqual(executionConfigSnapshot(before, id), executionConfigSnapshot(after, id)))
+                changed.push(id);
+        }
+        catch {
+            changed.push(id);
+        }
+    }
+    return changed;
+}
 function applyConfig(service, config) {
     Object.assign(service.config, config);
     const configured = new Set(Object.keys(config.agents));
@@ -303,7 +357,9 @@ async function ensureAgentToken(service, operatorTokenPath, id) {
     writePrivateToken(path, result.token);
     return result.token;
 }
-async function startAgent(service, operatorTokenPath, id, requested) {
+async function startAgent(service, operatorTokenPath, configPath, id, requested) {
+    if (!configPath)
+        throw new Error("agent supervision is unavailable with an in-memory config");
     const definition = service.config.agents[id];
     if (!definition)
         throw new Error(`unknown configured agent: ${id}`);
@@ -324,6 +380,7 @@ async function startAgent(service, operatorTokenPath, id, requested) {
     const child = spawn(process.execPath, [CLI_PATH, "supervise", id, projectRoot], {
         detached: true,
         stdio: ["ignore", log, log],
+        env: { ...process.env, AGENT_BUS_CONFIG: configPath },
     });
     child.unref();
     return { id, started: true, pid: child.pid ?? 0, projectRoot };
@@ -521,7 +578,13 @@ async function handleApi(req, res, pathname, params, service, sessions, operator
     if (pathname === "/api/integrations" && req.method === "POST") {
         if (!configPath)
             throw new Error("integration editing is unavailable with an in-memory config");
-        const result = addOrUpdateIntegration(configPath, await readJson(req));
+        const input = await readJson(req);
+        const beforeConfig = structuredClone(loadConfig(configPath));
+        const result = addOrUpdateIntegration(configPath, input, { persist: false });
+        const affected = supervisedExecutionChanges(service, beforeConfig, result.config);
+        if (affected.length)
+            throw new Error(`integration update changes supervised agent execution (${affected.join(", ")}); stop it before editing configuration`);
+        writeFileSync(configPath, `${JSON.stringify(result.config, null, 2)}\n`, "utf8");
         applyConfig(service, result.config);
         return sendJson(res, 200, {
             provider: result.provider,
@@ -549,7 +612,7 @@ async function handleApi(req, res, pathname, params, service, sessions, operator
         const id = decodeURIComponent(agentMatch[1]);
         if (agentMatch[2] === "start") {
             const body = await readJson(req);
-            return sendJson(res, 200, await startAgent(service, operatorTokenPath, id, body.projectRoot ? String(body.projectRoot) : undefined));
+            return sendJson(res, 200, await startAgent(service, operatorTokenPath, configPath, id, body.projectRoot ? String(body.projectRoot) : undefined));
         }
         return sendJson(res, 200, await service.handle("/kill", { token: operatorToken(operatorTokenPath), agentId: id }));
     }
