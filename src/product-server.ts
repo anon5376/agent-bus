@@ -1,19 +1,16 @@
-import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { createServer, IncomingMessage, Server, ServerResponse } from "node:http";
-import { existsSync, mkdirSync, openSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { isDeepStrictEqual } from "node:util";
 import { discoverHarnessModels, probeHarness } from "./adapters.js";
 import {
-  AgentDefinition,
   BusConfig,
   DEFAULT_CONFIG_PATH,
   loadConfig,
   resolveAgent,
-  validateConfig,
 } from "./config.js";
+import { stageAgentUpdate, supervisedExecutionConflicts } from "./config-transitions.js";
 import { addOrUpdateIntegration, IntegrationInput } from "./integrations.js";
 import { Agent, BUS_HOME, BUS_HOST, BUS_PORT, MAX_WAIT_MS, Run, Task } from "./protocol.js";
 import { productArtifactManifest, PRODUCT_NAME, PRODUCT_PROTOCOL_VERSION } from "./product-runtime.js";
@@ -26,6 +23,7 @@ import {
 } from "./security.js";
 import { serveDashboardStatic } from "./static-web.js";
 import { BrokerOptions, BrokerService } from "./broker.js";
+import { launchSupervisor } from "./supervisor-launch.js";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const CLI_PATH = join(ROOT, "cli.js");
@@ -177,7 +175,7 @@ function errorStatus(error: unknown): number {
   if (message.startsWith("unauthorized")) return 401;
   if (message.includes("not authorized") || message.startsWith("only ")) return 403;
   if (message.startsWith("no route") || message.startsWith("unknown run") || message.startsWith("unknown task")) return 404;
-  if (message.includes("already") || message.includes("not submitted") || message.includes("not eligible") || message.includes("stop it before editing")) return 409;
+  if (message.includes("already") || message.includes("not submitted") || message.includes("not eligible") || message.includes("stop it before editing") || message.includes("ownership cannot be verified")) return 409;
   return 400;
 }
 
@@ -192,117 +190,11 @@ function verifyOperatorToken(service: BrokerService, token: string): void {
   if (!identity || identity.authority !== "operator") throw new BrowserAuthError("invalid operator credential");
 }
 
-function normalizedPermissions(
-  value: unknown,
-  fallback?: AgentDefinition["permissions"],
-): AgentDefinition["permissions"] {
-  const row = value && typeof value === "object" ? value as Record<string, unknown> : {};
-  const filesystem = ["none", "read", "write"].includes(String(row.filesystem))
-    ? String(row.filesystem) as "none" | "read" | "write"
-    : fallback?.filesystem ?? "read";
-  return {
-    canDelegate: row.canDelegate === undefined ? fallback?.canDelegate ?? false : Boolean(row.canDelegate),
-    canReview: row.canReview === undefined ? fallback?.canReview ?? false : Boolean(row.canReview),
-    filesystem,
-    shell: row.shell === undefined ? fallback?.shell ?? false : Boolean(row.shell),
-    network: row.network === undefined ? fallback?.network ?? false : Boolean(row.network),
-    maxDelegationDepth: Math.max(0, Number(row.maxDelegationDepth ?? fallback?.maxDelegationDepth ?? 0) || 0),
-    allowedPaths: Array.isArray(row.allowedPaths)
-      ? row.allowedPaths.map(String).filter(Boolean)
-      : fallback?.allowedPaths ?? ["."],
-  };
-}
-
-function saveAgent(configPath: string, body: Record<string, unknown>): { agent: AgentDefinition; config: BusConfig } {
-  const config = structuredClone(loadConfig(configPath));
-  const id = String(body.id ?? "").trim();
-  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(id)) throw new Error("agent id must be 1-64 safe characters");
-  const existing = config.agents[id];
-  const modelId = String(body.model ?? existing?.model ?? "");
-  const role = String(body.role ?? existing?.role ?? "");
-  const model = config.models[modelId];
-  if (!model) throw new Error(`unknown model: ${modelId}`);
-  if (!config.roles[role]) throw new Error(`unknown role: ${role}`);
-
-  if (body.modelFamily !== undefined || body.exactModel !== undefined) {
-    throw new Error("model definitions are shared; agent edits cannot change model family or exact model");
+function assertSafeConfigTransition(service: BrokerService, candidate: BusConfig): void {
+  const conflicts = supervisedExecutionConflicts(service.config, candidate, service.supervisorMeta.keys());
+  if (conflicts.length) {
+    throw new Error(`configuration transition changes supervised agent execution (${conflicts.map((conflict) => conflict.agentId).join(", ")}); stop it before editing configuration`);
   }
-
-  const authority = String(body.authority ?? existing?.authority ?? (role === "manager" ? "manager" : "worker"));
-  if (authority !== "manager" && authority !== "worker") throw new Error("agent authority must be manager or worker");
-  const harnessOptions: Record<string, unknown> = { ...(existing?.harnessOptions ?? {}) };
-  if (body.harnessOptions && typeof body.harnessOptions === "object") Object.assign(harnessOptions, body.harnessOptions);
-  if (body.reasoning !== undefined) harnessOptions.reasoning = String(body.reasoning);
-  if (body.effort !== undefined) harnessOptions.effort = String(body.effort);
-
-  const agent: AgentDefinition = {
-    id,
-    model: modelId,
-    role,
-    authority,
-    description: String(body.description ?? existing?.description ?? `${role} agent`),
-    enabled: body.enabled === undefined ? existing?.enabled ?? true : Boolean(body.enabled),
-    autoStart: body.autoStart === undefined ? existing?.autoStart ?? false : Boolean(body.autoStart),
-    permissions: normalizedPermissions(body.permissions, existing?.permissions),
-    harnessOptions,
-  };
-  config.agents[id] = agent;
-  validateConfig(config);
-  writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
-  return { agent, config };
-}
-
-function executionConfigSnapshot(config: BusConfig, id: string): unknown {
-  const resolved = resolveAgent(config, id);
-  return {
-    agent: {
-      id: resolved.id,
-      model: resolved.model,
-      role: resolved.role,
-      authority: resolved.authority,
-      enabled: resolved.enabled,
-      permissions: resolved.permissions,
-      harnessOptions: resolved.harnessOptions ?? null,
-    },
-    model: {
-      id: resolved.modelDefinition.id,
-      provider: resolved.modelDefinition.provider,
-      harness: resolved.modelDefinition.harness,
-      family: resolved.modelDefinition.family,
-      exactModel: resolved.modelDefinition.exactModel ?? null,
-      enabled: resolved.modelDefinition.enabled,
-      capabilities: resolved.modelDefinition.capabilities,
-    },
-    provider: {
-      id: resolved.providerDefinition.id,
-      authKind: resolved.providerDefinition.authKind,
-      authSource: resolved.providerDefinition.authSource,
-      subscriptionBacked: resolved.providerDefinition.subscriptionBacked,
-      enabled: resolved.providerDefinition.enabled,
-    },
-    harness: {
-      id: resolved.harnessDefinition.id,
-      adapter: resolved.harnessDefinition.adapter,
-      command: resolved.harnessDefinition.command,
-      providers: resolved.harnessDefinition.providers,
-      enabled: resolved.harnessDefinition.enabled,
-      probeArgs: resolved.harnessDefinition.probeArgs ?? [],
-      modelDiscovery: resolved.harnessDefinition.modelDiscovery ?? null,
-      features: resolved.harnessDefinition.features,
-    },
-  };
-}
-
-function supervisedExecutionChanges(service: BrokerService, before: BusConfig, after: BusConfig): string[] {
-  const changed: string[] = [];
-  for (const [id] of service.supervisorMeta) {
-    try {
-      if (!isDeepStrictEqual(executionConfigSnapshot(before, id), executionConfigSnapshot(after, id))) changed.push(id);
-    } catch {
-      changed.push(id);
-    }
-  }
-  return changed;
 }
 
 function applyConfig(service: BrokerService, config: BusConfig): void {
@@ -402,15 +294,14 @@ async function startAgent(service: BrokerService, operatorTokenPath: string, con
     throw new Error("a valid projectRoot is required to start an agent");
   }
   await ensureAgentToken(service, operatorTokenPath, id);
-  mkdirSync(join(BUS_HOME, "logs"), { recursive: true });
-  const log = openSync(join(BUS_HOME, "logs", `${id}.out`), "a");
-  const child = spawn(process.execPath, [CLI_PATH, "supervise", id, projectRoot], {
-    detached: true,
-    stdio: ["ignore", log, log],
-    env: { ...process.env, AGENT_BUS_CONFIG: configPath },
+  const launched = launchSupervisor({
+    agentId: id,
+    projectRoot,
+    configPath,
+    busHome: BUS_HOME,
+    port: BUS_PORT,
   });
-  child.unref();
-  return { id, started: true, pid: child.pid ?? 0, projectRoot };
+  return { id, started: true, pid: launched.pid, projectRoot };
 }
 
 async function stopRun(service: BrokerService, token: string, runId: string, reason: string): Promise<{ run: Run; tasks: Task[] }> {
@@ -593,19 +484,17 @@ async function handleApi(
   if (pathname === "/api/agents" && req.method === "POST") {
     if (!configPath) throw new Error("agent configuration editing is unavailable with an in-memory config");
     const body = await readJson(req);
-    const id = String(body.id ?? "").trim();
-    if (service.supervisorMeta.has(id)) throw new Error(`agent ${id} is supervised; stop it before editing its configuration`);
-    const result = saveAgent(configPath, body);
+    const result = stageAgentUpdate(loadConfig(configPath), body);
+    assertSafeConfigTransition(service, result.config);
+    writeFileSync(configPath, `${JSON.stringify(result.config, null, 2)}\n`, "utf8");
     applyConfig(service, result.config);
     return sendJson(res, 200, { agent: result.agent, applied: true });
   }
   if (pathname === "/api/integrations" && req.method === "POST") {
     if (!configPath) throw new Error("integration editing is unavailable with an in-memory config");
     const input = await readJson(req) as unknown as IntegrationInput;
-    const beforeConfig = structuredClone(loadConfig(configPath));
     const result = addOrUpdateIntegration(configPath, input, { persist: false });
-    const affected = supervisedExecutionChanges(service, beforeConfig, result.config);
-    if (affected.length) throw new Error(`integration update changes supervised agent execution (${affected.join(", ")}); stop it before editing configuration`);
+    assertSafeConfigTransition(service, result.config);
     writeFileSync(configPath, `${JSON.stringify(result.config, null, 2)}\n`, "utf8");
     applyConfig(service, result.config);
     return sendJson(res, 200, {
