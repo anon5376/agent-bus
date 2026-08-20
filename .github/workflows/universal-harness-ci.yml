@@ -31,7 +31,7 @@ jobs:
   macos-install-smoke:
     name: macOS installed Chromium and Safari
     runs-on: macos-14
-    timeout-minutes: 35
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -52,8 +52,10 @@ jobs:
           export CHROME_BIN='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
           STALE_BIN="$RUNNER_TEMP/stale-bin"
           OLD_APP="$RUNNER_TEMP/old-agent-bus"
+          PR5_APP="$RUNNER_TEMP/pr5-agent-bus-checkout"
           alt_port=""
-          mkdir -p "$AGENT_BUS_INSTALL_DIR" "$AGENT_BUS_HOME" "$STALE_BIN" "$OLD_APP/dist"
+          pr5_pid=""
+          mkdir -p "$AGENT_BUS_INSTALL_DIR" "$AGENT_BUS_HOME" "$STALE_BIN" "$OLD_APP/dist" "$PR5_APP/dist"
           printf 'preserve-me\n' > "$AGENT_BUS_HOME/install-sentinel"
 
           node --input-type=module <<'NODE'
@@ -100,7 +102,38 @@ jobs:
           fi
           grep "Node.js 22.5+" "$RUNNER_TEMP/old-node-install.out"
 
+          # Reproduce the merged PR5 checkout runtime: positive Agent Bus product
+          # identity on the target port, but no PR6 runtime/home metadata.
+          cat > "$PR5_APP/dist/cli.js" <<'PR5CLI'
+          const http = require('node:http');
+          const server = http.createServer((req, res) => {
+            res.setHeader('content-type', 'application/json');
+            if (req.url === '/health') {
+              res.end(JSON.stringify({
+                ok: true, pid: process.pid, product: 'agent-bus', productProtocol: 1,
+                buildId: 'merged-pr5-checkout', dashboard: true, uiBuilt: true,
+                durable: true, agents: 2, tasks: 1, runs: 1
+              }));
+              return;
+            }
+            res.statusCode = 404; res.end('{}');
+          });
+          server.listen(7717, '127.0.0.1');
+          process.on('SIGTERM', () => server.close(() => process.exit(0)));
+          PR5CLI
+          "$REAL_NODE" "$PR5_APP/dist/cli.js" broker &
+          pr5_pid="$!"
+          for _ in $(seq 1 50); do curl -fsS http://127.0.0.1:7717/health >/dev/null 2>&1 && break; sleep 0.1; done
+          curl -fsS http://127.0.0.1:7717/health | grep '"buildId":"merged-pr5-checkout"'
+
           bash install.sh
+          for _ in $(seq 1 50); do kill -0 "$pr5_pid" 2>/dev/null || break; sleep 0.1; done
+          if kill -0 "$pr5_pid" 2>/dev/null; then
+            echo "merged PR5 target listener survived PR6 installation" >&2
+            exit 1
+          fi
+          wait "$pr5_pid" 2>/dev/null || true
+          pr5_pid=""
 
           test "$(command -v agent-bus)" = "$STALE_BIN/agent-bus"
           grep '# Agent Bus canonical launcher' "$STALE_BIN/agent-bus"
@@ -117,6 +150,7 @@ jobs:
             if [[ -n "$alt_port" ]]; then
               AGENT_BUS_PORT="$alt_port" AGENT_BUS_URL="http://127.0.0.1:$alt_port" agent-bus stop >/dev/null 2>&1 || true
             fi
+            if [[ -n "$pr5_pid" ]]; then kill "$pr5_pid" >/dev/null 2>&1 || true; fi
           }
           trap cleanup EXIT
 
@@ -129,6 +163,7 @@ jobs:
           printf '%s\n' "$health" | grep "\"busHome\":\"$AGENT_BUS_HOME\""
           curl -fsS 'http://127.0.0.1:7717/?install-smoke=1' | grep 'data-boot-stage="10"'
           agent-bus runtime --json | tee "$RUNNER_TEMP/runtime-before-reinstall.json"
+          node "$GITHUB_WORKSPACE/scripts/installed-operator-mcp-smoke.mjs"
 
           node "$GITHUB_WORKSPACE/scripts/installed-browser-smoke.mjs"
           sudo safaridriver --enable
@@ -185,6 +220,7 @@ jobs:
           agent-bus start --no-open
           curl -fsS http://127.0.0.1:7717/health | grep '"product":"agent-bus"'
           agent-bus runtime --json | tee "$RUNNER_TEMP/runtime-after-reinstall.json"
+          node "$GITHUB_WORKSPACE/scripts/installed-operator-mcp-smoke.mjs"
           node "$GITHUB_WORKSPACE/scripts/installed-browser-smoke.mjs"
           node "$GITHUB_WORKSPACE/scripts/safari-installed-smoke.mjs"
 
