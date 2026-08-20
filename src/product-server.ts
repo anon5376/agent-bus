@@ -11,6 +11,7 @@ import {
   resolveAgent,
 } from "./config.js";
 import { stageAgentUpdate, supervisedExecutionConflicts } from "./config-transitions.js";
+import { verifiedSupervisorProcess } from "./instance-processes.js";
 import { addOrUpdateIntegration, IntegrationInput } from "./integrations.js";
 import { Agent, BUS_HOME, BUS_HOST, BUS_PORT, MAX_WAIT_MS, Run, Task } from "./protocol.js";
 import { productArtifactManifest, PRODUCT_NAME, PRODUCT_PROTOCOL_VERSION } from "./product-runtime.js";
@@ -190,7 +191,32 @@ function verifyOperatorToken(service: BrokerService, token: string): void {
   if (!identity || identity.authority !== "operator") throw new BrowserAuthError("invalid operator credential");
 }
 
+function verifiedLiveSupervisor(service: BrokerService, id: string) {
+  const meta = service.supervisorMeta.get(id);
+  if (!meta) return null;
+  const verified = verifiedSupervisorProcess({
+    busHome: BUS_HOME,
+    port: service.instancePort,
+    applicationRoot: ROOT,
+    agentId: id,
+    pid: meta.pid,
+  });
+  if (verified) return meta;
+  service.supervisorMeta.delete(id);
+  const agent = service.agents.get(id);
+  if (agent) {
+    agent.status = "offline";
+    service.store.saveAgent(agent);
+  }
+  return null;
+}
+
+function pruneStaleSupervisors(service: BrokerService): void {
+  for (const id of [...service.supervisorMeta.keys()]) verifiedLiveSupervisor(service, id);
+}
+
 function assertSafeConfigTransition(service: BrokerService, candidate: BusConfig): void {
+  pruneStaleSupervisors(service);
   const conflicts = supervisedExecutionConflicts(service.config, candidate, service.supervisorMeta.keys());
   if (conflicts.length) {
     throw new Error(`configuration transition changes supervised agent execution (${conflicts.map((conflict) => conflict.agentId).join(", ")}); stop it before editing configuration`);
@@ -285,7 +311,7 @@ async function startAgent(service: BrokerService, operatorTokenPath: string, con
   const definition = service.config.agents[id];
   if (!definition) throw new Error(`unknown configured agent: ${id}`);
   if (!definition.enabled) throw new Error(`agent ${id} is disabled`);
-  const live = service.supervisorMeta.get(id);
+  const live = verifiedLiveSupervisor(service, id);
   if (live) return { id, started: false, pid: live.pid, message: "already supervised" };
   const latestRun = [...service.runs.values()].sort((a, b) => b.updatedAt - a.updatedAt)[0];
   const latestProject = projects(service)[0];
@@ -423,6 +449,7 @@ async function handleApi(
       if (closed || running) return;
       running = true;
       try {
+        pruneStaleSupervisors(service);
         const snapshot = await service.handle("/snapshot", { sinceSeq: since }) as Record<string, unknown> & { seq?: number };
         since = Number(snapshot.seq ?? since);
         if (!closed) res.write(`event: snapshot\ndata: ${JSON.stringify({ ...snapshot, incremental: true })}\n\n`);
@@ -441,7 +468,10 @@ async function handleApi(
     }
     return;
   }
-  if (pathname === "/api/state" && req.method === "GET") return sendJson(res, 200, await service.handle("/snapshot", { sinceSeq: 0 }));
+  if (pathname === "/api/state" && req.method === "GET") {
+    pruneStaleSupervisors(service);
+    return sendJson(res, 200, await service.handle("/snapshot", { sinceSeq: 0 }));
+  }
   if (pathname === "/api/catalog" && req.method === "GET") return sendJson(res, 200, await service.handle("/catalog", {}));
   if (pathname === "/api/projects" && req.method === "GET") return sendJson(res, 200, { projects: projects(service) });
   if (pathname === "/api/projects" && req.method === "POST") {
