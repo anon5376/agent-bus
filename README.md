@@ -2,7 +2,7 @@
 
 A local-first control plane for heterogeneous autonomous coding and research agents.
 
-Agent Bus keeps independent model CLIs behind one durable broker: SQLite persistence, task DAGs, routing, supervisors, MCP, path leases, authentication, retries, reviews, telemetry, and project runs remain the orchestration engine. The browser dashboard and CLI are interfaces over that same state.
+Agent Bus keeps independent model CLIs behind one durable broker: SQLite persistence, task DAGs, routing, supervisors, MCP, path leases, authentication, retries, reviews, telemetry, and project runs remain the orchestration engine. The browser dashboard, CLI, and operator MCP server are interfaces over that same state.
 
 ## Quick start
 
@@ -83,6 +83,8 @@ agent-bus run <project> --goal "..."      create a durable project run
 agent-bus broker                          run the localhost product server in foreground
 agent-bus provision <agent-id> [--rotate] provision/rotate an agent credential
 agent-bus supervise <agent-id> [workdir]  run one persistent supervisor
+agent-bus operator-mcp                    run the local operator MCP server over stdio
+agent-bus mcp-config                      print stable local MCP client configuration
 agent-bus route <role> [options]          preview an inspectable routing decision
 agent-bus models [--discover]             inspect configured/discovered models
 agent-bus doctor                          probe harness executables only
@@ -92,7 +94,43 @@ agent-bus usage                           usage and latency totals
 agent-bus send <to> <subject> [body]      send an operator message
 ```
 
-The existing broker/MCP HTTP routes remain available on the same localhost server, so supervisors, MCP clients and CLI commands operate on exactly the same state as the dashboard.
+The existing broker routes remain available on the same localhost server, so supervisors, MCP clients and CLI commands operate on exactly the same state as the dashboard.
+
+## ChatGPT and local MCP assistants
+
+The dashboard is optional. A compatible local MCP client can operate the same Agent Bus instance directly:
+
+```bash
+agent-bus mcp-config
+```
+
+Add the emitted `mcpServers.agent-bus` entry to the MCP-capable desktop/local assistant client. The generated command uses the installed canonical `agent-bus` launcher and the persistent Agent Bus home/config, so it survives checkout movement or deletion and immutable release switches. It never contains the operator token.
+
+The operator MCP exposes these high-level tools:
+
+```text
+agent_bus_status          inspect the configured instance without starting it
+agent_bus_catalog         inspect agents, roles, providers, harnesses and models
+agent_bus_start           safely start or reuse the exact configured instance
+agent_bus_create_run      create a durable routed project run
+agent_bus_execute         create a run, start its routed supervisor and wait for progress
+agent_bus_delegate        create a routed child task in the normal task DAG
+agent_bus_message         send an operator message
+agent_bus_task            inspect one task, routing, history and result
+agent_bus_run             inspect a run and its complete task graph
+agent_bus_wait            block on broker state revisions instead of busy-polling
+agent_bus_review          accept work or request a revision
+agent_bus_cancel          cancel a task or run
+agent_bus_artifacts       retrieve concise artifact/change/validation references
+agent_bus_agent_start     start a verified supervisor
+agent_bus_agent_stop      stop a fingerprint-verified supervisor
+```
+
+For example, a local assistant can receive “Use Agent Bus to fix the failing tests in `~/code/foo`”, call `agent_bus_execute`, let the existing router select the manager/worker, wait on broker state notifications, inspect/review the result, and report back without opening the dashboard. Opening the dashboard later shows the exact same run IDs, tasks, agents, events and SQLite-backed state. Dashboard actions and MCP actions affect each other because there is only one `BrokerService`.
+
+`agent-bus operator-mcp` is an operator client. It reads the private operator credential from local storage and never returns it. The separate `agent-bus-mcp` worker server still requires an individual agent credential and exposes only worker-authorized `bus_*` tools; supervised models do not receive operator tools.
+
+This is a local stdio integration. A purely cloud-hosted ChatGPT session cannot directly reach arbitrary localhost services. Use an MCP-capable desktop/local connector environment. Remote exposure requires an explicit authenticated bridge or tunnel selected and secured by the user; Agent Bus does not bind publicly or create one automatically.
 
 ## Browser authentication and boot diagnostics
 
@@ -215,10 +253,13 @@ Automated tests use deterministic fake harnesses and do not consume Claude/OpenA
 - visible diagnostics for blocked JavaScript, failed modules, unhandled rejections and CSP violations
 - browser-received JavaScript SHA-256 matching the installed runtime manifest
 - SSE, mutation authentication, malformed requests, routing, persistence and task lifecycle
+- direct-supervise broker config authority, live-vs-disk config transition guards, PR5 target-listener migration, PID spoof/reuse protection
+- operator MCP tool contracts, worker/operator privilege separation, blocking state revision waits, and dashboard/MCP shared run IDs
 - exact-build reuse, legacy replacement, unrelated-port protection, repeated start, stop and surfaced startup failures
 - macOS global installation from a stale earlier `PATH` launcher
 - launch from outside the checkout, reinstall over a running instance and persistent-state preservation
 - the globally installed dashboard mounting in both Google Chrome and real Safari/WebKit before and after reinstall
+- installed `agent-bus mcp-config` and `agent-bus operator-mcp` before and after reinstall
 
 The committed lockfile is the source of dependency resolution. CI uses `npm ci`; it does not mutate dependencies during validation.
 
