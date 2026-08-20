@@ -75,7 +75,10 @@ jobs:
           npm run build
           git add dist
       - name: Validate final source and committed distribution
-        run: npm test
+        run: |
+          npm run test:dist
+          npm run test:bundle
+          npm run test:unit
       - run: git diff --check
       - name: Commit readable source and generated dist
         run: |
