@@ -86,10 +86,13 @@ export function classifyPortOwner(
 ): PortOwner {
   const healthBelongsToPid = Number(health?.pid) === pid;
   if (healthBelongsToPid && health?.product === PRODUCT_NAME) {
-    if (!runtimeBelongsToScope(health, scope)) {
+    const hasScopedRuntimeIdentity = Boolean(String(health.runtime?.busHome ?? "").trim() || String(health.runtime?.applicationRoot ?? "").trim());
+    if (hasScopedRuntimeIdentity && !runtimeBelongsToScope(health, scope)) {
       return { pid, command, kind: "unrelated", reason: "different Agent Bus instance/home" };
     }
-    const current = health.productProtocol === PRODUCT_PROTOCOL_VERSION
+    const scopeRequiresRuntimeIdentity = Boolean(scope.busHome || scope.applicationRoot);
+    const current = (!scopeRequiresRuntimeIdentity || hasScopedRuntimeIdentity)
+      && health.productProtocol === PRODUCT_PROTOCOL_VERSION
       && health.buildId === expectedBuildId
       && health.dashboard === true
       && health.uiBuilt === true;
@@ -97,7 +100,11 @@ export function classifyPortOwner(
       pid,
       command,
       kind: current ? "current" : "agent-bus",
-      reason: current ? "current Agent Bus product" : "Agent Bus product with a different build/protocol",
+      reason: current
+        ? "current Agent Bus product"
+        : hasScopedRuntimeIdentity
+          ? "Agent Bus product with a different build/protocol"
+          : "confirmed Agent Bus target listener without scoped runtime identity",
     };
   }
   if (healthBelongsToPid && legacyHealthShape(health) && legacyCatalogFingerprint) {
@@ -114,14 +121,18 @@ export function classifyPortOwner(
 
 export function listenerPids(port: number): number[] {
   if (process.platform === "win32") return [];
+  const parse = (output: string) => [...new Set(output.split(/\s+/).map((piece) => Number(piece.trim())).filter((pid) => Number.isInteger(pid) && pid > 0 && pid !== process.pid))];
   try {
-    const output = execFileSync("lsof", ["-nP", "-t", `-iTCP:${port}`, "-sTCP:LISTEN"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
-    return [...new Set(output.split("\n").map((line) => Number(line.trim())).filter((pid) => Number.isInteger(pid) && pid > 0 && pid !== process.pid))];
+    return parse(execFileSync("lsof", ["-nP", "-t", `-iTCP:${port}`, "-sTCP:LISTEN"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }));
   } catch {
-    return [];
+    if (process.platform !== "linux") return [];
+    try {
+      return parse(execFileSync("fuser", ["-n", "tcp", String(port)], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }));
+    } catch {
+      return [];
+    }
   }
 }
-
 
 export async function fetchHealth(url: string): Promise<ProductHealth | null> {
   try {
@@ -168,8 +179,6 @@ export async function inspectPort(port: number, url: string, expectedBuildId: st
     ? { pid, command: processCommand(pid), kind: "agent-bus" as const, reason: "validated instance process registry" }
     : classifyPortOwner(pid, processCommand(pid), health, expectedBuildId, legacyFingerprint, scope));
 }
-
-
 
 function alive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
