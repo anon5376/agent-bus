@@ -31,7 +31,13 @@ jobs:
             echo 'payload already applied'
             exit 0
           fi
-          base64 --decode scripts/final-source.patch.gz.b64 | gunzip > "$RUNNER_TEMP/final-source.patch"
+          set +e
+          base64 --decode scripts/final-source.patch.gz.b64 | gzip -dc > "$RUNNER_TEMP/final-source.patch"
+          gzip_rc=$?
+          set -e
+          echo "gzip exit: $gzip_rc"
+          wc -c "$RUNNER_TEMP/final-source.patch"
+          tail -n 8 "$RUNNER_TEMP/final-source.patch"
           git apply --check "$RUNNER_TEMP/final-source.patch"
           git apply "$RUNNER_TEMP/final-source.patch"
           cp .github/workflows/universal-harness-ci.yml scripts/final-universal-harness-ci.yml
