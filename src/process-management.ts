@@ -76,6 +76,19 @@ function legacyHealthShape(health: ProductHealth | null): boolean {
     && Number.isFinite(Number(health.runs));
 }
 
+function strongProductHealth(health: ProductHealth | null): boolean {
+  return Boolean(health
+    && health.ok === true
+    && health.product === PRODUCT_NAME
+    && Number.isFinite(Number(health.pid))
+    && Number.isFinite(Number(health.productProtocol))
+    && typeof health.buildId === "string"
+    && health.buildId.length > 0
+    && health.dashboard === true
+    && health.uiBuilt === true
+    && health.durable === true);
+}
+
 export function classifyPortOwner(
   pid: number,
   command: string,
@@ -85,17 +98,15 @@ export function classifyPortOwner(
   scope: AgentBusCommandScope = {},
 ): PortOwner {
   const healthBelongsToPid = Number(health?.pid) === pid;
-  if (healthBelongsToPid && health?.product === PRODUCT_NAME) {
-    const hasScopedRuntimeIdentity = Boolean(String(health.runtime?.busHome ?? "").trim() || String(health.runtime?.applicationRoot ?? "").trim());
-    if (hasScopedRuntimeIdentity && !runtimeBelongsToScope(health, scope)) {
+  if (healthBelongsToPid && strongProductHealth(health)) {
+    const hasScopedRuntimeIdentity = Boolean(String(health!.runtime?.busHome ?? "").trim() || String(health!.runtime?.applicationRoot ?? "").trim());
+    if (hasScopedRuntimeIdentity && !runtimeBelongsToScope(health!, scope)) {
       return { pid, command, kind: "unrelated", reason: "different Agent Bus instance/home" };
     }
     const scopeRequiresRuntimeIdentity = Boolean(scope.busHome || scope.applicationRoot);
     const current = (!scopeRequiresRuntimeIdentity || hasScopedRuntimeIdentity)
-      && health.productProtocol === PRODUCT_PROTOCOL_VERSION
-      && health.buildId === expectedBuildId
-      && health.dashboard === true
-      && health.uiBuilt === true;
+      && health!.productProtocol === PRODUCT_PROTOCOL_VERSION
+      && health!.buildId === expectedBuildId;
     return {
       pid,
       command,
