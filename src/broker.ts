@@ -1274,6 +1274,12 @@ export class BrokerService {
         });
         if (!verified) {
           this.supervisorMeta.delete(target);
+          const staleAgent = this.agents.get(target);
+          if (staleAgent) {
+            staleAgent.status = "offline";
+            this.store.saveAgent(staleAgent);
+          }
+          this.audit("supervisor_stale", { target, pid: meta.pid });
           throw new ConflictError(`supervisor ownership cannot be verified for ${target}`);
         }
         let killed = false;

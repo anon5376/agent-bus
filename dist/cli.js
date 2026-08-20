@@ -1,17 +1,18 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { discoverHarnessModels, probeHarness } from "./adapters.js";
 import { DEFAULT_CONFIG_PATH, enabledAgents, loadConfig } from "./config.js";
 import { recordCurrentAgentBusProcess } from "./instance-processes.js";
-import { fetchHealth, inspectPort, stopAgentBusProcesses, waitForPortFree, } from "./process-management.js";
 import { BUS_HOME, BUS_PORT, BUS_URL, brokerAlive, brokerCall } from "./protocol.js";
 import { productArtifactManifest, PRODUCT_NAME, PRODUCT_PROTOCOL_VERSION } from "./product-runtime.js";
 import { OPERATOR_TOKEN_PATH, agentTokenPath, readTokenFile, writePrivateToken } from "./security.js";
 import { DASHBOARD_URL, startProductServer } from "./product-server.js";
+import { ensureAgentBusRunning, stopAgentBusInstance } from "./lifecycle.js";
+import { launchSupervisor } from "./supervisor-launch.js";
 const ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 const CLI_PATH = join(ROOT, "cli.js");
 const STATIC_INDEX = join(ROOT, "dist", "web", "index.html");
@@ -113,66 +114,7 @@ async function verifyServedDashboard() {
     if (remoteBuild !== EXPECTED_BUILD_ID)
         throw new Error(`running build ${remoteBuild || "unknown"} does not match installed build ${EXPECTED_BUILD_ID}`);
 }
-async function ensureBrokerStarted() {
-    if (!existsSync(STATIC_INDEX)) {
-        throw new Error(`dashboard build missing at ${STATIC_INDEX}; run \`npm run build\` and reinstall Agent Bus`);
-    }
-    const initialHealth = await fetchHealth(BUS_URL);
-    if (isCurrentHealth(initialHealth)) {
-        await verifyServedDashboard();
-        return;
-    }
-    const initialOwners = await inspectPort(BUS_PORT, BUS_URL, EXPECTED_BUILD_ID, PROCESS_SCOPE);
-    const unrelated = unrelatedDiagnostic(initialOwners);
-    if (unrelated)
-        throw new Error(unrelated);
-    const stopped = await stopAgentBusProcesses({
-        port: BUS_PORT,
-        url: BUS_URL,
-        expectedBuildId: EXPECTED_BUILD_ID,
-        includeSupervisors: false,
-        busHome: BUS_HOME,
-        applicationRoot: ROOT,
-    });
-    if (stopped.unrelated.length)
-        throw new Error(unrelatedDiagnostic(stopped.unrelated) ?? "Port is occupied by an unrelated process.");
-    if (stopped.stoppedPids.length) {
-        process.stderr.write(`replaced ${stopped.stoppedPids.length} previous Agent Bus service process(es)${stopped.forcedPids.length ? ` (${stopped.forcedPids.length} required SIGKILL)` : ""}\n`);
-    }
-    if (!(await waitForPortFree(BUS_PORT, 5000))) {
-        const owners = await inspectPort(BUS_PORT, BUS_URL, EXPECTED_BUILD_ID, PROCESS_SCOPE);
-        throw new Error(unrelatedDiagnostic(owners) ?? `Agent Bus could not release port ${BUS_PORT} after stopping the previous instance.`);
-    }
-    rotateBrokerLog();
-    const log = openSync(BROKER_LOG, "a");
-    const child = spawn(process.execPath, [CLI_PATH, "broker"], {
-        detached: true,
-        stdio: ["ignore", log, log],
-    });
-    child.unref();
-    for (let i = 0; i < 80; i += 1) {
-        await new Promise(r => setTimeout(r, 120));
-        if (isCurrentHealth(await fetchHealth(BUS_URL))) {
-            await verifyServedDashboard();
-            return;
-        }
-        if (child.exitCode !== null)
-            break;
-        const owners = await inspectPort(BUS_PORT, BUS_URL, EXPECTED_BUILD_ID, PROCESS_SCOPE);
-        const conflict = unrelatedDiagnostic(owners);
-        if (conflict)
-            throw new Error(conflict);
-    }
-    const finalOwners = await inspectPort(BUS_PORT, BUS_URL, EXPECTED_BUILD_ID, PROCESS_SCOPE);
-    const conflict = unrelatedDiagnostic(finalOwners);
-    const tail = brokerLogTail();
-    throw new Error([
-        `Agent Bus failed to start at ${BUS_URL}.`,
-        conflict ?? "The broker process did not become healthy.",
-        tail ? `Broker log tail:\n${tail}` : "Broker log did not contain an error.",
-        `Log: ${BROKER_LOG}`,
-    ].join("\n"));
-}
+async function ensureBrokerStarted() { await ensureAgentBusRunning(); }
 function openUrl(url) { const command = process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open"; const args = process.platform === "win32" ? ["/c", "start", "", url] : [url]; const child = spawn(command, args, { detached: true, stdio: "ignore" }); child.unref(); }
 async function browserUrl() {
     await ensureBrokerStarted();
@@ -205,7 +147,7 @@ async function browserUrl() {
 async function provisionAgent(id, rotate = false) { await ensureBrokerStarted(); const existing = readTokenFile(agentTokenPath(id)); if (existing && !rotate)
     return existing; const response = await brokerCall("/agent/provision", { token: operatorToken(), id, rotate }); if (!response.token)
     throw new Error(`${response.message ?? `identity ${id} already exists`} and ${agentTokenPath(id)} is missing; rerun with --rotate to replace it`); writePrivateToken(agentTokenPath(id), response.token); return response.token; }
-function startSupervisor(agentId, workdir, configPath) { mkdirSync(join(BUS_HOME, "logs"), { recursive: true }); const log = openSync(join(BUS_HOME, "logs", `${agentId}.out`), "a"); const child = spawn(process.execPath, [CLI_PATH, "supervise", agentId, workdir], { detached: true, stdio: ["ignore", log, log], env: { ...process.env, AGENT_BUS_CONFIG: configPath } }); child.unref(); return child.pid ?? 0; }
+function startSupervisor(agentId, workdir, configPath) { return launchSupervisor({ agentId, projectRoot: workdir, configPath, busHome: BUS_HOME, port: BUS_PORT, url: BUS_URL }).pid; }
 function fmtAgo(ts) { const s = Math.max(0, Math.round((Date.now() - ts) / 1000)); return s < 60 ? `${s}s` : s < 3600 ? `${Math.round(s / 60)}m` : `${Math.round(s / 3600)}h`; }
 async function renderState() { const state = await brokerCall("/state", {}); const out = []; out.push("\x1b[1mAGENTS\x1b[0m"); for (const agent of state.roster) {
     if (agent.id === "operator")
@@ -244,7 +186,7 @@ async function main() {
             return;
         }
         case "stop": {
-            const result = await stopAgentBusProcesses({ port: BUS_PORT, url: BUS_URL, expectedBuildId: EXPECTED_BUILD_ID, includeSupervisors: true, busHome: BUS_HOME, applicationRoot: ROOT });
+            const result = await stopAgentBusInstance(true);
             if (result.unrelated.length)
                 console.log(`Preserved unrelated listener on port ${BUS_PORT}: PID ${result.unrelated[0].pid}${result.unrelated[0].command ? ` · ${result.unrelated[0].command}` : ""}`);
             console.log(result.stoppedPids.length ? `Stopped ${result.stoppedPids.length} Agent Bus process(es)${result.forcedPids.length ? ` (${result.forcedPids.length} forced)` : ""}.` : "Agent Bus is not running.");
@@ -287,6 +229,23 @@ async function main() {
             finally {
                 removeProcessRecord();
             }
+            return;
+        }
+        case "operator-mcp": {
+            const { runOperatorMcpServer } = await import("./operator-mcp.js");
+            await runOperatorMcpServer();
+            return;
+        }
+        case "mcp-config": {
+            const launcher = String(process.env.AGENT_BUS_LAUNCHER_PATH ?? "").trim();
+            const configPath = resolve(process.env.AGENT_BUS_CONFIG ?? DEFAULT_CONFIG_PATH);
+            const entry = resolve(process.argv[1] ?? CLI_PATH);
+            const server = {
+                command: launcher || process.execPath,
+                args: launcher ? ["operator-mcp"] : [entry, "operator-mcp"],
+                env: { AGENT_BUS_HOME: resolve(BUS_HOME), AGENT_BUS_CONFIG: configPath, AGENT_BUS_PORT: String(BUS_PORT), AGENT_BUS_URL: BUS_URL },
+            };
+            console.log(JSON.stringify({ mcpServers: { "agent-bus": server } }, null, 2));
             return;
         }
         case "run": {
@@ -407,7 +366,7 @@ async function main() {
             console.log(JSON.stringify(await brokerCall("/send", { token: operatorToken(), to, subject, body, type: "info" }), null, 2));
             return;
         }
-        default: console.log(["agent-bus — local multi-model agent control plane", "", "  agent-bus start [--no-open]", "  agent-bus open", "  agent-bus stop", "  agent-bus run <project> --goal \"...\"", "  agent-bus broker", "  agent-bus provision <agent-id> [--rotate]", "  agent-bus supervise <agent-id> [workdir]", "  agent-bus route <role> [--complexity 1..5] [--write]", "  agent-bus models [--discover]", "  agent-bus doctor", "  agent-bus status | watch | usage", "  agent-bus send <to> <subject> [body]", "", `  dashboard + broker: ${DASHBOARD_URL} · state: ${BUS_HOME}`].join("\n"));
+        default: console.log(["agent-bus — local multi-model agent control plane", "", "  agent-bus start [--no-open]", "  agent-bus open", "  agent-bus stop", "  agent-bus run <project> --goal \"...\"", "  agent-bus broker", "  agent-bus provision <agent-id> [--rotate]", "  agent-bus supervise <agent-id> [workdir]", "  agent-bus operator-mcp", "  agent-bus mcp-config", "  agent-bus route <role> [--complexity 1..5] [--write]", "  agent-bus models [--discover]", "  agent-bus doctor", "  agent-bus status | watch | usage", "  agent-bus send <to> <subject> [body]", "", `  dashboard + broker: ${DASHBOARD_URL} · state: ${BUS_HOME}`].join("\n"));
     }
 }
 main().catch(error => { console.error(error?.stack ?? error?.message ?? error); process.exit(1); });

@@ -171,7 +171,15 @@ export class OperatorControl {
         ...(probe.reason ? { reason: probe.reason } : {}),
       };
     }
-    const state = await this.call<OperatorState>("/state");
+    let state = await this.call<OperatorState>("/state");
+    let pruned = false;
+    for (const entry of state.roster ?? []) {
+      const agentId = String(entry.id ?? "");
+      const pid = Number(entry.supervisorPid);
+      if (!agentId || !Number.isInteger(pid) || pid <= 0) continue;
+      if (await this.clearStaleSupervisor(agentId, pid)) pruned = true;
+    }
+    if (pruned) state = await this.call<OperatorState>("/state");
     return { ok: true, running: true, occupied: true, health: probe.health, ...state };
   }
 

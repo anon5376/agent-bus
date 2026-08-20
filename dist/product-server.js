@@ -1,18 +1,19 @@
-import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
-import { existsSync, mkdirSync, openSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { isDeepStrictEqual } from "node:util";
 import { discoverHarnessModels, probeHarness } from "./adapters.js";
-import { DEFAULT_CONFIG_PATH, loadConfig, resolveAgent, validateConfig, } from "./config.js";
+import { DEFAULT_CONFIG_PATH, loadConfig, resolveAgent, } from "./config.js";
+import { stageAgentUpdate, supervisedExecutionConflicts } from "./config-transitions.js";
+import { verifiedSupervisorProcess } from "./instance-processes.js";
 import { addOrUpdateIntegration } from "./integrations.js";
 import { BUS_HOME, BUS_HOST, BUS_PORT, MAX_WAIT_MS } from "./protocol.js";
 import { productArtifactManifest, PRODUCT_NAME, PRODUCT_PROTOCOL_VERSION } from "./product-runtime.js";
 import { OPERATOR_TOKEN_PATH, agentTokenPath, hashToken, readTokenFile, writePrivateToken, } from "./security.js";
 import { serveDashboardStatic } from "./static-web.js";
 import { BrokerService } from "./broker.js";
+import { launchSupervisor } from "./supervisor-launch.js";
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const CLI_PATH = join(ROOT, "cli.js");
 const DEFAULT_STATIC_ROOT = join(ROOT, "dist", "web");
@@ -142,7 +143,7 @@ function errorStatus(error) {
         return 403;
     if (message.startsWith("no route") || message.startsWith("unknown run") || message.startsWith("unknown task"))
         return 404;
-    if (message.includes("already") || message.includes("not submitted") || message.includes("not eligible") || message.includes("stop it before editing"))
+    if (message.includes("already") || message.includes("not submitted") || message.includes("not eligible") || message.includes("stop it before editing") || message.includes("ownership cannot be verified"))
         return 409;
     return 400;
 }
@@ -157,117 +158,36 @@ function verifyOperatorToken(service, token) {
     if (!identity || identity.authority !== "operator")
         throw new BrowserAuthError("invalid operator credential");
 }
-function normalizedPermissions(value, fallback) {
-    const row = value && typeof value === "object" ? value : {};
-    const filesystem = ["none", "read", "write"].includes(String(row.filesystem))
-        ? String(row.filesystem)
-        : fallback?.filesystem ?? "read";
-    return {
-        canDelegate: row.canDelegate === undefined ? fallback?.canDelegate ?? false : Boolean(row.canDelegate),
-        canReview: row.canReview === undefined ? fallback?.canReview ?? false : Boolean(row.canReview),
-        filesystem,
-        shell: row.shell === undefined ? fallback?.shell ?? false : Boolean(row.shell),
-        network: row.network === undefined ? fallback?.network ?? false : Boolean(row.network),
-        maxDelegationDepth: Math.max(0, Number(row.maxDelegationDepth ?? fallback?.maxDelegationDepth ?? 0) || 0),
-        allowedPaths: Array.isArray(row.allowedPaths)
-            ? row.allowedPaths.map(String).filter(Boolean)
-            : fallback?.allowedPaths ?? ["."],
-    };
-}
-function saveAgent(configPath, body) {
-    const config = structuredClone(loadConfig(configPath));
-    const id = String(body.id ?? "").trim();
-    if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(id))
-        throw new Error("agent id must be 1-64 safe characters");
-    const existing = config.agents[id];
-    const modelId = String(body.model ?? existing?.model ?? "");
-    const role = String(body.role ?? existing?.role ?? "");
-    const model = config.models[modelId];
-    if (!model)
-        throw new Error(`unknown model: ${modelId}`);
-    if (!config.roles[role])
-        throw new Error(`unknown role: ${role}`);
-    if (body.modelFamily !== undefined || body.exactModel !== undefined) {
-        throw new Error("model definitions are shared; agent edits cannot change model family or exact model");
+function verifiedLiveSupervisor(service, id) {
+    const meta = service.supervisorMeta.get(id);
+    if (!meta)
+        return null;
+    const verified = verifiedSupervisorProcess({
+        busHome: BUS_HOME,
+        port: service.instancePort,
+        applicationRoot: ROOT,
+        agentId: id,
+        pid: meta.pid,
+    });
+    if (verified)
+        return meta;
+    service.supervisorMeta.delete(id);
+    const agent = service.agents.get(id);
+    if (agent) {
+        agent.status = "offline";
+        service.store.saveAgent(agent);
     }
-    const authority = String(body.authority ?? existing?.authority ?? (role === "manager" ? "manager" : "worker"));
-    if (authority !== "manager" && authority !== "worker")
-        throw new Error("agent authority must be manager or worker");
-    const harnessOptions = { ...(existing?.harnessOptions ?? {}) };
-    if (body.harnessOptions && typeof body.harnessOptions === "object")
-        Object.assign(harnessOptions, body.harnessOptions);
-    if (body.reasoning !== undefined)
-        harnessOptions.reasoning = String(body.reasoning);
-    if (body.effort !== undefined)
-        harnessOptions.effort = String(body.effort);
-    const agent = {
-        id,
-        model: modelId,
-        role,
-        authority,
-        description: String(body.description ?? existing?.description ?? `${role} agent`),
-        enabled: body.enabled === undefined ? existing?.enabled ?? true : Boolean(body.enabled),
-        autoStart: body.autoStart === undefined ? existing?.autoStart ?? false : Boolean(body.autoStart),
-        permissions: normalizedPermissions(body.permissions, existing?.permissions),
-        harnessOptions,
-    };
-    config.agents[id] = agent;
-    validateConfig(config);
-    writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
-    return { agent, config };
+    return null;
 }
-function executionConfigSnapshot(config, id) {
-    const resolved = resolveAgent(config, id);
-    return {
-        agent: {
-            id: resolved.id,
-            model: resolved.model,
-            role: resolved.role,
-            authority: resolved.authority,
-            enabled: resolved.enabled,
-            permissions: resolved.permissions,
-            harnessOptions: resolved.harnessOptions ?? null,
-        },
-        model: {
-            id: resolved.modelDefinition.id,
-            provider: resolved.modelDefinition.provider,
-            harness: resolved.modelDefinition.harness,
-            family: resolved.modelDefinition.family,
-            exactModel: resolved.modelDefinition.exactModel ?? null,
-            enabled: resolved.modelDefinition.enabled,
-            capabilities: resolved.modelDefinition.capabilities,
-        },
-        provider: {
-            id: resolved.providerDefinition.id,
-            authKind: resolved.providerDefinition.authKind,
-            authSource: resolved.providerDefinition.authSource,
-            subscriptionBacked: resolved.providerDefinition.subscriptionBacked,
-            enabled: resolved.providerDefinition.enabled,
-        },
-        harness: {
-            id: resolved.harnessDefinition.id,
-            adapter: resolved.harnessDefinition.adapter,
-            command: resolved.harnessDefinition.command,
-            providers: resolved.harnessDefinition.providers,
-            enabled: resolved.harnessDefinition.enabled,
-            probeArgs: resolved.harnessDefinition.probeArgs ?? [],
-            modelDiscovery: resolved.harnessDefinition.modelDiscovery ?? null,
-            features: resolved.harnessDefinition.features,
-        },
-    };
+function pruneStaleSupervisors(service) {
+    for (const id of [...service.supervisorMeta.keys()])
+        verifiedLiveSupervisor(service, id);
 }
-function supervisedExecutionChanges(service, before, after) {
-    const changed = [];
-    for (const [id] of service.supervisorMeta) {
-        try {
-            if (!isDeepStrictEqual(executionConfigSnapshot(before, id), executionConfigSnapshot(after, id)))
-                changed.push(id);
-        }
-        catch {
-            changed.push(id);
-        }
+function assertSafeConfigTransition(service, candidate) {
+    const conflicts = supervisedExecutionConflicts(service.config, candidate, service.supervisorMeta.keys());
+    if (conflicts.length) {
+        throw new Error(`configuration transition changes supervised agent execution (${conflicts.map((conflict) => conflict.agentId).join(", ")}); stop it before editing configuration`);
     }
-    return changed;
 }
 function applyConfig(service, config) {
     Object.assign(service.config, config);
@@ -365,7 +285,7 @@ async function startAgent(service, operatorTokenPath, configPath, id, requested)
         throw new Error(`unknown configured agent: ${id}`);
     if (!definition.enabled)
         throw new Error(`agent ${id} is disabled`);
-    const live = service.supervisorMeta.get(id);
+    const live = verifiedLiveSupervisor(service, id);
     if (live)
         return { id, started: false, pid: live.pid, message: "already supervised" };
     const latestRun = [...service.runs.values()].sort((a, b) => b.updatedAt - a.updatedAt)[0];
@@ -375,15 +295,14 @@ async function startAgent(service, operatorTokenPath, configPath, id, requested)
         throw new Error("a valid projectRoot is required to start an agent");
     }
     await ensureAgentToken(service, operatorTokenPath, id);
-    mkdirSync(join(BUS_HOME, "logs"), { recursive: true });
-    const log = openSync(join(BUS_HOME, "logs", `${id}.out`), "a");
-    const child = spawn(process.execPath, [CLI_PATH, "supervise", id, projectRoot], {
-        detached: true,
-        stdio: ["ignore", log, log],
-        env: { ...process.env, AGENT_BUS_CONFIG: configPath },
+    const launched = launchSupervisor({
+        agentId: id,
+        projectRoot,
+        configPath,
+        busHome: BUS_HOME,
+        port: BUS_PORT,
     });
-    child.unref();
-    return { id, started: true, pid: child.pid ?? 0, projectRoot };
+    return { id, started: true, pid: launched.pid, projectRoot };
 }
 async function stopRun(service, token, runId, reason) {
     const run = service.runs.get(runId);
@@ -497,6 +416,7 @@ async function handleApi(req, res, pathname, params, service, sessions, operator
                 return;
             running = true;
             try {
+                pruneStaleSupervisors(service);
                 const snapshot = await service.handle("/snapshot", { sinceSeq: since });
                 since = Number(snapshot.seq ?? since);
                 if (!closed)
@@ -519,8 +439,10 @@ async function handleApi(req, res, pathname, params, service, sessions, operator
         }
         return;
     }
-    if (pathname === "/api/state" && req.method === "GET")
+    if (pathname === "/api/state" && req.method === "GET") {
+        pruneStaleSupervisors(service);
         return sendJson(res, 200, await service.handle("/snapshot", { sinceSeq: 0 }));
+    }
     if (pathname === "/api/catalog" && req.method === "GET")
         return sendJson(res, 200, await service.handle("/catalog", {}));
     if (pathname === "/api/projects" && req.method === "GET")
@@ -568,10 +490,9 @@ async function handleApi(req, res, pathname, params, service, sessions, operator
         if (!configPath)
             throw new Error("agent configuration editing is unavailable with an in-memory config");
         const body = await readJson(req);
-        const id = String(body.id ?? "").trim();
-        if (service.supervisorMeta.has(id))
-            throw new Error(`agent ${id} is supervised; stop it before editing its configuration`);
-        const result = saveAgent(configPath, body);
+        const result = stageAgentUpdate(loadConfig(configPath), body);
+        assertSafeConfigTransition(service, result.config);
+        writeFileSync(configPath, `${JSON.stringify(result.config, null, 2)}\n`, "utf8");
         applyConfig(service, result.config);
         return sendJson(res, 200, { agent: result.agent, applied: true });
     }
@@ -579,11 +500,8 @@ async function handleApi(req, res, pathname, params, service, sessions, operator
         if (!configPath)
             throw new Error("integration editing is unavailable with an in-memory config");
         const input = await readJson(req);
-        const beforeConfig = structuredClone(loadConfig(configPath));
         const result = addOrUpdateIntegration(configPath, input, { persist: false });
-        const affected = supervisedExecutionChanges(service, beforeConfig, result.config);
-        if (affected.length)
-            throw new Error(`integration update changes supervised agent execution (${affected.join(", ")}); stop it before editing configuration`);
+        assertSafeConfigTransition(service, result.config);
         writeFileSync(configPath, `${JSON.stringify(result.config, null, 2)}\n`, "utf8");
         applyConfig(service, result.config);
         return sendJson(res, 200, {

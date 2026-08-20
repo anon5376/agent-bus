@@ -191,6 +191,11 @@ test("stale supervisors self-heal and agent_bus_wait wakes for operator question
     try { process.kill(-firstPid, "SIGKILL"); } catch { process.kill(firstPid, "SIGKILL"); }
     await waitForExit(firstPid);
 
+    const staleStatus = await call(client, "agent_bus_status");
+    const staleRow = (staleStatus.roster ?? []).find((entry: any) => entry.id === "fake-small");
+    assert.equal(staleRow?.supervisorPid ?? null, null, "status must prune a dead supervisor immediately");
+    assert.equal(staleRow?.status, "offline", "status must report the agent offline immediately after supervisor death");
+
     const operatorToken = readFileSync(join(home, "operator.token"), "utf8").trim();
     const cookie = await dashboardSession(url, operatorToken);
     const dashboardStart = await fetch(`${url}/api/agents/fake-small/start`, {
