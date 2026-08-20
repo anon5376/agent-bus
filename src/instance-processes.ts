@@ -160,10 +160,16 @@ function escapeRegex(value: string): string {
 }
 
 function supervisorCommandMatches(record: AgentBusProcessRecord, applicationRoot: string, agentId: string): boolean {
-  const root = escapeRegex(resolve(applicationRoot));
   const id = escapeRegex(agentId);
-  const absolute = new RegExp(`(?:^|\\s)(?:\\S*node\\S*\\s+)?${root}/(?:dist/cli\\.js|cli\\.js)\\s+supervise\\s+${id}(?:\\s|$)`, "i");
-  if (absolute.test(record.command)) return true;
+  const roots = [
+    resolve(applicationRoot),
+    resolve(join(record.busHome, "app", "current")),
+  ];
+  for (const candidate of [...new Set(roots)]) {
+    const root = escapeRegex(candidate);
+    const absolute = new RegExp(`(?:^|\\s)(?:\\S*node\\S*\\s+)?${root}/(?:dist/cli\\.js|cli\\.js)\\s+supervise\\s+${id}(?:\\s|$)`, "i");
+    if (absolute.test(record.command)) return true;
+  }
   const relative = new RegExp(`(?:^|\\s)(?:\\S*node\\S*\\s+)?(?:\\./)?(?:dist/cli\\.js|cli\\.js)\\s+supervise\\s+${id}(?:\\s|$)`, "i");
   return relative.test(record.command) && processCwd(record.pid) === resolve(applicationRoot);
 }
