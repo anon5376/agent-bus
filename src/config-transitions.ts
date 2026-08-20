@@ -30,6 +30,7 @@ export function executionConfigSnapshot(config: BusConfig, agentId: string): unk
       permissions: resolved.permissions,
       harnessOptions: resolved.harnessOptions ?? null,
     },
+    role: config.roles[resolved.role],
     model: {
       id: resolved.modelDefinition.id,
       provider: resolved.modelDefinition.provider,
