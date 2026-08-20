@@ -3,7 +3,6 @@ import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getHarnessAdapter } from "./adapters.js";
-import { configPathFromProject, loadConfig, resolveAgent } from "./config.js";
 import { BUS_HOME, MAX_WAIT_MS, brokerAlive, brokerCall, } from "./protocol.js";
 import { agentTokenPath, readTokenFile } from "./security.js";
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -188,17 +187,23 @@ export async function supervise(agentId, workdir) {
     mkdirSync(LOG_DIR, { recursive: true });
     mkdirSync(TRANSCRIPT_DIR, { recursive: true });
     mkdirSync(SESSION_DIR, { recursive: true });
-    const config = loadConfig(configPathFromProject(workdir));
-    const agent = resolveAgent(config, agentId);
-    if (!agent.enabled)
-        throw new Error(`agent ${agentId} is disabled in configuration`);
     if (!(await brokerAlive()))
         throw new Error("broker is not running — start it with: agent-bus broker");
     const token = readTokenFile(agentTokenPath(agentId));
     if (!token) {
         throw new Error(`no token for ${agentId}; provision it explicitly with: agent-bus provision ${agentId}`);
     }
-    await brokerCall("/register", { token, id: agentId });
+    const preflight = await brokerCall("/agent/execution-config", { token, id: agentId });
+    if (!preflight.agent.enabled)
+        throw new Error(`agent ${agentId} is disabled in the running broker configuration`);
+    await brokerCall("/register", { token, id: agentId, pid: process.pid, workdir, cli: preflight.agent.harnessDefinition.id });
+    // Registration establishes verified live-supervisor ownership. Resolve once more
+    // from the broker so any edit that raced startup is either rejected by the
+    // config-transition guard or reflected in the execution config used here.
+    const resolved = await brokerCall("/agent/execution-config", { token, id: agentId });
+    const agent = resolved.agent;
+    if (!agent.enabled)
+        throw new Error(`agent ${agentId} was disabled while the supervisor was starting`);
     await reportPresence(token, agent, workdir, null);
     const adapter = getHarnessAdapter(agent.harnessDefinition.adapter);
     let session = readSession(agentId);

@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 function freePort() {
   return new Promise((resolve, reject) => {
@@ -76,7 +76,7 @@ function fakeConfig(path) {
   writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`);
 }
 
-function startFixtureServer(port, kind) {
+function startFixtureServer(port, kind, scriptPath = null) {
   const code = `
     const http=require('node:http');
     const kind=${JSON.stringify(kind)};
@@ -85,7 +85,9 @@ function startFixtureServer(port, kind) {
       if(req.url==='/health'){
         const body=kind==='legacy'
           ? {ok:true,pid:process.pid,agents:0,tasks:0,runs:0,durable:true}
-          : {ok:true,pid:process.pid,service:'not-agent-bus'};
+          : kind==='pr5'
+            ? {ok:true,pid:process.pid,product:'agent-bus',productProtocol:1,buildId:'merged-pr5-checkout',dashboard:true,uiBuilt:true,agents:2,tasks:1,runs:1,durable:true}
+            : {ok:true,pid:process.pid,service:'not-agent-bus'};
         res.end(JSON.stringify(body)); return;
       }
       if(req.url==='/catalog'&&req.method==='POST'&&kind==='legacy'){
@@ -97,6 +99,11 @@ function startFixtureServer(port, kind) {
     server.listen(${port},'127.0.0.1');
     process.on('SIGTERM',()=>server.close(()=>process.exit(0)));
   `;
+  if (scriptPath) {
+    mkdirSync(dirname(scriptPath), { recursive: true });
+    writeFileSync(scriptPath, code);
+    return spawn(process.execPath, [scriptPath], { stdio: "ignore", detached: true });
+  }
   return spawn(process.execPath, ["-e", code], { stdio: "ignore", detached: true });
 }
 
@@ -124,11 +131,40 @@ try {
   const secondHealth = await waitForHealth(url, (body) => body.product === "agent-bus" && body.dashboard === true);
   assert.equal(secondHealth.pid, firstHealth.pid, "repeated start should reuse the current matching product");
 
+  const secondPort = await freePort();
+  const secondUrl = `http://127.0.0.1:${secondPort}`;
+  const sameHomeEnv = { ...env, AGENT_BUS_PORT: String(secondPort), AGENT_BUS_URL: secondUrl };
+  const secondInstanceStart = runCli(sameHomeEnv, "start", "--no-open");
+  assert.equal(secondInstanceStart.status, 0, `same-home second instance failed:\n${secondInstanceStart.stdout}\n${secondInstanceStart.stderr}`);
+  const secondInstanceHealth = await waitForHealth(secondUrl, (body) => body.product === "agent-bus");
+
   const stop = runCli(env, "stop");
   assert.equal(stop.status, 0, `stop failed:\n${stop.stdout}\n${stop.stderr}`);
   await waitForDown(url);
+  const secondAfterStop = await waitForHealth(secondUrl, (body) => body.product === "agent-bus");
+  assert.equal(secondAfterStop.pid, secondInstanceHealth.pid, "same-home different-port instance must remain alive");
+  assert.equal(runCli(sameHomeEnv, "stop").status, 0);
+  await waitForDown(secondUrl);
 
-  const legacy = startFixtureServer(port, "legacy");
+  const unhealthyPairStart = runCli(env, "start", "--no-open");
+  assert.equal(unhealthyPairStart.status, 0, `unhealthy pair setup failed:\n${unhealthyPairStart.stdout}\n${unhealthyPairStart.stderr}`);
+  const unhealthyPairHealth = await waitForHealth(url, (body) => body.product === "agent-bus");
+  const otherPort = await freePort();
+  const otherUrl = `http://127.0.0.1:${otherPort}`;
+  const otherEnv = { ...env, AGENT_BUS_HOME: join(temp, "home-b"), AGENT_BUS_PORT: String(otherPort), AGENT_BUS_URL: otherUrl };
+  const otherStart = runCli(otherEnv, "start", "--no-open");
+  assert.equal(otherStart.status, 0, `different-home peer failed:\n${otherStart.stdout}\n${otherStart.stderr}`);
+  const otherHealth = await waitForHealth(otherUrl, (body) => body.product === "agent-bus");
+  process.kill(unhealthyPairHealth.pid, "SIGSTOP");
+  const unhealthyPairStop = runCli(env, "stop");
+  assert.equal(unhealthyPairStop.status, 0, `unhealthy scoped stop failed:\n${unhealthyPairStop.stdout}\n${unhealthyPairStop.stderr}`);
+  await waitForProcessDown(unhealthyPairHealth.pid);
+  const otherAfter = await waitForHealth(otherUrl, (body) => body.product === "agent-bus");
+  assert.equal(otherAfter.pid, otherHealth.pid, "different-home peer from same checkout must remain alive");
+  assert.equal(runCli(otherEnv, "stop").status, 0);
+  await waitForDown(otherUrl);
+
+  const legacy = startFixtureServer(port, "legacy", join(env.AGENT_BUS_HOME, "app", "releases", "legacy-fixture", "dist", "broker.js"));
   await waitForHealth(url, (body) => body.durable === true && !body.product);
   const replace = runCli(env, "start", "--no-open");
   assert.equal(replace.status, 0, `legacy replacement failed:\n${replace.stdout}\n${replace.stderr}`);
@@ -136,6 +172,27 @@ try {
   assert.notEqual(replacedHealth.pid, legacy.pid, "legacy listener should be replaced");
   await waitForProcessDown(legacy.pid);
   assert.equal(runCli(env, "stop").status, 0);
+  await waitForDown(url);
+
+  const pr5 = startFixtureServer(port, "pr5", join(temp, "merged-pr5-checkout", "dist", "cli.js"));
+  const pr5Health = await waitForHealth(url, (body) => body.product === "agent-bus" && body.buildId === "merged-pr5-checkout");
+  assert.equal(pr5Health.pid, pr5.pid);
+  const upgrade = runCli(env, "start", "--no-open");
+  assert.equal(upgrade.status, 0, `PR5 to PR6 replacement failed:\n${upgrade.stdout}\n${upgrade.stderr}`);
+  const upgradedHealth = await waitForHealth(url, (body) => body.product === "agent-bus" && body.dashboard === true && body.buildId !== "merged-pr5-checkout");
+  assert.notEqual(upgradedHealth.pid, pr5.pid, "merged PR5 target listener must be replaced by the current product");
+  await waitForProcessDown(pr5.pid);
+  assert.equal(runCli(env, "stop").status, 0);
+  await waitForDown(url);
+
+  const unhealthyStart = runCli(env, "start", "--no-open");
+  assert.equal(unhealthyStart.status, 0, `unhealthy recovery setup failed:\n${unhealthyStart.stdout}\n${unhealthyStart.stderr}`);
+  const unhealthyHealth = await waitForHealth(url, (body) => body.product === "agent-bus");
+  process.kill(unhealthyHealth.pid, "SIGSTOP");
+  const unhealthyStop = runCli(env, "stop");
+  assert.equal(unhealthyStop.status, 0, `unhealthy instance stop failed:\n${unhealthyStop.stdout}\n${unhealthyStop.stderr}`);
+  assert.match(`${unhealthyStop.stdout}${unhealthyStop.stderr}`, /forced/i);
+  await waitForProcessDown(unhealthyHealth.pid);
   await waitForDown(url);
 
   const unrelated = startFixtureServer(port, "unrelated");

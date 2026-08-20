@@ -44,6 +44,95 @@ function commonEnvironment(context) {
         AGENT_HARNESS: context.agent.harnessDefinition.id,
     };
 }
+function commandTemplateValue(value, context) {
+    const replacements = {
+        "{prompt}": context.prompt,
+        "{model}": context.agent.modelDefinition.exactModel ?? context.agent.modelDefinition.id,
+        "{modelId}": context.agent.modelDefinition.id,
+        "{family}": context.agent.modelDefinition.family,
+        "{provider}": context.agent.modelDefinition.provider,
+        "{agentId}": context.agent.id,
+        "{role}": context.agent.role,
+        "{session}": context.sessionId ?? "",
+        "{workdir}": context.workdir,
+        "{mcpServer}": context.mcpServerPath,
+    };
+    let output = value;
+    for (const [token, replacement] of Object.entries(replacements)) {
+        output = output.split(token).join(replacement);
+    }
+    return output;
+}
+function genericCommandResult(stdout, exitCode) {
+    for (const row of jsonLines(stdout).reverse()) {
+        const text = row.result ?? row.text ?? row.content ?? row.message;
+        if (typeof text !== "string")
+            continue;
+        const usage = (row.usage ?? {});
+        const input = asNumber(usage.input_tokens ?? usage.inputTokens ?? row.inputTokens);
+        const output = asNumber(usage.output_tokens ?? usage.outputTokens ?? row.outputTokens);
+        const total = asNumber(usage.total_tokens ?? usage.totalTokens ?? row.totalTokens) || input + output;
+        return {
+            text,
+            sessionId: typeof row.session_id === "string" ? row.session_id :
+                typeof row.sessionId === "string" ? row.sessionId : null,
+            usage: {
+                inputTokens: input,
+                outputTokens: output,
+                totalTokens: total,
+                costUSD: asNumber(usage.cost_usd ?? usage.costUSD ?? row.costUSD),
+            },
+            structured: row,
+            malformed: false,
+        };
+    }
+    return defaultResult(stdout, exitCode);
+}
+/**
+ * Escape hatch for models/harnesses Agent Bus does not know about yet.
+ *
+ * Configure a harness with `adapter: "command"`, then set per-agent harnessOptions:
+ *   args: ["run", "--model", "{model}", "--prompt", "{prompt}"]
+ *   env: { SOME_PROFILE: "work" }
+ *   autoReport: true
+ *   timeoutMs: 3600000
+ *
+ * Supported placeholders: {prompt}, {model}, {modelId}, {family}, {provider},
+ * {agentId}, {role}, {session}, {workdir}, {mcpServer}.
+ *
+ * If the custom CLI has its own Agent Bus MCP integration, set autoReport=false.
+ * If it is a plain one-shot/model CLI, leave autoReport=true and the supervisor
+ * submits its textual result for ordinary worker tasks.
+ */
+const commandAdapter = {
+    id: "command",
+    build(context) {
+        const options = context.agent.harnessOptions ?? {};
+        const rawArgs = Array.isArray(options.args) ? options.args.map(String) : ["{prompt}"];
+        const args = rawArgs
+            .map((item) => commandTemplateValue(item, context))
+            .filter((item, index) => item.length > 0 || rawArgs[index] === "");
+        const rawEnv = options.env && typeof options.env === "object" && !Array.isArray(options.env)
+            ? options.env
+            : {};
+        const environment = {
+            ...commonEnvironment(context),
+            ...Object.fromEntries(Object.entries(rawEnv).map(([key, value]) => [key, commandTemplateValue(String(value), context)])),
+        };
+        const timeoutMs = Math.max(1_000, Math.min(24 * 60 * 60_000, Number(options.timeoutMs ?? 60 * 60_000) || 60 * 60_000));
+        const autoReport = options.autoReport === undefined
+            ? !context.agent.harnessDefinition.features.mcp
+            : Boolean(options.autoReport);
+        return {
+            command: context.agent.harnessDefinition.command,
+            args,
+            environment,
+            autoReport,
+            timeoutMs,
+        };
+    },
+    parse: genericCommandResult,
+};
 const claudeAdapter = {
     id: "claude",
     build(context) {
@@ -142,9 +231,8 @@ const codexAdapter = {
         const result = defaultResult(stdout, exitCode);
         const clean = stripAnsi(stdout);
         const match = clean.match(/tokens used\s*\n\s*([\d,]+)/i);
-        if (match) {
+        if (match)
             result.usage.totalTokens = Number(match[1].replace(/,/g, "")) || 0;
-        }
         result.sessionId = exitCode === 0 ? "resume-last" : null;
         return result;
     },
@@ -153,9 +241,7 @@ const kimiAdapter = {
     id: "kimi",
     build(context) {
         const env = commonEnvironment(context);
-        const args = context.sessionId
-            ? ["-r", context.sessionId, "-p", context.prompt]
-            : ["-p", context.prompt];
+        const args = context.sessionId ? ["-r", context.sessionId, "-p", context.prompt] : ["-p", context.prompt];
         if (context.agent.modelDefinition.exactModel)
             args.push("-m", context.agent.modelDefinition.exactModel);
         return { command: context.agent.harnessDefinition.command, args, environment: env, autoReport: false, timeoutMs: 60 * 60_000 };
@@ -220,9 +306,7 @@ const opencodeAdapter = {
         try {
             cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
         }
-        catch {
-            // New project-local configuration.
-        }
+        catch { /* new project-local configuration */ }
         const mcp = (cfg.mcp && typeof cfg.mcp === "object" ? cfg.mcp : {});
         mcp["agent-bus"] = {
             type: "local",
@@ -299,9 +383,7 @@ const hermesAdapter = {
 };
 const fakeAdapter = {
     id: "fake",
-    prepare(context) {
-        mkdirSync(join(context.workdir, ".agent-bus"), { recursive: true });
-    },
+    prepare(context) { mkdirSync(join(context.workdir, ".agent-bus"), { recursive: true }); },
     build(context) {
         const env = commonEnvironment(context);
         const mode = String(context.agent.harnessOptions?.mode ?? "success");
@@ -342,11 +424,12 @@ const ADAPTERS = {
     opencode: opencodeAdapter,
     hermes: hermesAdapter,
     fake: fakeAdapter,
+    command: commandAdapter,
 };
 export function getHarnessAdapter(id) {
     const adapter = ADAPTERS[id];
     if (!adapter)
-        throw new Error(`unknown harness adapter: ${id}`);
+        throw new Error(`unknown harness adapter: ${id}. Use adapter=command for configurable custom CLIs.`);
     return adapter;
 }
 function runCommand(command, args, timeoutMs = 10_000) {

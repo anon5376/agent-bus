@@ -1,21 +1,20 @@
-import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { createServer, IncomingMessage, Server, ServerResponse } from "node:http";
-import { existsSync, mkdirSync, openSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { discoverHarnessModels, probeHarness } from "./adapters.js";
 import {
-  AgentDefinition,
   BusConfig,
   DEFAULT_CONFIG_PATH,
   loadConfig,
   resolveAgent,
-  validateConfig,
 } from "./config.js";
+import { stageAgentUpdate, supervisedExecutionConflicts } from "./config-transitions.js";
+import { verifiedSupervisorProcess } from "./instance-processes.js";
 import { addOrUpdateIntegration, IntegrationInput } from "./integrations.js";
 import { Agent, BUS_HOME, BUS_HOST, BUS_PORT, MAX_WAIT_MS, Run, Task } from "./protocol.js";
-import { productBuildId, PRODUCT_NAME, PRODUCT_PROTOCOL_VERSION } from "./product-runtime.js";
+import { productArtifactManifest, PRODUCT_NAME, PRODUCT_PROTOCOL_VERSION } from "./product-runtime.js";
 import {
   OPERATOR_TOKEN_PATH,
   agentTokenPath,
@@ -25,6 +24,7 @@ import {
 } from "./security.js";
 import { serveDashboardStatic } from "./static-web.js";
 import { BrokerOptions, BrokerService } from "./broker.js";
+import { launchSupervisor } from "./supervisor-launch.js";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const CLI_PATH = join(ROOT, "cli.js");
@@ -176,7 +176,7 @@ function errorStatus(error: unknown): number {
   if (message.startsWith("unauthorized")) return 401;
   if (message.includes("not authorized") || message.startsWith("only ")) return 403;
   if (message.startsWith("no route") || message.startsWith("unknown run") || message.startsWith("unknown task")) return 404;
-  if (message.includes("already") || message.includes("not submitted") || message.includes("not eligible")) return 409;
+  if (message.includes("already") || message.includes("not submitted") || message.includes("not eligible") || message.includes("stop it before editing") || message.includes("ownership cannot be verified")) return 409;
   return 400;
 }
 
@@ -191,66 +191,35 @@ function verifyOperatorToken(service: BrokerService, token: string): void {
   if (!identity || identity.authority !== "operator") throw new BrowserAuthError("invalid operator credential");
 }
 
-function normalizedPermissions(
-  value: unknown,
-  fallback?: AgentDefinition["permissions"],
-): AgentDefinition["permissions"] {
-  const row = value && typeof value === "object" ? value as Record<string, unknown> : {};
-  const filesystem = ["none", "read", "write"].includes(String(row.filesystem))
-    ? String(row.filesystem) as "none" | "read" | "write"
-    : fallback?.filesystem ?? "read";
-  return {
-    canDelegate: row.canDelegate === undefined ? fallback?.canDelegate ?? false : Boolean(row.canDelegate),
-    canReview: row.canReview === undefined ? fallback?.canReview ?? false : Boolean(row.canReview),
-    filesystem,
-    shell: row.shell === undefined ? fallback?.shell ?? false : Boolean(row.shell),
-    network: row.network === undefined ? fallback?.network ?? false : Boolean(row.network),
-    maxDelegationDepth: Math.max(0, Number(row.maxDelegationDepth ?? fallback?.maxDelegationDepth ?? 0) || 0),
-    allowedPaths: Array.isArray(row.allowedPaths)
-      ? row.allowedPaths.map(String).filter(Boolean)
-      : fallback?.allowedPaths ?? ["."],
-  };
+function verifiedLiveSupervisor(service: BrokerService, id: string) {
+  const meta = service.supervisorMeta.get(id);
+  if (!meta) return null;
+  const verified = verifiedSupervisorProcess({
+    busHome: BUS_HOME,
+    port: service.instancePort,
+    applicationRoot: ROOT,
+    agentId: id,
+    pid: meta.pid,
+  });
+  if (verified) return meta;
+  service.supervisorMeta.delete(id);
+  const agent = service.agents.get(id);
+  if (agent) {
+    agent.status = "offline";
+    service.store.saveAgent(agent);
+  }
+  return null;
 }
 
-function saveAgent(configPath: string, body: Record<string, unknown>): { agent: AgentDefinition; config: BusConfig } {
-  const config = structuredClone(loadConfig(configPath));
-  const id = String(body.id ?? "").trim();
-  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(id)) throw new Error("agent id must be 1-64 safe characters");
-  const existing = config.agents[id];
-  const modelId = String(body.model ?? existing?.model ?? "");
-  const role = String(body.role ?? existing?.role ?? "");
-  const model = config.models[modelId];
-  if (!model) throw new Error(`unknown model: ${modelId}`);
-  if (!config.roles[role]) throw new Error(`unknown role: ${role}`);
+function pruneStaleSupervisors(service: BrokerService): void {
+  for (const id of [...service.supervisorMeta.keys()]) verifiedLiveSupervisor(service, id);
+}
 
-  if (body.modelFamily !== undefined) model.family = String(body.modelFamily).trim() || model.family;
-  if (body.exactModel !== undefined) {
-    const exact = String(body.exactModel).trim();
-    if (exact) model.exactModel = exact; else delete model.exactModel;
+function assertSafeConfigTransition(service: BrokerService, candidate: BusConfig): void {
+  const conflicts = supervisedExecutionConflicts(service.config, candidate, service.supervisorMeta.keys());
+  if (conflicts.length) {
+    throw new Error(`configuration transition changes supervised agent execution (${conflicts.map((conflict) => conflict.agentId).join(", ")}); stop it before editing configuration`);
   }
-
-  const authority = String(body.authority ?? existing?.authority ?? (role === "manager" ? "manager" : "worker"));
-  if (authority !== "manager" && authority !== "worker") throw new Error("agent authority must be manager or worker");
-  const harnessOptions: Record<string, unknown> = { ...(existing?.harnessOptions ?? {}) };
-  if (body.harnessOptions && typeof body.harnessOptions === "object") Object.assign(harnessOptions, body.harnessOptions);
-  if (body.reasoning !== undefined) harnessOptions.reasoning = String(body.reasoning);
-  if (body.effort !== undefined) harnessOptions.effort = String(body.effort);
-
-  const agent: AgentDefinition = {
-    id,
-    model: modelId,
-    role,
-    authority,
-    description: String(body.description ?? existing?.description ?? `${role} agent`),
-    enabled: body.enabled === undefined ? existing?.enabled ?? true : Boolean(body.enabled),
-    autoStart: body.autoStart === undefined ? existing?.autoStart ?? false : Boolean(body.autoStart),
-    permissions: normalizedPermissions(body.permissions, existing?.permissions),
-    harnessOptions,
-  };
-  config.agents[id] = agent;
-  validateConfig(config);
-  writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
-  return { agent, config };
 }
 
 function applyConfig(service: BrokerService, config: BusConfig): void {
@@ -287,7 +256,6 @@ function applyConfig(service: BrokerService, config: BusConfig): void {
     }
   }
 }
-
 function storedProjects(service: BrokerService): ProjectRecord[] {
   try { return JSON.parse(service.store.getMeta(PROJECT_META_KEY) ?? "[]") as ProjectRecord[]; }
   catch { return []; }
@@ -336,11 +304,12 @@ async function ensureAgentToken(service: BrokerService, operatorTokenPath: strin
   return result.token;
 }
 
-async function startAgent(service: BrokerService, operatorTokenPath: string, id: string, requested?: string): Promise<Record<string, unknown>> {
+async function startAgent(service: BrokerService, operatorTokenPath: string, configPath: string | null, id: string, requested?: string): Promise<Record<string, unknown>> {
+  if (!configPath) throw new Error("agent supervision is unavailable with an in-memory config");
   const definition = service.config.agents[id];
   if (!definition) throw new Error(`unknown configured agent: ${id}`);
   if (!definition.enabled) throw new Error(`agent ${id} is disabled`);
-  const live = service.supervisorMeta.get(id);
+  const live = verifiedLiveSupervisor(service, id);
   if (live) return { id, started: false, pid: live.pid, message: "already supervised" };
   const latestRun = [...service.runs.values()].sort((a, b) => b.updatedAt - a.updatedAt)[0];
   const latestProject = projects(service)[0];
@@ -349,14 +318,14 @@ async function startAgent(service: BrokerService, operatorTokenPath: string, id:
     throw new Error("a valid projectRoot is required to start an agent");
   }
   await ensureAgentToken(service, operatorTokenPath, id);
-  mkdirSync(join(BUS_HOME, "logs"), { recursive: true });
-  const log = openSync(join(BUS_HOME, "logs", `${id}.out`), "a");
-  const child = spawn(process.execPath, [CLI_PATH, "supervise", id, projectRoot], {
-    detached: true,
-    stdio: ["ignore", log, log],
+  const launched = launchSupervisor({
+    agentId: id,
+    projectRoot,
+    configPath,
+    busHome: BUS_HOME,
+    port: BUS_PORT,
   });
-  child.unref();
-  return { id, started: true, pid: child.pid ?? 0, projectRoot };
+  return { id, started: true, pid: launched.pid, projectRoot };
 }
 
 async function stopRun(service: BrokerService, token: string, runId: string, reason: string): Promise<{ run: Run; tasks: Task[] }> {
@@ -434,6 +403,7 @@ async function handleApi(
   operatorTokenPath: string,
   configPath: string | null,
   sessionTtlMs: number,
+  eventStreams: Set<ServerResponse>,
 ): Promise<void> {
   if (pathname === "/api/session" && req.method === "POST") {
     requireSameOrigin(req);
@@ -462,29 +432,44 @@ async function handleApi(
       "x-accel-buffering": "no",
     });
     res.write(": connected\n\n");
+    eventStreams.add(res);
     let since = Math.max(0, Number(params.get("since") ?? 0) || 0);
     let closed = false;
     let running = false;
+    let timer: NodeJS.Timeout | null = null;
+    const cleanup = () => {
+      if (closed) return;
+      closed = true;
+      if (timer) clearInterval(timer);
+      eventStreams.delete(res);
+    };
     const tick = async () => {
       if (closed || running) return;
       running = true;
       try {
+        pruneStaleSupervisors(service);
         const snapshot = await service.handle("/snapshot", { sinceSeq: since }) as Record<string, unknown> & { seq?: number };
         since = Number(snapshot.seq ?? since);
-        res.write(`event: snapshot\ndata: ${JSON.stringify({ ...snapshot, incremental: true })}\n\n`);
+        if (!closed) res.write(`event: snapshot\ndata: ${JSON.stringify({ ...snapshot, incremental: true })}\n\n`);
       } catch (error) {
-        res.write(`event: error\ndata: ${JSON.stringify({ error: (error as Error).message })}\n\n`);
+        if (!closed) res.write(`event: error\ndata: ${JSON.stringify({ error: (error as Error).message })}\n\n`);
       } finally {
         running = false;
       }
     };
+    req.once("close", cleanup);
+    res.once("close", cleanup);
     await tick();
-    const timer = setInterval(tick, 800);
-    timer.unref();
-    req.on("close", () => { closed = true; clearInterval(timer); });
+    if (!closed) {
+      timer = setInterval(tick, 800);
+      timer.unref();
+    }
     return;
   }
-  if (pathname === "/api/state" && req.method === "GET") return sendJson(res, 200, await service.handle("/snapshot", { sinceSeq: 0 }));
+  if (pathname === "/api/state" && req.method === "GET") {
+    pruneStaleSupervisors(service);
+    return sendJson(res, 200, await service.handle("/snapshot", { sinceSeq: 0 }));
+  }
   if (pathname === "/api/catalog" && req.method === "GET") return sendJson(res, 200, await service.handle("/catalog", {}));
   if (pathname === "/api/projects" && req.method === "GET") return sendJson(res, 200, { projects: projects(service) });
   if (pathname === "/api/projects" && req.method === "POST") {
@@ -526,13 +511,19 @@ async function handleApi(
   }
   if (pathname === "/api/agents" && req.method === "POST") {
     if (!configPath) throw new Error("agent configuration editing is unavailable with an in-memory config");
-    const result = saveAgent(configPath, await readJson(req));
+    const body = await readJson(req);
+    const result = stageAgentUpdate(loadConfig(configPath), body);
+    assertSafeConfigTransition(service, result.config);
+    writeFileSync(configPath, `${JSON.stringify(result.config, null, 2)}\n`, "utf8");
     applyConfig(service, result.config);
     return sendJson(res, 200, { agent: result.agent, applied: true });
   }
   if (pathname === "/api/integrations" && req.method === "POST") {
     if (!configPath) throw new Error("integration editing is unavailable with an in-memory config");
-    const result = addOrUpdateIntegration(configPath, await readJson(req) as unknown as IntegrationInput);
+    const input = await readJson(req) as unknown as IntegrationInput;
+    const result = addOrUpdateIntegration(configPath, input, { persist: false });
+    assertSafeConfigTransition(service, result.config);
+    writeFileSync(configPath, `${JSON.stringify(result.config, null, 2)}\n`, "utf8");
     applyConfig(service, result.config);
     return sendJson(res, 200, {
       provider: result.provider,
@@ -556,7 +547,7 @@ async function handleApi(
     const id = decodeURIComponent(agentMatch[1]);
     if (agentMatch[2] === "start") {
       const body = await readJson(req);
-      return sendJson(res, 200, await startAgent(service, operatorTokenPath, id, body.projectRoot ? String(body.projectRoot) : undefined));
+      return sendJson(res, 200, await startAgent(service, operatorTokenPath, configPath, id, body.projectRoot ? String(body.projectRoot) : undefined));
     }
     return sendJson(res, 200, await service.handle("/kill", { token: operatorToken(operatorTokenPath), agentId: id }));
   }
@@ -573,7 +564,24 @@ export async function startProductServer(options: ProductServerOptions = {}): Pr
   const sessionTtlMs = Math.max(1000, options.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS);
   const ticketTtlMs = Math.max(20, options.loginTicketTtlMs ?? DEFAULT_LOGIN_TICKET_TTL_MS);
   const sessions = new BrowserSessions(sessionTtlMs, ticketTtlMs);
-  const buildId = productBuildId(staticRoot);
+  const eventStreams = new Set<ServerResponse>();
+  const artifact = productArtifactManifest(staticRoot);
+  const buildId = artifact.buildId;
+  const runtime = {
+    pid: process.pid,
+    busHome: resolve(BUS_HOME),
+    applicationRoot: resolve(ROOT),
+    staticRoot: resolve(staticRoot),
+    entrypoint: resolve(process.argv[1] ?? CLI_PATH),
+    modulePath: fileURLToPath(import.meta.url),
+    launcherPath: process.env.AGENT_BUS_LAUNCHER_PATH ?? null,
+    installRoot: process.env.AGENT_BUS_INSTALL_ROOT ?? null,
+    nodePath: process.execPath,
+    nodeVersion: process.version,
+    cwd: process.cwd(),
+    argv: process.argv.slice(1),
+    ui: { index: artifact.index, scripts: artifact.scripts, styles: artifact.styles },
+  };
 
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? `${host}:${requestedPort}`}`);
@@ -590,8 +598,12 @@ export async function startProductServer(options: ProductServerOptions = {}): Pr
         runs: service.runs.size,
         durable: true,
         dashboard: true,
-        uiBuilt: existsSync(join(staticRoot, "index.html")),
+        uiBuilt: artifact.uiBuilt,
+        runtime,
       });
+    }
+    if (pathname === "/diagnostics/runtime" && (req.method === "GET" || req.method === "HEAD")) {
+      return sendJson(res, 200, { ok: true, product: PRODUCT_NAME, productProtocol: PRODUCT_PROTOCOL_VERSION, buildId, runtime });
     }
 
     try {
@@ -601,7 +613,7 @@ export async function startProductServer(options: ProductServerOptions = {}): Pr
         return sendJson(res, 200, { ...sessions.issue(), dashboardUrl: DASHBOARD_URL });
       }
       if (pathname === "/api" || pathname.startsWith("/api/")) {
-        return await handleApi(req, res, pathname, url.searchParams, service, sessions, operatorTokenPath, configPath, sessionTtlMs);
+        return await handleApi(req, res, pathname, url.searchParams, service, sessions, operatorTokenPath, configPath, sessionTtlMs, eventStreams);
       }
       if ((req.method === "GET" || req.method === "HEAD") && !pathname.startsWith("/agent/") && pathname !== "/register") {
         return serveDashboardStatic(req, res, staticRoot, pathname);
@@ -631,9 +643,14 @@ export async function startProductServer(options: ProductServerOptions = {}): Pr
     port,
     url,
     buildId,
-    close: () => new Promise<void>((resolveClose, reject) => server.close((error) => {
-      service.close();
-      if (error) reject(error); else resolveClose();
-    })),
+    close: () => new Promise<void>((resolveClose, reject) => {
+      for (const stream of eventStreams) {
+        try { stream.end(); } catch {}
+      }
+      server.close((error) => {
+        service.close();
+        if (error) reject(error); else resolveClose();
+      });
+    }),
   };
 }

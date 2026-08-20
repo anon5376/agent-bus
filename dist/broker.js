@@ -1,11 +1,15 @@
 import { createServer } from "node:http";
 import { appendFileSync, existsSync, mkdirSync, statSync } from "node:fs";
-import { join, resolve } from "node:path";
-import { enabledAgents, loadConfig, resolveAgent } from "./config.js";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { DEFAULT_CONFIG_PATH, enabledAgents, loadConfig, resolveAgent } from "./config.js";
+import { configDigest, resolvedExecutionConfig } from "./config-transitions.js";
+import { processParentPid, verifiedSupervisorProcess } from "./instance-processes.js";
 import { BUS_HOME, BUS_HOST, BUS_PORT, MAX_WAIT_MS, STALE_AGENT_MS, emptyUsage, newId, } from "./protocol.js";
 import { routeTask, } from "./router.js";
 import { OPERATOR_TOKEN_PATH, createBearerToken, ensurePrivateDirectories, hashToken, readTokenFile, writePrivateToken, } from "./security.js";
 import { StateStore } from "./store.js";
+const APPLICATION_ROOT = resolve(process.env.AGENT_BUS_APPLICATION_ROOT ?? join(dirname(fileURLToPath(import.meta.url)), ".."));
 class AuthError extends Error {
 }
 class PermissionError extends Error {
@@ -100,11 +104,17 @@ export class BrokerService {
     runs = new Map();
     supervisorMeta = new Map();
     usageByAgent = new Map();
+    configPath;
+    instancePort;
     waiters = [];
+    stateWaiters = [];
+    stateRevision = 1;
     logPath;
     operatorTokenPath;
     constructor(options = {}) {
-        this.config = options.config ?? loadConfig(options.configPath);
+        this.configPath = options.config ? null : resolve(options.configPath ?? process.env.AGENT_BUS_CONFIG ?? DEFAULT_CONFIG_PATH);
+        this.config = options.config ?? loadConfig(this.configPath ?? undefined);
+        this.instancePort = options.port ?? BUS_PORT;
         const statePath = options.statePath ?? join(BUS_HOME, "state.sqlite");
         this.logPath = options.logPath ?? join(BUS_HOME, "bus.jsonl");
         this.operatorTokenPath = options.operatorTokenPath ?? OPERATOR_TOKEN_PATH;
@@ -128,9 +138,26 @@ export class BrokerService {
             waiter.resolve({ messages: [], timedOut: true });
         }
         this.waiters = [];
+        for (const waiter of this.stateWaiters) {
+            clearTimeout(waiter.timer);
+            waiter.resolve({ revision: this.stateRevision, changed: false });
+        }
+        this.stateWaiters = [];
         this.store.close();
     }
+    bumpStateRevision() {
+        this.stateRevision += 1;
+        const waiters = this.stateWaiters.splice(0);
+        for (const waiter of waiters) {
+            clearTimeout(waiter.timer);
+            waiter.resolve({ revision: this.stateRevision, changed: true });
+        }
+    }
+    configIdentity() {
+        return { path: this.configPath, digest: configDigest(this.config) };
+    }
     audit(kind, data) {
+        this.bumpStateRevision();
         try {
             appendFileSync(this.logPath, JSON.stringify({ ts: Date.now(), kind, data }) + "\n");
         }
@@ -224,6 +251,7 @@ export class BrokerService {
         if (status)
             agent.status = status;
         this.store.saveAgent(agent);
+        this.bumpStateRevision();
         return agent;
     }
     effectiveStatus(agent) {
@@ -652,7 +680,24 @@ export class BrokerService {
                 agent.lastSeen = now;
                 this.agents.set(id, agent);
                 this.store.saveAgent(agent);
-                this.audit("register", { id, role: agent.role, model: agent.model, harness: agent.harness });
+                const supervisorPid = Number(body.pid);
+                const verified = verifiedSupervisorProcess({
+                    busHome: BUS_HOME,
+                    port: this.instancePort,
+                    applicationRoot: APPLICATION_ROOT,
+                    agentId: id,
+                    pid: supervisorPid,
+                });
+                if (verified) {
+                    this.supervisorMeta.set(id, {
+                        pid: supervisorPid,
+                        childPid: null,
+                        workdir: String(body.workdir ?? ""),
+                        cli: String(body.cli ?? agent.harness),
+                        startedAt: Date.now(),
+                    });
+                }
+                this.audit("register", { id, role: agent.role, model: agent.model, harness: agent.harness, supervisorVerified: Boolean(verified) });
                 return { agent, pendingMessages: this.store.pendingMessages(id).length, roster: this.roster() };
             }
             case "/status": {
@@ -665,17 +710,28 @@ export class BrokerService {
             case "/presence": {
                 const identity = this.caller(body);
                 const pid = Number(body.pid);
-                if (Number.isFinite(pid) && pid > 0) {
-                    this.supervisorMeta.set(identity.id, {
-                        pid,
-                        childPid: Number(body.childPid) > 0 ? Number(body.childPid) : null,
-                        workdir: String(body.workdir ?? ""),
-                        cli: String(body.cli ?? this.agents.get(identity.id)?.harness ?? ""),
-                        startedAt: Date.now(),
-                    });
+                const existing = this.supervisorMeta.get(identity.id);
+                if (existing && existing.pid === pid && verifiedSupervisorProcess({
+                    busHome: BUS_HOME,
+                    port: this.instancePort,
+                    applicationRoot: APPLICATION_ROOT,
+                    agentId: identity.id,
+                    pid,
+                })) {
+                    const childPid = Number(body.childPid);
+                    existing.childPid = Number.isInteger(childPid) && childPid > 0 && processParentPid(childPid) === pid ? childPid : null;
+                    existing.workdir = String(body.workdir ?? existing.workdir);
+                    existing.cli = String(body.cli ?? existing.cli);
                 }
                 this.touch(identity.id);
-                return { ok: true };
+                return { ok: true, supervisorVerified: Boolean(existing && existing.pid === pid) };
+            }
+            case "/agent/execution-config": {
+                const identity = this.caller(body);
+                const id = String(body.id ?? identity.id);
+                if (identity.authority !== "operator" && id !== identity.id)
+                    throw new PermissionError(`only ${identity.id} may resolve its execution configuration`);
+                return { agent: resolvedExecutionConfig(this.config, id), configIdentity: this.configIdentity() };
             }
             case "/usage": {
                 const identity = this.caller(body);
@@ -826,6 +882,22 @@ export class BrokerService {
                 if (!run)
                     throw new Error(`unknown run: ${body.runId}`);
                 return { run, tasks: [...this.tasks.values()].filter((task) => task.runId === run.id).sort((a, b) => a.createdAt - b.createdAt) };
+            }
+            case "/run/cancel": {
+                this.requireOperator(body);
+                const runId = String(body.runId ?? "");
+                const run = this.runs.get(runId);
+                if (!run)
+                    throw new Error(`unknown run: ${runId}`);
+                const reason = boundedString(body.reason, "reason", 20_000) || "Run cancelled by operator.";
+                for (const task of [...this.tasks.values()].filter((candidate) => candidate.runId === runId && !TERMINAL_STATES.includes(candidate.state))) {
+                    await this.handle("/task/cancel", { ...body, taskId: task.id, reason });
+                }
+                run.status = "cancelled";
+                run.updatedAt = Date.now();
+                this.store.saveRun(run);
+                this.audit("run_cancel", { runId, reason });
+                return { run, tasks: [...this.tasks.values()].filter((task) => task.runId === runId).map((task) => this.taskView(task)) };
             }
             case "/task/create": {
                 const identity = this.caller(body);
@@ -1056,6 +1128,7 @@ export class BrokerService {
                     .map((task) => this.taskView(task));
                 return { tasks };
             }
+            case "/task/detail":
             case "/task/get": {
                 const task = this.tasks.get(String(body.taskId ?? ""));
                 if (!task)
@@ -1099,9 +1172,26 @@ export class BrokerService {
                 const target = String(body.agentId ?? "");
                 const meta = this.supervisorMeta.get(target);
                 if (!meta)
-                    throw new Error(`no supervisor pid recorded for ${target}`);
+                    throw new Error(`no verified supervisor recorded for ${target}`);
+                const verified = verifiedSupervisorProcess({
+                    busHome: BUS_HOME,
+                    port: this.instancePort,
+                    applicationRoot: APPLICATION_ROOT,
+                    agentId: target,
+                    pid: meta.pid,
+                });
+                if (!verified) {
+                    this.supervisorMeta.delete(target);
+                    const staleAgent = this.agents.get(target);
+                    if (staleAgent) {
+                        staleAgent.status = "offline";
+                        this.store.saveAgent(staleAgent);
+                    }
+                    this.audit("supervisor_stale", { target, pid: meta.pid });
+                    throw new ConflictError(`supervisor ownership cannot be verified for ${target}`);
+                }
                 let killed = false;
-                if (meta.childPid) {
+                if (meta.childPid && processParentPid(meta.childPid) === meta.pid) {
                     try {
                         process.kill(-meta.childPid, "SIGTERM");
                     }
@@ -1109,7 +1199,7 @@ export class BrokerService {
                         try {
                             process.kill(meta.childPid, "SIGTERM");
                         }
-                        catch { /* already gone */ }
+                        catch { }
                     }
                 }
                 try {
@@ -1121,7 +1211,7 @@ export class BrokerService {
                         process.kill(meta.pid, "SIGTERM");
                         killed = true;
                     }
-                    catch { /* already gone */ }
+                    catch { }
                 }
                 this.supervisorMeta.delete(target);
                 const agent = this.agents.get(target);
@@ -1129,7 +1219,7 @@ export class BrokerService {
                     agent.status = "offline";
                     this.store.saveAgent(agent);
                 }
-                this.audit("kill", { target, pid: meta.pid, killed });
+                this.audit("kill", { target, pid: meta.pid, killed, verified: true });
                 return { ok: killed, pid: meta.pid };
             }
             case "/snapshot": {
@@ -1143,7 +1233,27 @@ export class BrokerService {
                     waiting: this.waiters.map((waiter) => waiter.agentId),
                     brokerPid: process.pid,
                     pathLeases: this.store.pathLeases(),
+                    revision: this.stateRevision,
+                    configIdentity: this.configIdentity(),
                 };
+            }
+            case "/state/wait": {
+                this.requireOperator(body);
+                const sinceRevision = Math.max(0, Number(body.sinceRevision ?? 0) || 0);
+                const timeoutMs = Math.max(1, Math.min(MAX_WAIT_MS, Number(body.timeoutMs ?? MAX_WAIT_MS) || MAX_WAIT_MS));
+                if (this.stateRevision > sinceRevision)
+                    return { revision: this.stateRevision, changed: true };
+                return await new Promise((resolveWait) => {
+                    const waiter = {
+                        sinceRevision,
+                        resolve: resolveWait,
+                        timer: setTimeout(() => {
+                            this.stateWaiters = this.stateWaiters.filter((candidate) => candidate !== waiter);
+                            resolveWait({ revision: this.stateRevision, changed: false });
+                        }, timeoutMs),
+                    };
+                    this.stateWaiters.push(waiter);
+                });
             }
             case "/state":
                 return {
@@ -1153,6 +1263,8 @@ export class BrokerService {
                     waiting: this.waiters.map((waiter) => waiter.agentId),
                     telemetry: this.store.telemetry(),
                     pathLeases: this.store.pathLeases(),
+                    revision: this.stateRevision,
+                    configIdentity: this.configIdentity(),
                 };
             default:
                 throw new Error(`no route ${path}`);

@@ -1,5 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
+import { join, resolve, sep } from "node:path";
+import { ownedAgentBusPids, processCommand } from "./instance-processes.js";
 import { PRODUCT_NAME, PRODUCT_PROTOCOL_VERSION } from "./product-runtime.js";
 
 export interface ProductHealth {
@@ -14,6 +16,7 @@ export interface ProductHealth {
   agents?: number;
   tasks?: number;
   runs?: number;
+  runtime?: { applicationRoot?: string; staticRoot?: string; entrypoint?: string; nodePath?: string; cwd?: string; busHome?: string };
 }
 
 export interface PortOwner {
@@ -29,11 +32,40 @@ export interface StopResult {
   unrelated: PortOwner[];
 }
 
-export function knownAgentBusCommand(command: string): boolean {
+export interface AgentBusCommandScope {
+  applicationRoot?: string;
+  busHome?: string;
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function runtimeBelongsToScope(health: ProductHealth, scope: AgentBusCommandScope): boolean {
+  if (!scope.busHome) return true;
+  const targetHome = resolve(scope.busHome);
+  const reportedHome = String(health.runtime?.busHome ?? "").trim();
+  if (reportedHome) return resolve(reportedHome) === targetHome;
+  const applicationRoot = String(health.runtime?.applicationRoot ?? "").trim();
+  if (!applicationRoot) return false;
+  const appRoot = join(targetHome, "app");
+  const resolvedApplication = resolve(applicationRoot);
+  return resolvedApplication === appRoot || resolvedApplication.startsWith(`${appRoot}${sep}`);
+}
+
+export function knownAgentBusCommand(command: string, scope: AgentBusCommandScope = {}): boolean {
   const text = command.trim();
   if (!text) return false;
-  return /(?:^|\s)(?:\S*node\S*\s+)?\S*\/agent-bus\/(?:dist\/(?:cli|broker|product-server)\.js|cli\.js)(?:\s+(?:broker|dashboard|supervise)(?:\s|$)|\s*$)/i.test(text)
-    || /(?:^|\s)(?:\S*node\S*\s+)?\S*\/agent-bus\/src\/(?:broker|product-server)\.(?:js|ts)(?:\s|$)/i.test(text);
+  const roots: string[] = [];
+  if (scope.busHome) roots.push(`${escapeRegex(resolve(scope.busHome))}/app/(?:current|releases/[^/]+)/`);
+  else if (scope.applicationRoot) roots.push(`${escapeRegex(resolve(scope.applicationRoot))}/`);
+  else {
+    roots.push(String.raw`\S*/agent-bus/`);
+    roots.push(String.raw`\S*/\.agent-bus/app/(?:current|releases/[^/]+)/`);
+  }
+  const root = `(?:${[...new Set(roots)].join("|")})`;
+  return new RegExp(String.raw`(?:^|\s)(?:\S*node\S*\s+)?${root}(?:dist/(?:cli|broker|product-server)\.js|cli\.js)(?:\s+(?:broker|dashboard|supervise)(?:\s|$)|\s*$)`, "i").test(text)
+    || new RegExp(String.raw`(?:^|\s)(?:\S*node\S*\s+)?${root}src/(?:broker|product-server)\.(?:js|ts)(?:\s|$)`, "i").test(text);
 }
 
 function legacyHealthShape(health: ProductHealth | null): boolean {
@@ -44,30 +76,55 @@ function legacyHealthShape(health: ProductHealth | null): boolean {
     && Number.isFinite(Number(health.runs));
 }
 
+function strongProductHealth(health: ProductHealth | null): boolean {
+  return Boolean(health
+    && health.ok === true
+    && health.product === PRODUCT_NAME
+    && Number.isFinite(Number(health.pid))
+    && Number.isFinite(Number(health.productProtocol))
+    && typeof health.buildId === "string"
+    && health.buildId.length > 0
+    && health.dashboard === true
+    && health.uiBuilt === true
+    && health.durable === true);
+}
+
 export function classifyPortOwner(
   pid: number,
   command: string,
   health: ProductHealth | null,
   expectedBuildId: string,
   legacyCatalogFingerprint = false,
+  scope: AgentBusCommandScope = {},
 ): PortOwner {
   const healthBelongsToPid = Number(health?.pid) === pid;
-  if (healthBelongsToPid && health?.product === PRODUCT_NAME) {
-    const current = health.productProtocol === PRODUCT_PROTOCOL_VERSION
-      && health.buildId === expectedBuildId
-      && health.dashboard === true
-      && health.uiBuilt === true;
+  if (healthBelongsToPid && strongProductHealth(health)) {
+    const hasScopedRuntimeIdentity = Boolean(String(health!.runtime?.busHome ?? "").trim() || String(health!.runtime?.applicationRoot ?? "").trim());
+    if (hasScopedRuntimeIdentity && !runtimeBelongsToScope(health!, scope)) {
+      return { pid, command, kind: "unrelated", reason: "different Agent Bus instance/home" };
+    }
+    const scopeRequiresRuntimeIdentity = Boolean(scope.busHome || scope.applicationRoot);
+    const current = (!scopeRequiresRuntimeIdentity || hasScopedRuntimeIdentity)
+      && health!.productProtocol === PRODUCT_PROTOCOL_VERSION
+      && health!.buildId === expectedBuildId;
     return {
       pid,
       command,
       kind: current ? "current" : "agent-bus",
-      reason: current ? "current Agent Bus product" : "Agent Bus product with a different build/protocol",
+      reason: current
+        ? "current Agent Bus product"
+        : hasScopedRuntimeIdentity
+          ? "Agent Bus product with a different build/protocol"
+          : "confirmed Agent Bus target listener without scoped runtime identity",
     };
   }
   if (healthBelongsToPid && legacyHealthShape(health) && legacyCatalogFingerprint) {
+    if (scope.busHome && !knownAgentBusCommand(command, scope)) {
+      return { pid, command, kind: "unrelated", reason: "legacy Agent Bus listener cannot be tied to the requested instance" };
+    }
     return { pid, command, kind: "agent-bus", reason: "legacy Agent Bus broker fingerprint" };
   }
-  if (knownAgentBusCommand(command)) {
+  if (knownAgentBusCommand(command, scope)) {
     return { pid, command, kind: "agent-bus", reason: "known Agent Bus executable" };
   }
   return { pid, command, kind: "unrelated", reason: "listener does not identify as Agent Bus" };
@@ -75,20 +132,16 @@ export function classifyPortOwner(
 
 export function listenerPids(port: number): number[] {
   if (process.platform === "win32") return [];
+  const parse = (output: string) => [...new Set(output.split(/\s+/).map((piece) => Number(piece.trim())).filter((pid) => Number.isInteger(pid) && pid > 0 && pid !== process.pid))];
   try {
-    const output = execFileSync("lsof", ["-nP", "-t", `-iTCP:${port}`, "-sTCP:LISTEN"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
-    return [...new Set(output.split("\n").map((line) => Number(line.trim())).filter((pid) => Number.isInteger(pid) && pid > 0 && pid !== process.pid))];
+    return parse(execFileSync("lsof", ["-nP", "-t", `-iTCP:${port}`, "-sTCP:LISTEN"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }));
   } catch {
-    return [];
-  }
-}
-
-export function processCommand(pid: number): string {
-  if (process.platform === "win32") return "";
-  try {
-    return execFileSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
-  } catch {
-    return "";
+    if (process.platform !== "linux") return [];
+    try {
+      return parse(execFileSync("fuser", ["-n", "tcp", String(port)], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }));
+    } catch {
+      return [];
+    }
   }
 }
 
@@ -125,48 +178,17 @@ async function legacyCatalogFingerprint(url: string): Promise<boolean> {
   }
 }
 
-export async function inspectPort(port: number, url: string, expectedBuildId: string): Promise<PortOwner[]> {
+export async function inspectPort(port: number, url: string, expectedBuildId: string, scope: AgentBusCommandScope = {}): Promise<PortOwner[]> {
   const pids = listenerPids(port);
   if (!pids.length) return [];
+  const registered = scope.busHome
+    ? new Set(ownedAgentBusPids({ busHome: scope.busHome, port, includeSupervisors: false }))
+    : new Set<number>();
   const health = await fetchHealth(url);
   const legacyFingerprint = legacyHealthShape(health) ? await legacyCatalogFingerprint(url) : false;
-  return pids.map((pid) => classifyPortOwner(pid, processCommand(pid), health, expectedBuildId, legacyFingerprint));
-}
-
-function knownServicePids(includeSupervisors: boolean): number[] {
-  if (process.platform === "win32") return [];
-  try {
-    const output = execFileSync("ps", ["-axo", "pid=,command="], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
-    return output.split("\n").flatMap((line) => {
-      const match = line.trim().match(/^(\d+)\s+(.+)$/);
-      if (!match) return [];
-      const pid = Number(match[1]);
-      if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) return [];
-      const command = match[2];
-      if (!knownAgentBusCommand(command)) return [];
-      if (!includeSupervisors && /\s+supervise(?:\s|$)/.test(command)) return [];
-      return [pid];
-    });
-  } catch {
-    return [];
-  }
-}
-
-async function supervisorPids(url: string, health: ProductHealth | null): Promise<number[]> {
-  if (!health || !(health.product === PRODUCT_NAME || legacyHealthShape(health))) return [];
-  try {
-    const response = await fetch(`${url}/state`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: "{}",
-      signal: AbortSignal.timeout(1200),
-    });
-    if (!response.ok) return [];
-    const body = await response.json() as { roster?: Array<{ supervisorPid?: number }> };
-    return (body.roster ?? []).map((item) => Number(item.supervisorPid)).filter((pid) => Number.isInteger(pid) && pid > 0);
-  } catch {
-    return [];
-  }
+  return pids.map((pid) => registered.has(pid)
+    ? { pid, command: processCommand(pid), kind: "agent-bus" as const, reason: "validated instance process registry" }
+    : classifyPortOwner(pid, processCommand(pid), health, expectedBuildId, legacyFingerprint, scope));
 }
 
 function alive(pid: number): boolean {
@@ -204,16 +226,17 @@ export async function stopAgentBusProcesses(options: {
   url: string;
   expectedBuildId: string;
   includeSupervisors: boolean;
+  busHome?: string;
+  applicationRoot?: string;
 }): Promise<StopResult> {
-  const health = await fetchHealth(options.url);
-  const owners = await inspectPort(options.port, options.url, options.expectedBuildId);
+  const scope: AgentBusCommandScope = { busHome: options.busHome, applicationRoot: options.applicationRoot };
+  const owners = await inspectPort(options.port, options.url, options.expectedBuildId, scope);
   const unrelated = owners.filter((owner) => owner.kind === "unrelated");
   const safeListenerPids = owners.filter((owner) => owner.kind !== "unrelated").map((owner) => owner.pid);
-  const pids = [
-    ...safeListenerPids,
-    ...knownServicePids(options.includeSupervisors),
-    ...(options.includeSupervisors && !unrelated.length ? await supervisorPids(options.url, health) : []),
-  ];
+  const registeredPids = options.busHome
+    ? ownedAgentBusPids({ busHome: options.busHome, port: options.port, includeSupervisors: options.includeSupervisors })
+    : [];
+  const pids = [...safeListenerPids, ...registeredPids];
   const { stopped, forced } = await terminatePids(pids);
   return { stoppedPids: stopped, forcedPids: forced, unrelated };
 }

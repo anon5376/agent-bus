@@ -87,6 +87,7 @@ function featureSet(mcp: boolean): HarnessDefinition["features"] {
 export function addOrUpdateIntegration(
   configPath: string,
   input: IntegrationInput,
+  options: { persist?: boolean } = {},
 ): {
   provider: ProviderDefinition;
   harness: HarnessDefinition;
@@ -189,6 +190,6 @@ export function addOrUpdateIntegration(
   config.models[modelId] = model;
   config.agents[agentId] = agent;
   validateConfig(config);
-  writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  if (options.persist !== false) writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
   return { provider, harness, model, agent, config };
 }

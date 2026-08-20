@@ -5,7 +5,7 @@ on:
   push:
     branches:
       - main
-      - fix/product-stability
+      - fix/installed-dashboard-runtime
 
 permissions:
   contents: read
@@ -14,7 +14,7 @@ jobs:
   build-and-test:
     name: Ubuntu build, browser, lifecycle
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -29,9 +29,9 @@ jobs:
       - run: npm test
 
   macos-install-smoke:
-    name: macOS global install and restart
+    name: macOS installed Chromium and Safari
     runs-on: macos-14
-    timeout-minutes: 25
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -39,20 +39,119 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: command -v lsof && command -v open
-      - name: Install, launch from another directory, reinstall while running, and stop
+      - run: |
+          command -v lsof
+          command -v open
+          command -v safaridriver
+          test -x '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+      - name: Install, replace stale launcher, validate runtime ownership, Chromium and Safari
         run: |
           set -euo pipefail
           export AGENT_BUS_HOME="$RUNNER_TEMP/agent-bus-home"
           export AGENT_BUS_INSTALL_DIR="$RUNNER_TEMP/agent-bus-bin"
-          mkdir -p "$AGENT_BUS_INSTALL_DIR" "$AGENT_BUS_HOME"
+          export CHROME_BIN='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
+          STALE_BIN="$RUNNER_TEMP/stale-bin"
+          OLD_APP="$RUNNER_TEMP/old-agent-bus"
+          PR5_APP="$RUNNER_TEMP/pr5-agent-bus-checkout"
+          alt_port=""
+          pr5_pid=""
+          mkdir -p "$AGENT_BUS_INSTALL_DIR" "$AGENT_BUS_HOME" "$STALE_BIN" "$OLD_APP/dist" "$PR5_APP/dist"
           printf 'preserve-me\n' > "$AGENT_BUS_HOME/install-sentinel"
 
-          bash install.sh
-          export PATH="$AGENT_BUS_INSTALL_DIR:$PATH"
-          test "$(command -v agent-bus)" = "$AGENT_BUS_INSTALL_DIR/agent-bus"
+          node --input-type=module <<'NODE'
+          import { readFileSync, writeFileSync } from 'node:fs';
+          import { join } from 'node:path';
+          const config = JSON.parse(readFileSync('agent-bus.config.json', 'utf8'));
+          for (const [id, value] of Object.entries(config.providers)) if (id !== 'fake') value.enabled = false;
+          for (const [id, value] of Object.entries(config.harnesses)) if (id !== 'fake') value.enabled = false;
+          for (const [id, value] of Object.entries(config.models)) if (!id.startsWith('fake-')) value.enabled = false;
+          for (const [id, value] of Object.entries(config.agents)) if (!id.startsWith('fake-')) value.enabled = false;
+          writeFileSync(join(process.env.AGENT_BUS_HOME, 'config.json'), `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+          NODE
 
-          cleanup() { agent-bus stop >/dev/null 2>&1 || true; }
+          cat > "$OLD_APP/dist/cli.js" <<'OLDCLI'
+          #!/usr/bin/env node
+          process.stderr.write('stale Agent Bus launcher executed\n');
+          process.exit(86);
+          OLDCLI
+          chmod +x "$OLD_APP/dist/cli.js"
+          cat > "$STALE_BIN/agent-bus" <<STALE
+          #!/bin/sh
+          exec "$(command -v node)" "$OLD_APP/dist/cli.js" "\$@"
+          STALE
+          chmod +x "$STALE_BIN/agent-bus"
+
+          export PATH="$STALE_BIN:$AGENT_BUS_INSTALL_DIR:$PATH"
+          test "$(command -v agent-bus)" = "$STALE_BIN/agent-bus"
+
+          REAL_NODE="$(command -v node)"
+          OLD_NODE_DIR="$RUNNER_TEMP/old-node-bin"
+          mkdir -p "$OLD_NODE_DIR"
+          cat > "$OLD_NODE_DIR/node" <<OLDNODE
+          #!/bin/sh
+          case "\${1:-}" in
+            -e) exit 1 ;;
+            --version|-v) echo v22.4.0; exit 0 ;;
+            *) exec "$REAL_NODE" "\$@" ;;
+          esac
+          OLDNODE
+          chmod +x "$OLD_NODE_DIR/node"
+          if PATH="$OLD_NODE_DIR:$PATH" bash install.sh >"$RUNNER_TEMP/old-node-install.out" 2>&1; then
+            echo "installer accepted Node 22.4" >&2
+            exit 1
+          fi
+          grep "Node.js 22.5+" "$RUNNER_TEMP/old-node-install.out"
+
+          # Reproduce the merged PR5 checkout runtime: positive Agent Bus product
+          # identity on the target port, but no PR6 runtime/home metadata.
+          cat > "$PR5_APP/dist/cli.js" <<'PR5CLI'
+          const http = require('node:http');
+          const server = http.createServer((req, res) => {
+            res.setHeader('content-type', 'application/json');
+            if (req.url === '/health') {
+              res.end(JSON.stringify({
+                ok: true, pid: process.pid, product: 'agent-bus', productProtocol: 1,
+                buildId: 'merged-pr5-checkout', dashboard: true, uiBuilt: true,
+                durable: true, agents: 2, tasks: 1, runs: 1
+              }));
+              return;
+            }
+            res.statusCode = 404; res.end('{}');
+          });
+          server.listen(7717, '127.0.0.1');
+          process.on('SIGTERM', () => server.close(() => process.exit(0)));
+          PR5CLI
+          "$REAL_NODE" "$PR5_APP/dist/cli.js" broker &
+          pr5_pid="$!"
+          for _ in $(seq 1 50); do curl -fsS http://127.0.0.1:7717/health >/dev/null 2>&1 && break; sleep 0.1; done
+          curl -fsS http://127.0.0.1:7717/health | grep '"buildId":"merged-pr5-checkout"'
+
+          bash install.sh
+          for _ in $(seq 1 50); do kill -0 "$pr5_pid" 2>/dev/null || break; sleep 0.1; done
+          if kill -0 "$pr5_pid" 2>/dev/null; then
+            echo "merged PR5 target listener survived PR6 installation" >&2
+            exit 1
+          fi
+          wait "$pr5_pid" 2>/dev/null || true
+          pr5_pid=""
+
+          test "$(command -v agent-bus)" = "$STALE_BIN/agent-bus"
+          grep '# Agent Bus canonical launcher' "$STALE_BIN/agent-bus"
+          agent-bus __launcher-info | grep "application=$AGENT_BUS_HOME/app/current"
+          test -L "$AGENT_BUS_HOME/app/current"
+          if AGENT_BUS_NODE_BIN="$OLD_NODE_DIR/node" agent-bus models >"$RUNNER_TEMP/old-node-launch.out" 2>&1; then
+            echo "launcher accepted unsupported AGENT_BUS_NODE_BIN" >&2
+            exit 1
+          fi
+          grep "Node.js 22.5+" "$RUNNER_TEMP/old-node-launch.out"
+
+          cleanup() {
+            agent-bus stop >/dev/null 2>&1 || true
+            if [[ -n "$alt_port" ]]; then
+              AGENT_BUS_PORT="$alt_port" AGENT_BUS_URL="http://127.0.0.1:$alt_port" agent-bus stop >/dev/null 2>&1 || true
+            fi
+            if [[ -n "$pr5_pid" ]]; then kill "$pr5_pid" >/dev/null 2>&1 || true; fi
+          }
           trap cleanup EXIT
 
           cd "$RUNNER_TEMP"
@@ -60,16 +159,71 @@ jobs:
           health="$(curl -fsS http://127.0.0.1:7717/health)"
           printf '%s\n' "$health" | grep '"product":"agent-bus"'
           printf '%s\n' "$health" | grep '"dashboard":true'
+          printf '%s\n' "$health" | grep '"runtime"'
+          printf '%s\n' "$health" | grep "\"busHome\":\"$AGENT_BUS_HOME\""
+          curl -fsS 'http://127.0.0.1:7717/?install-smoke=1' | grep 'data-boot-stage="10"'
+          agent-bus runtime --json | tee "$RUNNER_TEMP/runtime-before-reinstall.json"
+          node "$GITHUB_WORKSPACE/scripts/installed-operator-mcp-smoke.mjs"
 
+          node "$GITHUB_WORKSPACE/scripts/installed-browser-smoke.mjs"
+          sudo safaridriver --enable
+          node "$GITHUB_WORKSPACE/scripts/safari-installed-smoke.mjs"
+
+          first_pid="$(printf '%s' "$health" | node -pe 'JSON.parse(require("fs").readFileSync(0,"utf8")).pid')"
           agent-bus start --no-open
+          second_pid="$(curl -fsS http://127.0.0.1:7717/health | node -pe 'JSON.parse(require("fs").readFileSync(0,"utf8")).pid')"
+          test "$first_pid" = "$second_pid"
+
+          # Same home, different ports must be isolated by the process registry's port identity.
+          alt_port="$(python3 - <<'PY'
+          import socket
+          sock = socket.socket()
+          sock.bind(('127.0.0.1', 0))
+          print(sock.getsockname()[1])
+          sock.close()
+          PY
+          )"
+          alt_url="http://127.0.0.1:$alt_port"
+          AGENT_BUS_PORT="$alt_port" AGENT_BUS_URL="$alt_url" agent-bus start --no-open
+          alt_health="$(curl -fsS "$alt_url/health")"
+          alt_pid="$(printf '%s' "$alt_health" | node -pe 'JSON.parse(require("fs").readFileSync(0,"utf8")).pid')"
+          agent-bus stop
+          alt_after="$(curl -fsS "$alt_url/health")"
+          test "$(printf '%s' "$alt_after" | node -pe 'JSON.parse(require("fs").readFileSync(0,"utf8")).pid')" = "$alt_pid"
+          AGENT_BUS_PORT="$alt_port" AGENT_BUS_URL="$alt_url" agent-bus stop
+          alt_port=""
+          agent-bus start --no-open
+          health="$(curl -fsS http://127.0.0.1:7717/health)"
+          first_pid="$(printf '%s' "$health" | node -pe 'JSON.parse(require("fs").readFileSync(0,"utf8")).pid')"
+
+          for release_id in 11111111111111111111 22222222222222222222 33333333333333333333; do
+            mkdir -p "$AGENT_BUS_HOME/app/releases/$release_id"
+            printf '%s\n' "$release_id" > "$AGENT_BUS_HOME/app/releases/$release_id/ARTIFACT_ID"
+            sleep 0.05
+          done
+          mkdir -p "$AGENT_BUS_HOME/app/releases/keep-me"
+          kill -STOP "$first_pid"
 
           cd "$GITHUB_WORKSPACE"
           bash install.sh
           test "$(cat "$AGENT_BUS_HOME/install-sentinel")" = "preserve-me"
+          grep '# Agent Bus canonical launcher' "$STALE_BIN/agent-bus"
+          if kill -0 "$first_pid" 2>/dev/null; then
+            echo "unhealthy previous custom-home broker survived reinstall" >&2
+            exit 1
+          fi
+          test -d "$AGENT_BUS_HOME/app/releases/keep-me"
+          valid_release_count="$(find "$AGENT_BUS_HOME/app/releases" -mindepth 1 -maxdepth 1 -type d -name '????????????????????' | wc -l | tr -d ' ')"
+          test "$valid_release_count" -le 2
 
           cd "$RUNNER_TEMP"
           agent-bus start --no-open
           curl -fsS http://127.0.0.1:7717/health | grep '"product":"agent-bus"'
+          agent-bus runtime --json | tee "$RUNNER_TEMP/runtime-after-reinstall.json"
+          node "$GITHUB_WORKSPACE/scripts/installed-operator-mcp-smoke.mjs"
+          node "$GITHUB_WORKSPACE/scripts/installed-browser-smoke.mjs"
+          node "$GITHUB_WORKSPACE/scripts/safari-installed-smoke.mjs"
+
           agent-bus stop
           sleep 0.3
           if lsof -nP -iTCP:7717 -sTCP:LISTEN; then

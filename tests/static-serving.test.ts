@@ -9,8 +9,18 @@ async function fixture() {
   const root = temporaryDirectory("agent-bus-static-");
   const staticRoot = join(root, "web");
   mkdirSync(join(staticRoot, "assets"), { recursive: true });
-  writeFileSync(join(staticRoot, "index.html"), "<!doctype html><body>INDEX_SENTINEL</body>");
+  writeFileSync(join(staticRoot, "index.html"), [
+    "<!doctype html><html><head>",
+    '<link rel="stylesheet" href="/boot.css">',
+    '<link rel="stylesheet" href="/assets/app-AbC123xY.css">',
+    "</head><body>INDEX_SENTINEL",
+    '<script src="/boot.js"></script>',
+    '<script type="module" src="/assets/app-AbC123xY.js"></script>',
+    "</body></html>",
+  ].join(""));
   writeFileSync(join(staticRoot, "boot.css"), "body{background:#000}");
+  writeFileSync(join(staticRoot, "boot.js"), "globalThis.__BOOT_STATIC_TEST__=true;\n");
+  writeFileSync(join(staticRoot, "assets", "app-AbC123xY.css"), ".app{display:block}\n");
   writeFileSync(join(staticRoot, "assets", "app-AbC123xY.js"), "globalThis.__STATIC_TEST__=true;\n");
   const handle = await startProductServer({
     host: "127.0.0.1",
@@ -38,6 +48,11 @@ test("production static server separates SPA routes from assets and APIs", async
   assert.equal(boot.status, 200);
   assert.match(boot.headers.get("content-type") ?? "", /text\/css/);
   assert.match(boot.headers.get("cache-control") ?? "", /no-cache/);
+
+  const bootScript = await fetch(`${f.handle.url}/boot.js`);
+  assert.equal(bootScript.status, 200);
+  assert.match(bootScript.headers.get("content-type") ?? "", /text\/javascript/);
+  assert.match(bootScript.headers.get("cache-control") ?? "", /no-cache/);
 
   const asset = await fetch(`${f.handle.url}/assets/app-AbC123xY.js`);
   assert.equal(asset.status, 200);
@@ -71,6 +86,16 @@ test("production static server separates SPA routes from assets and APIs", async
   assert.equal(typeof healthBody.buildId, "string");
   assert.equal(healthBody.dashboard, true);
   assert.equal(healthBody.uiBuilt, true);
+  assert.equal(healthBody.runtime.staticRoot, f.staticRoot);
+  const applicationScript = healthBody.runtime.ui.scripts.find((entry: any) => entry.url.startsWith("/assets/"));
+  assert.equal(applicationScript.url, "/assets/app-AbC123xY.js");
+  assert.equal(typeof applicationScript.sha256, "string");
+
+  const diagnostics = await fetch(`${f.handle.url}/diagnostics/runtime`);
+  assert.equal(diagnostics.status, 200);
+  const diagnosticBody = await diagnostics.json() as any;
+  assert.equal(diagnosticBody.buildId, healthBody.buildId);
+  assert.equal(diagnosticBody.runtime.pid, healthBody.pid);
 });
 
 test("missing production frontend is an explicit service error", async (t) => {
