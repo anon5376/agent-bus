@@ -1,6 +1,7 @@
 name: Apply and validate final Agent Bus payload
 
 on:
+  pull_request:
   push:
     branches:
       - debug/product-finish-mcp
