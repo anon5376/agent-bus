@@ -55,6 +55,14 @@ try {
   assert.ok(catalog.catalog?.agents, "installed MCP catalog must come from the broker");
   const start = await call(client, "agent_bus_start");
   assert.equal(start.reused, true, "agent_bus_start must reuse the exact installed instance");
+
+  const projectRoot = process.env.RUNNER_TEMP || process.cwd();
+  const agentStart = await call(client, "agent_bus_agent_start", { agentId: "fake-small", projectRoot });
+  assert.equal(agentStart.ok, true);
+  assert.ok(Number(agentStart.pid) > 0, "installed operator MCP must start a verified supervisor");
+  const agentStop = await call(client, "agent_bus_agent_stop", { agentId: "fake-small" });
+  assert.equal(agentStop.ok, true);
+  assert.equal(agentStop.agentId, "fake-small");
 } finally {
   await client.close();
 }
