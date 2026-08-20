@@ -1,0 +1,66 @@
+name: Apply and validate final Agent Bus payload
+
+on:
+  push:
+    branches:
+      - debug/product-finish-mcp
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply-validate-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: debug/product-finish-mcp
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Apply stored final source payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -f scripts/final-source.patch.gz.b64 ]]; then
+            echo 'payload already applied'
+            exit 0
+          fi
+          base64 --decode scripts/final-source.patch.gz.b64 | gunzip > "$RUNNER_TEMP/final-source.patch"
+          git apply --check "$RUNNER_TEMP/final-source.patch"
+          git apply "$RUNNER_TEMP/final-source.patch"
+          cp .github/workflows/universal-harness-ci.yml scripts/final-universal-harness-ci.yml
+          rm -f scripts/final-source.patch.gz.b64 tmp-tree-shape-test.txt
+      - name: Validate actual source
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f scripts/final-source.patch.gz.b64 ]]; then
+            echo 'payload unexpectedly remained after apply' >&2
+            exit 1
+          fi
+          npm ci
+          npm audit --audit-level=high
+          bash -n install.sh scripts/cleanup-old-installations.sh
+          google-chrome --version
+          command -v lsof
+          npm test
+      - name: Publish readable validated source
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf dist-test
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- README.md install.sh scripts/cli-lifecycle-smoke.mjs scripts/installed-operator-mcp-smoke.mjs scripts/final-universal-harness-ci.yml src tests dist
+          git diff --cached --check
+          if git diff --cached --quiet; then
+            echo 'no source changes to publish'
+            exit 0
+          fi
+          git commit -m 'finish Agent Bus dashboard and operator MCP product'
+          git push origin HEAD:debug/product-finish-mcp
