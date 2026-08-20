@@ -1,0 +1,119 @@
+name: Finalize remaining merge minors
+
+on:
+  push:
+    branches:
+      - fix/installed-dashboard-runtime
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    if: github.event.head_commit.message == 'chore: finalize remaining merge minors'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/installed-dashboard-runtime
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Patch readable source and regressions
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_exact(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              if old not in text:
+                  raise SystemExit(f"expected block not found in {path}")
+              p.write_text(text.replace(old, new, 1))
+
+          replace_exact(
+              "src/operator-control.ts",
+              '''    const state = await this.call<OperatorState>("/state");
+              return { ok: true, running: true, occupied: true, health: probe.health, ...state };
+          ''',
+              '''    let state = await this.call<OperatorState>("/state");
+              let pruned = false;
+              for (const entry of state.roster ?? []) {
+                const agentId = String(entry.id ?? "");
+                const pid = Number(entry.supervisorPid);
+                if (!agentId || !Number.isInteger(pid) || pid <= 0) continue;
+                if (await this.clearStaleSupervisor(agentId, pid)) pruned = true;
+              }
+              if (pruned) state = await this.call<OperatorState>("/state");
+              return { ok: true, running: true, occupied: true, health: probe.health, ...state };
+          ''')
+
+          replace_exact(
+              "src/broker.ts",
+              '''        if (!verified) {
+                this.supervisorMeta.delete(target);
+                throw new ConflictError(`supervisor ownership cannot be verified for ${target}`);
+              }
+          ''',
+              '''        if (!verified) {
+                this.supervisorMeta.delete(target);
+                const agent = this.agents.get(target);
+                if (agent) {
+                  agent.status = "offline";
+                  this.store.saveAgent(agent);
+                }
+                this.audit("supervisor_stale", { target, pid: meta.pid });
+                throw new ConflictError(`supervisor ownership cannot be verified for ${target}`);
+              }
+          ''')
+
+          replace_exact(
+              "tests/operator-safety.test.ts",
+              '''    await waitForExit(firstPid);
+
+              const operatorToken = readFileSync(join(home, "operator.token"), "utf8").trim();
+          ''',
+              '''    await waitForExit(firstPid);
+
+              const staleStatus = await call(client, "agent_bus_status");
+              const staleRow = (staleStatus.roster ?? []).find((entry: any) => entry.id === "fake-small");
+              assert.equal(staleRow?.supervisorPid ?? null, null, "status must prune a dead supervisor immediately");
+              assert.equal(staleRow?.status, "offline", "status must report the agent offline immediately after supervisor death");
+
+              const operatorToken = readFileSync(join(home, "operator.token"), "utf8").trim();
+          ''')
+
+          package = Path("package.json")
+          text = package.read_text()
+          text = text.replace(
+              '    "test:bundle": "node scripts/verify-production-bundle.mjs",\n',
+              '    "test:dist": "git diff --exit-code -- dist",\n    "test:bundle": "node scripts/verify-production-bundle.mjs",\n',
+              1,
+          )
+          text = text.replace(
+              '    "test": "npm run build && npm run test:bundle && npm run test:unit && npm run test:browser && npm run test:lifecycle",\n',
+              '    "test": "npm run build && npm run test:dist && npm run test:bundle && npm run test:unit && npm run test:browser && npm run test:lifecycle",\n',
+              1,
+          )
+          package.write_text(text)
+          PY
+      - name: Regenerate committed distribution
+        run: |
+          npm run build
+          git add dist
+      - name: Validate final source and committed distribution
+        run: npm test
+      - run: git diff --check
+      - name: Commit readable source and generated dist
+        run: |
+          git config user.name 'anon5376'
+          git config user.email 'anon5376@proton.me'
+          git rm .github/workflows/finalize-minors.yml
+          git add src/operator-control.ts src/broker.ts tests/operator-safety.test.ts package.json dist
+          git diff --cached --check
+          git status --short
+          git commit -m 'fix: make operator status truthful and sync dist'
+          git push origin HEAD:fix/installed-dashboard-runtime
