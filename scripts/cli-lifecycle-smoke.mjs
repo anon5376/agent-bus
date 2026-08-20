@@ -85,7 +85,9 @@ function startFixtureServer(port, kind, scriptPath = null) {
       if(req.url==='/health'){
         const body=kind==='legacy'
           ? {ok:true,pid:process.pid,agents:0,tasks:0,runs:0,durable:true}
-          : {ok:true,pid:process.pid,service:'not-agent-bus'};
+          : kind==='pr5'
+            ? {ok:true,pid:process.pid,product:'agent-bus',productProtocol:1,buildId:'merged-pr5-checkout',dashboard:true,uiBuilt:true,agents:2,tasks:1,runs:1,durable:true}
+            : {ok:true,pid:process.pid,service:'not-agent-bus'};
         res.end(JSON.stringify(body)); return;
       }
       if(req.url==='/catalog'&&req.method==='POST'&&kind==='legacy'){
@@ -169,6 +171,17 @@ try {
   const replacedHealth = await waitForHealth(url, (body) => body.product === "agent-bus" && body.dashboard === true);
   assert.notEqual(replacedHealth.pid, legacy.pid, "legacy listener should be replaced");
   await waitForProcessDown(legacy.pid);
+  assert.equal(runCli(env, "stop").status, 0);
+  await waitForDown(url);
+
+  const pr5 = startFixtureServer(port, "pr5", join(temp, "merged-pr5-checkout", "dist", "cli.js"));
+  const pr5Health = await waitForHealth(url, (body) => body.product === "agent-bus" && body.buildId === "merged-pr5-checkout");
+  assert.equal(pr5Health.pid, pr5.pid);
+  const upgrade = runCli(env, "start", "--no-open");
+  assert.equal(upgrade.status, 0, `PR5 to PR6 replacement failed:\n${upgrade.stdout}\n${upgrade.stderr}`);
+  const upgradedHealth = await waitForHealth(url, (body) => body.product === "agent-bus" && body.dashboard === true && body.buildId !== "merged-pr5-checkout");
+  assert.notEqual(upgradedHealth.pid, pr5.pid, "merged PR5 target listener must be replaced by the current product");
+  await waitForProcessDown(pr5.pid);
   assert.equal(runCli(env, "stop").status, 0);
   await waitForDown(url);
 
