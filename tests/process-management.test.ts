@@ -49,6 +49,20 @@ test("process classification protects unrelated port owners even if health super
   assert.equal(owner.kind, "unrelated");
 });
 
+test("product label alone is not a strong enough target-listener fingerprint", () => {
+  const owner = classifyPortOwner(101, "/usr/bin/python3 impersonator.py", {
+    ok: true,
+    pid: 101,
+    product: PRODUCT_NAME,
+    productProtocol: PRODUCT_PROTOCOL_VERSION,
+    buildId,
+    dashboard: false,
+    uiBuilt: false,
+    durable: false,
+  }, buildId);
+  assert.equal(owner.kind, "unrelated");
+});
+
 test("different Agent Bus build is replaceable rather than reused", () => {
   const owner = classifyPortOwner(100, "node /tmp/agent-bus/dist/cli.js broker", {
     ok: true,
@@ -58,6 +72,7 @@ test("different Agent Bus build is replaceable rather than reused", () => {
     buildId: "older-build",
     dashboard: true,
     uiBuilt: true,
+    durable: true,
   }, buildId);
   assert.equal(owner.kind, "agent-bus");
 });
@@ -73,7 +88,6 @@ test("known Agent Bus command matcher is narrow", () => {
   assert.equal(knownAgentBusCommand("node /Users/me/other-agent-bus-project/server.js"), false);
 });
 
-
 test("product health from another Agent Bus home is not owned by this instance", () => {
   const owner = classifyPortOwner(123, "node /tmp/other/app/current/dist/cli.js broker", {
     ok: true,
@@ -83,6 +97,7 @@ test("product health from another Agent Bus home is not owned by this instance",
     buildId,
     dashboard: true,
     uiBuilt: true,
+    durable: true,
     runtime: { busHome: "/tmp/other", applicationRoot: "/tmp/other/app/releases/abc" },
   }, buildId, false, { busHome: "/tmp/mine", applicationRoot: "/tmp/mine/app/current" });
   assert.equal(owner.kind, "unrelated");
