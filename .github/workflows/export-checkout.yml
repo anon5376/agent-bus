@@ -1,7 +1,6 @@
-name: Export staging checkout
+name: Export PR6 base checkout
 
 on:
-  pull_request:
   push:
     branches:
       - debug/product-finish-mcp
@@ -16,16 +15,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: debug/product-finish-mcp
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
-      - name: Pack runnable checkout
-        run: tar --exclude=.git -czf "$RUNNER_TEMP/agent-bus-workspace.tgz" .
+          ref: fix/installed-dashboard-runtime
+      - name: Pack PR6 base checkout
+        run: tar --exclude=.git -czf "$RUNNER_TEMP/agent-bus-pr6-base.tgz" .
       - uses: actions/upload-artifact@v4
         with:
-          name: agent-bus-workspace
-          path: ${{ runner.temp }}/agent-bus-workspace.tgz
+          name: agent-bus-pr6-base
+          path: ${{ runner.temp }}/agent-bus-pr6-base.tgz
           retention-days: 1
