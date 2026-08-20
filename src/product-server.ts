@@ -216,7 +216,6 @@ function pruneStaleSupervisors(service: BrokerService): void {
 }
 
 function assertSafeConfigTransition(service: BrokerService, candidate: BusConfig): void {
-  pruneStaleSupervisors(service);
   const conflicts = supervisedExecutionConflicts(service.config, candidate, service.supervisorMeta.keys());
   if (conflicts.length) {
     throw new Error(`configuration transition changes supervised agent execution (${conflicts.map((conflict) => conflict.agentId).join(", ")}); stop it before editing configuration`);
@@ -257,7 +256,6 @@ function applyConfig(service: BrokerService, config: BusConfig): void {
     }
   }
 }
-
 function storedProjects(service: BrokerService): ProjectRecord[] {
   try { return JSON.parse(service.store.getMeta(PROJECT_META_KEY) ?? "[]") as ProjectRecord[]; }
   catch { return []; }
