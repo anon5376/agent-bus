@@ -31,70 +31,40 @@ jobs:
               p = Path(path)
               text = p.read_text()
               if old not in text:
-                  raise SystemExit(f"expected block not found in {path}")
+                  raise SystemExit(f"expected block not found in {path}: {old!r}")
               p.write_text(text.replace(old, new, 1))
 
           replace_exact(
               "src/operator-control.ts",
-              '''    const state = await this.call<OperatorState>("/state");
-              return { ok: true, running: true, occupied: true, health: probe.health, ...state };
-          ''',
-              '''    let state = await this.call<OperatorState>("/state");
-              let pruned = false;
-              for (const entry of state.roster ?? []) {
-                const agentId = String(entry.id ?? "");
-                const pid = Number(entry.supervisorPid);
-                if (!agentId || !Number.isInteger(pid) || pid <= 0) continue;
-                if (await this.clearStaleSupervisor(agentId, pid)) pruned = true;
-              }
-              if (pruned) state = await this.call<OperatorState>("/state");
-              return { ok: true, running: true, occupied: true, health: probe.health, ...state };
-          ''')
+              '    const state = await this.call<OperatorState>("/state");\n    return { ok: true, running: true, occupied: true, health: probe.health, ...state };\n',
+              '    let state = await this.call<OperatorState>("/state");\n    let pruned = false;\n    for (const entry of state.roster ?? []) {\n      const agentId = String(entry.id ?? "");\n      const pid = Number(entry.supervisorPid);\n      if (!agentId || !Number.isInteger(pid) || pid <= 0) continue;\n      if (await this.clearStaleSupervisor(agentId, pid)) pruned = true;\n    }\n    if (pruned) state = await this.call<OperatorState>("/state");\n    return { ok: true, running: true, occupied: true, health: probe.health, ...state };\n',
+          )
 
           replace_exact(
               "src/broker.ts",
-              '''        if (!verified) {
-                this.supervisorMeta.delete(target);
-                throw new ConflictError(`supervisor ownership cannot be verified for ${target}`);
-              }
-          ''',
-              '''        if (!verified) {
-                this.supervisorMeta.delete(target);
-                const agent = this.agents.get(target);
-                if (agent) {
-                  agent.status = "offline";
-                  this.store.saveAgent(agent);
-                }
-                this.audit("supervisor_stale", { target, pid: meta.pid });
-                throw new ConflictError(`supervisor ownership cannot be verified for ${target}`);
-              }
-          ''')
+              '          this.supervisorMeta.delete(target);\n          throw new ConflictError(`supervisor ownership cannot be verified for ${target}`);\n',
+              '          this.supervisorMeta.delete(target);\n          const staleAgent = this.agents.get(target);\n          if (staleAgent) {\n            staleAgent.status = "offline";\n            this.store.saveAgent(staleAgent);\n          }\n          this.audit("supervisor_stale", { target, pid: meta.pid });\n          throw new ConflictError(`supervisor ownership cannot be verified for ${target}`);\n',
+          )
 
           replace_exact(
               "tests/operator-safety.test.ts",
-              '''    await waitForExit(firstPid);
-
-              const operatorToken = readFileSync(join(home, "operator.token"), "utf8").trim();
-          ''',
-              '''    await waitForExit(firstPid);
-
-              const staleStatus = await call(client, "agent_bus_status");
-              const staleRow = (staleStatus.roster ?? []).find((entry: any) => entry.id === "fake-small");
-              assert.equal(staleRow?.supervisorPid ?? null, null, "status must prune a dead supervisor immediately");
-              assert.equal(staleRow?.status, "offline", "status must report the agent offline immediately after supervisor death");
-
-              const operatorToken = readFileSync(join(home, "operator.token"), "utf8").trim();
-          ''')
+              '    await waitForExit(firstPid);\n\n    const operatorToken = readFileSync(join(home, "operator.token"), "utf8").trim();\n',
+              '    await waitForExit(firstPid);\n\n    const staleStatus = await call(client, "agent_bus_status");\n    const staleRow = (staleStatus.roster ?? []).find((entry: any) => entry.id === "fake-small");\n    assert.equal(staleRow?.supervisorPid ?? null, null, "status must prune a dead supervisor immediately");\n    assert.equal(staleRow?.status, "offline", "status must report the agent offline immediately after supervisor death");\n\n    const operatorToken = readFileSync(join(home, "operator.token"), "utf8").trim();\n',
+          )
 
           package = Path("package.json")
           text = package.read_text()
+          old_bundle = '    "test:bundle": "node scripts/verify-production-bundle.mjs",\n'
+          old_test = '    "test": "npm run build && npm run test:bundle && npm run test:unit && npm run test:browser && npm run test:lifecycle",\n'
+          if old_bundle not in text or old_test not in text:
+              raise SystemExit("expected package.json test scripts not found")
           text = text.replace(
-              '    "test:bundle": "node scripts/verify-production-bundle.mjs",\n',
+              old_bundle,
               '    "test:dist": "git diff --exit-code -- dist",\n    "test:bundle": "node scripts/verify-production-bundle.mjs",\n',
               1,
           )
           text = text.replace(
-              '    "test": "npm run build && npm run test:bundle && npm run test:unit && npm run test:browser && npm run test:lifecycle",\n',
+              old_test,
               '    "test": "npm run build && npm run test:dist && npm run test:bundle && npm run test:unit && npm run test:browser && npm run test:lifecycle",\n',
               1,
           )
