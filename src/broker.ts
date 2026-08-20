@@ -1,8 +1,11 @@
 import { createServer, IncomingMessage, Server, ServerResponse } from "node:http";
 import { appendFileSync, existsSync, mkdirSync, statSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { AgentPermissions, BusConfig, ResolvedAgent } from "./config.js";
-import { enabledAgents, loadConfig, resolveAgent } from "./config.js";
+import { DEFAULT_CONFIG_PATH, enabledAgents, loadConfig, resolveAgent } from "./config.js";
+import { configDigest, resolvedExecutionConfig } from "./config-transitions.js";
+import { processParentPid, verifiedSupervisorProcess } from "./instance-processes.js";
 import {
   Agent,
   AgentStatus,
@@ -40,9 +43,17 @@ import {
 } from "./security.js";
 import { StateStore, StoredIdentity } from "./store.js";
 
+const APPLICATION_ROOT = resolve(process.env.AGENT_BUS_APPLICATION_ROOT ?? join(dirname(fileURLToPath(import.meta.url)), ".."));
+
 interface Waiter {
   agentId: string;
   resolve: (value: { messages: Message[]; timedOut: boolean }) => void;
+  timer: NodeJS.Timeout;
+}
+
+interface StateWaiter {
+  sinceRevision: number;
+  resolve: (value: { revision: number; changed: boolean }) => void;
   timer: NodeJS.Timeout;
 }
 
@@ -166,12 +177,18 @@ export class BrokerService {
   readonly runs = new Map<string, Run>();
   readonly supervisorMeta = new Map<string, SupervisorMeta>();
   readonly usageByAgent = new Map<string, UsageMetrics>();
+  readonly configPath: string | null;
+  readonly instancePort: number;
   private waiters: Waiter[] = [];
+  private stateWaiters: StateWaiter[] = [];
+  private stateRevision = 1;
   private readonly logPath: string;
   private readonly operatorTokenPath: string;
 
   constructor(options: BrokerOptions = {}) {
-    this.config = options.config ?? loadConfig(options.configPath);
+    this.configPath = options.config ? null : resolve(options.configPath ?? process.env.AGENT_BUS_CONFIG ?? DEFAULT_CONFIG_PATH);
+    this.config = options.config ?? loadConfig(this.configPath ?? undefined);
+    this.instancePort = options.port ?? BUS_PORT;
     const statePath = options.statePath ?? join(BUS_HOME, "state.sqlite");
     this.logPath = options.logPath ?? join(BUS_HOME, "bus.jsonl");
     this.operatorTokenPath = options.operatorTokenPath ?? OPERATOR_TOKEN_PATH;
@@ -192,10 +209,29 @@ export class BrokerService {
       waiter.resolve({ messages: [], timedOut: true });
     }
     this.waiters = [];
+    for (const waiter of this.stateWaiters) {
+      clearTimeout(waiter.timer);
+      waiter.resolve({ revision: this.stateRevision, changed: false });
+    }
+    this.stateWaiters = [];
     this.store.close();
   }
 
+  private bumpStateRevision(): void {
+    this.stateRevision += 1;
+    const waiters = this.stateWaiters.splice(0);
+    for (const waiter of waiters) {
+      clearTimeout(waiter.timer);
+      waiter.resolve({ revision: this.stateRevision, changed: true });
+    }
+  }
+
+  private configIdentity(): { path: string | null; digest: string } {
+    return { path: this.configPath, digest: configDigest(this.config) };
+  }
+
   private audit(kind: string, data: unknown): void {
+    this.bumpStateRevision();
     try {
       appendFileSync(this.logPath, JSON.stringify({ ts: Date.now(), kind, data }) + "\n");
     } catch {
@@ -288,6 +324,7 @@ export class BrokerService {
     agent.lastSeen = Date.now();
     if (status) agent.status = status;
     this.store.saveAgent(agent);
+    this.bumpStateRevision();
     return agent;
   }
 
@@ -740,7 +777,14 @@ export class BrokerService {
         this.agents.set(id, agent);
         this.store.saveAgent(agent);
         const supervisorPid = Number(body.pid);
-        if (Number.isFinite(supervisorPid) && supervisorPid > 0) {
+        const verified = verifiedSupervisorProcess({
+          busHome: BUS_HOME,
+          port: this.instancePort,
+          applicationRoot: APPLICATION_ROOT,
+          agentId: id,
+          pid: supervisorPid,
+        });
+        if (verified) {
           this.supervisorMeta.set(id, {
             pid: supervisorPid,
             childPid: null,
@@ -749,7 +793,7 @@ export class BrokerService {
             startedAt: Date.now(),
           });
         }
-        this.audit("register", { id, role: agent.role, model: agent.model, harness: agent.harness });
+        this.audit("register", { id, role: agent.role, model: agent.model, harness: agent.harness, supervisorVerified: Boolean(verified) });
         return { agent, pendingMessages: this.store.pendingMessages(id).length, roster: this.roster() };
       }
 
@@ -763,17 +807,28 @@ export class BrokerService {
       case "/presence": {
         const identity = this.caller(body);
         const pid = Number(body.pid);
-        if (Number.isFinite(pid) && pid > 0) {
-          this.supervisorMeta.set(identity.id, {
-            pid,
-            childPid: Number(body.childPid) > 0 ? Number(body.childPid) : null,
-            workdir: String(body.workdir ?? ""),
-            cli: String(body.cli ?? this.agents.get(identity.id)?.harness ?? ""),
-            startedAt: Date.now(),
-          });
+        const existing = this.supervisorMeta.get(identity.id);
+        if (existing && existing.pid === pid && verifiedSupervisorProcess({
+          busHome: BUS_HOME,
+          port: this.instancePort,
+          applicationRoot: APPLICATION_ROOT,
+          agentId: identity.id,
+          pid,
+        })) {
+          const childPid = Number(body.childPid);
+          existing.childPid = Number.isInteger(childPid) && childPid > 0 && processParentPid(childPid) === pid ? childPid : null;
+          existing.workdir = String(body.workdir ?? existing.workdir);
+          existing.cli = String(body.cli ?? existing.cli);
         }
         this.touch(identity.id);
-        return { ok: true };
+        return { ok: true, supervisorVerified: Boolean(existing && existing.pid === pid) };
+      }
+
+      case "/agent/execution-config": {
+        const identity = this.caller(body);
+        const id = String(body.id ?? identity.id);
+        if (identity.authority !== "operator" && id !== identity.id) throw new PermissionError(`only ${identity.id} may resolve its execution configuration`);
+        return { agent: resolvedExecutionConfig(this.config, id), configIdentity: this.configIdentity() };
       }
 
       case "/usage": {
@@ -929,6 +984,22 @@ export class BrokerService {
         const run = this.runs.get(String(body.runId ?? ""));
         if (!run) throw new Error(`unknown run: ${body.runId}`);
         return { run, tasks: [...this.tasks.values()].filter((task) => task.runId === run.id).sort((a, b) => a.createdAt - b.createdAt) };
+      }
+
+      case "/run/cancel": {
+        this.requireOperator(body);
+        const runId = String(body.runId ?? "");
+        const run = this.runs.get(runId);
+        if (!run) throw new Error(`unknown run: ${runId}`);
+        const reason = boundedString(body.reason, "reason", 20_000) || "Run cancelled by operator.";
+        for (const task of [...this.tasks.values()].filter((candidate) => candidate.runId === runId && !TERMINAL_STATES.includes(candidate.state))) {
+          await this.handle("/task/cancel", { ...body, taskId: task.id, reason });
+        }
+        run.status = "cancelled";
+        run.updatedAt = Date.now();
+        this.store.saveRun(run);
+        this.audit("run_cancel", { runId, reason });
+        return { run, tasks: [...this.tasks.values()].filter((task) => task.runId === runId).map((task) => this.taskView(task)) };
       }
 
       case "/task/create": {
@@ -1152,6 +1223,7 @@ export class BrokerService {
         return { tasks };
       }
 
+      case "/task/detail":
       case "/task/get": {
         const task = this.tasks.get(String(body.taskId ?? ""));
         if (!task) throw new Error(`unknown task: ${body.taskId}`);
@@ -1192,24 +1264,28 @@ export class BrokerService {
         this.requireOperator(body);
         const target = String(body.agentId ?? "");
         const meta = this.supervisorMeta.get(target);
-        if (!meta) throw new Error(`no supervisor pid recorded for ${target}`);
+        if (!meta) throw new Error(`no verified supervisor recorded for ${target}`);
+        const verified = verifiedSupervisorProcess({
+          busHome: BUS_HOME,
+          port: this.instancePort,
+          applicationRoot: APPLICATION_ROOT,
+          agentId: target,
+          pid: meta.pid,
+        });
+        if (!verified) {
+          this.supervisorMeta.delete(target);
+          throw new ConflictError(`supervisor ownership cannot be verified for ${target}`);
+        }
         let killed = false;
-        if (meta.childPid) {
-          try { process.kill(-meta.childPid, "SIGTERM"); } catch { try { process.kill(meta.childPid, "SIGTERM"); } catch { /* already gone */ } }
+        if (meta.childPid && processParentPid(meta.childPid) === meta.pid) {
+          try { process.kill(-meta.childPid, "SIGTERM"); } catch { try { process.kill(meta.childPid, "SIGTERM"); } catch {} }
         }
-        try {
-          process.kill(-meta.pid, "SIGTERM");
-          killed = true;
-        } catch {
-          try { process.kill(meta.pid, "SIGTERM"); killed = true; } catch { /* already gone */ }
-        }
+        try { process.kill(-meta.pid, "SIGTERM"); killed = true; }
+        catch { try { process.kill(meta.pid, "SIGTERM"); killed = true; } catch {} }
         this.supervisorMeta.delete(target);
         const agent = this.agents.get(target);
-        if (agent) {
-          agent.status = "offline";
-          this.store.saveAgent(agent);
-        }
-        this.audit("kill", { target, pid: meta.pid, killed });
+        if (agent) { agent.status = "offline"; this.store.saveAgent(agent); }
+        this.audit("kill", { target, pid: meta.pid, killed, verified: true });
         return { ok: killed, pid: meta.pid };
       }
 
@@ -1224,7 +1300,27 @@ export class BrokerService {
           waiting: this.waiters.map((waiter) => waiter.agentId),
           brokerPid: process.pid,
           pathLeases: this.store.pathLeases(),
+          revision: this.stateRevision,
+          configIdentity: this.configIdentity(),
         };
+      }
+
+      case "/state/wait": {
+        this.requireOperator(body);
+        const sinceRevision = Math.max(0, Number(body.sinceRevision ?? 0) || 0);
+        const timeoutMs = Math.max(1, Math.min(MAX_WAIT_MS, Number(body.timeoutMs ?? MAX_WAIT_MS) || MAX_WAIT_MS));
+        if (this.stateRevision > sinceRevision) return { revision: this.stateRevision, changed: true };
+        return await new Promise<{ revision: number; changed: boolean }>((resolveWait) => {
+          const waiter: StateWaiter = {
+            sinceRevision,
+            resolve: resolveWait,
+            timer: setTimeout(() => {
+              this.stateWaiters = this.stateWaiters.filter((candidate) => candidate !== waiter);
+              resolveWait({ revision: this.stateRevision, changed: false });
+            }, timeoutMs),
+          };
+          this.stateWaiters.push(waiter);
+        });
       }
 
       case "/state":
@@ -1235,6 +1331,8 @@ export class BrokerService {
           waiting: this.waiters.map((waiter) => waiter.agentId),
           telemetry: this.store.telemetry(),
           pathLeases: this.store.pathLeases(),
+          revision: this.stateRevision,
+          configIdentity: this.configIdentity(),
         };
 
       default:
