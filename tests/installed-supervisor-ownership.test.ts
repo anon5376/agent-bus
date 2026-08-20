@@ -24,6 +24,7 @@ test("installed canonical current symlink retains verified supervisor ownership"
   const port = 17717;
   mkdirSync(join(release, "dist"), { recursive: true });
   mkdirSync(project, { recursive: true });
+  writeFileSync(join(release, "package.json"), `${JSON.stringify({ type: "module" })}\n`);
   symlinkSync(release, current, "dir");
 
   const registryModule = pathToFileURL(resolve("dist/instance-processes.js")).href;
