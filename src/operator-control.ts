@@ -1,16 +1,18 @@
 import { existsSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 import { BusConfig } from "./config.js";
-import { fetchHealth } from "./process-management.js";
-import { ensureAgentBusRunning, stopAgentBusInstance } from "./lifecycle.js";
+import { ownedAgentBusPids, verifiedSupervisorProcess } from "./instance-processes.js";
+import { APPLICATION_ROOT, EXPECTED_BUILD_ID, ensureAgentBusRunning, stopAgentBusInstance } from "./lifecycle.js";
+import { fetchHealth, listenerPids, ProductHealth } from "./process-management.js";
+import { PRODUCT_NAME, PRODUCT_PROTOCOL_VERSION } from "./product-runtime.js";
 import {
   BUS_HOME,
   BUS_PORT,
   BUS_URL,
   MAX_WAIT_MS,
+  Message,
   Run,
   Task,
-  brokerCall,
 } from "./protocol.js";
 import {
   OPERATOR_TOKEN_PATH,
@@ -46,6 +48,13 @@ interface OperatorState {
   runs?: Run[];
 }
 
+interface InstanceProbe {
+  running: boolean;
+  occupied: boolean;
+  health: ProductHealth | null;
+  reason?: string;
+}
+
 function terminalTask(state: Task["state"]): boolean {
   return ["accepted", "failed", "cancelled"].includes(state);
 }
@@ -62,6 +71,24 @@ function validProjectRoot(value: unknown): string {
   return projectRoot;
 }
 
+function currentOwnedHealth(health: ProductHealth | null, ownedBrokerPids: Set<number>, busHome: string): boolean {
+  const runtime = health?.runtime;
+  return health?.ok === true
+    && health.product === PRODUCT_NAME
+    && health.productProtocol === PRODUCT_PROTOCOL_VERSION
+    && health.buildId === EXPECTED_BUILD_ID
+    && health.dashboard === true
+    && health.uiBuilt === true
+    && ownedBrokerPids.has(Number(health.pid))
+    && resolve(runtime?.busHome ?? "") === resolve(busHome)
+    && resolve(runtime?.applicationRoot ?? "") === resolve(APPLICATION_ROOT);
+}
+
+function isAttentionMessage(message: Message): boolean {
+  return message.type === "question"
+    || (message.type === "control" && message.subject.startsWith("[ESCALATE"));
+}
+
 export class OperatorControl {
   constructor(
     private readonly operatorTokenPath = OPERATOR_TOKEN_PATH,
@@ -74,6 +101,26 @@ export class OperatorControl {
     const token = readTokenFile(this.operatorTokenPath);
     if (!token) throw new OperatorControlError("AUTH_MISSING", `operator token missing at ${this.operatorTokenPath}`);
     return token;
+  }
+
+  private async instanceProbe(): Promise<InstanceProbe> {
+    const health = await fetchHealth(this.url);
+    const ownedBrokerPids = new Set(ownedAgentBusPids({
+      busHome: this.busHome,
+      port: this.port,
+      includeSupervisors: false,
+    }));
+    if (currentOwnedHealth(health, ownedBrokerPids, this.busHome)) {
+      return { running: true, occupied: true, health };
+    }
+
+    const listeners = listenerPids(this.port);
+    const occupied = Boolean(health) || listeners.length > 0 || ownedBrokerPids.size > 0;
+    if (!occupied) return { running: false, occupied: false, health: null };
+    const reason = ownedBrokerPids.size > 0
+      ? "registered Agent Bus process failed current-instance verification"
+      : "unrelated listener occupies the configured Agent Bus port";
+    return { running: false, occupied: true, health, reason };
   }
 
   private async call<T>(path: string, body: Record<string, unknown> = {}): Promise<T> {
@@ -91,7 +138,7 @@ export class OperatorControl {
       const message = String((error as Error)?.message ?? error);
       const code: OperatorErrorCode = /unknown (run|task|agent)/i.test(message)
         ? "NOT_FOUND"
-        : /already|conflict|not eligible|not submitted/i.test(message)
+        : /already|conflict|not eligible|not submitted|ownership cannot be verified|no verified supervisor/i.test(message)
           ? "CONFLICT"
           : /configuration|config/i.test(message)
             ? "CONFIG_UNAVAILABLE"
@@ -101,15 +148,31 @@ export class OperatorControl {
   }
 
   async ensureRunning(): Promise<Record<string, unknown>> {
-    try { return await ensureAgentBusRunning(); }
-    catch (error) { throw new OperatorControlError("BROKER_UNAVAILABLE", String((error as Error)?.message ?? error), error); }
+    try {
+      const result = await ensureAgentBusRunning();
+      const verified = await this.instanceProbe();
+      if (!verified.running) {
+        throw new Error(`refusing authenticated operator request: ${verified.reason ?? "running listener ownership is unverified"}`);
+      }
+      return result;
+    } catch (error) {
+      throw new OperatorControlError("BROKER_UNAVAILABLE", String((error as Error)?.message ?? error), error);
+    }
   }
 
   async status(): Promise<Record<string, unknown>> {
-    const health = await fetchHealth(this.url);
-    if (!health) return { ok: true, running: false, url: this.url };
+    const probe = await this.instanceProbe();
+    if (!probe.running) {
+      return {
+        ok: true,
+        running: false,
+        occupied: probe.occupied,
+        url: this.url,
+        ...(probe.reason ? { reason: probe.reason } : {}),
+      };
+    }
     const state = await this.call<OperatorState>("/state");
-    return { ok: true, running: true, health, ...state };
+    return { ok: true, running: true, occupied: true, health: probe.health, ...state };
   }
 
   async catalog(): Promise<{ ok: true; catalog: BusConfig }> {
@@ -125,12 +188,35 @@ export class OperatorControl {
     writePrivateToken(agentTokenPath(agentId), provisioned.token);
   }
 
+  private async clearStaleSupervisor(agentId: string, pid: number): Promise<boolean> {
+    const verified = verifiedSupervisorProcess({
+      busHome: this.busHome,
+      port: this.port,
+      applicationRoot: APPLICATION_ROOT,
+      agentId,
+      pid,
+    });
+    if (verified) return false;
+    try {
+      await this.call<Record<string, unknown>>("/kill", { agentId });
+    } catch (error) {
+      const message = String((error as Error)?.message ?? error);
+      if (!/ownership cannot be verified|no verified supervisor/i.test(message)) throw error;
+    }
+    return true;
+  }
+
   async startAgent(agentId: string, projectRootValue: unknown): Promise<Record<string, unknown>> {
     await this.ensureRunning();
     const projectRoot = validProjectRoot(projectRootValue);
     const state = await this.call<OperatorState>("/state");
     const live = (state.roster ?? []).find((entry) => entry.id === agentId && Number(entry.supervisorPid) > 0);
-    if (live) return { ok: true, agentId, started: false, pid: Number(live.supervisorPid), projectRoot };
+    if (live) {
+      const pid = Number(live.supervisorPid);
+      if (!(await this.clearStaleSupervisor(agentId, pid))) {
+        return { ok: true, agentId, started: false, pid, projectRoot };
+      }
+    }
     const configPath = String(state.configIdentity?.path ?? process.env.AGENT_BUS_CONFIG ?? "").trim();
     if (!configPath) throw new OperatorControlError("CONFIG_UNAVAILABLE", "running broker does not expose a persistent configuration path");
     await this.ensureAgentToken(agentId);
@@ -268,6 +354,18 @@ export class OperatorControl {
     return { ok: true, ...await this.call<Record<string, unknown>>("/run/get", { runId }) };
   }
 
+  private async pendingAttention(): Promise<Message[]> {
+    const peek = await this.call<{ messages: Message[] }>("/peek", { drain: false });
+    const attention = (peek.messages ?? []).filter(isAttentionMessage);
+    if (attention.length) {
+      // The operator MCP is consuming the operator inbox. Once attention is surfaced,
+      // mark the pending batch delivered so the same question does not wake every
+      // subsequent wait; task/run state remains durable and inspectable separately.
+      await this.call("/peek", { drain: true });
+    }
+    return attention;
+  }
+
   async wait(input: { taskId?: string; runId?: string; timeoutMs?: number }): Promise<Record<string, unknown>> {
     if (!input.taskId && !input.runId) throw new OperatorControlError("INVALID_ARGUMENT", "taskId or runId is required");
     await this.ensureRunning();
@@ -279,12 +377,23 @@ export class OperatorControl {
       if (input.taskId) {
         const detail = await this.call<{ task: Task }>("/task/detail", { taskId: input.taskId });
         if (terminalTask(detail.task.state) || detail.task.state === "submitted") {
-          return { ok: true, terminal: terminalTask(detail.task.state), task: detail.task, revision };
+          return { ok: true, terminal: terminalTask(detail.task.state), attentionRequired: false, task: detail.task, revision };
         }
       } else if (input.runId) {
         const detail = await this.call<{ run: Run; tasks: Task[] }>("/run/get", { runId: input.runId });
-        if (terminalRun(detail.run.status)) return { ok: true, terminal: true, ...detail, revision };
+        if (terminalRun(detail.run.status)) return { ok: true, terminal: true, attentionRequired: false, ...detail, revision };
       }
+
+      const attention = await this.pendingAttention();
+      if (attention.length) {
+        return { ok: true, terminal: false, attentionRequired: true, messages: attention, revision };
+      }
+
+      // /peek updates operator presence and therefore the broker revision. Absorb
+      // that self-generated revision before blocking so this remains a true
+      // notification wait rather than a polling loop.
+      state = await this.call<OperatorState>("/state");
+      revision = Math.max(revision, Number(state.revision ?? 0));
       const remaining = deadline - Date.now();
       if (remaining <= 0) throw new OperatorControlError("TIMEOUT", `timed out waiting for ${input.taskId ?? input.runId}`);
       const waited = await this.call<{ revision: number; changed: boolean }>("/state/wait", {
@@ -317,6 +426,7 @@ export class OperatorControl {
   }
 
   async artifacts(input: { taskId?: string; runId?: string }): Promise<Record<string, unknown>> {
+    await this.ensureRunning();
     if (input.taskId) {
       const detail = await this.call<{ task: Task }>("/task/detail", { taskId: input.taskId });
       return {
