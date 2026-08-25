@@ -143,6 +143,7 @@ struct PanelView: View {
             .help("Refresh now")
 
             Menu {
+                Button("Retry keychain read") { Task { await tracker.retryKeychain() } }
                 Button("Rebuild index from scratch") { Task { await tracker.resetCaches() } }
                 Divider()
                 Button("Quit Doohickey") { NSApp.terminate(nil) }

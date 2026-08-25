@@ -105,9 +105,11 @@ struct AnthropicSource {
 
     private static func keychainToken() -> String? {
         if let cached = cache.get() { return cached }
-        let token = directRead() ?? securityToolRead()
-        if let token { cache.set(token) }
-        return token
+        // Direct read first: it never prompts, it either works or it does not.
+        if let token = directRead() { cache.set(token); return token }
+        guard !blocked.get() else { return nil }
+        if let token = securityToolRead() { cache.set(token); return token }
+        return nil
     }
 
     /// The direct path. Works when the keychain item's ACL admits this binary, which it
@@ -130,25 +132,65 @@ struct AnthropicSource {
         return nil
     }
 
-    /// `/usr/bin/security` is Apple-signed, so the keychain grants it access after the
-    /// user approves once ("Always Allow"). This is the only way an unsigned menu bar
-    /// app can reach a credential another app wrote, short of shipping a signed build
-    /// with a matching team identifier.
+    /// `/usr/bin/security` reads the item when the direct API is refused.
+    ///
+    /// Hard-deadlined, and that deadline is the whole point. If macOS decides to put up
+    /// an authorization dialog, this subprocess blocks until somebody answers it — and a
+    /// blocked credential read inside a refresh means the refresh never finishes, the
+    /// in-flight guard never clears, and every later refresh is skipped. The panel then
+    /// shows nothing at all, which looks like a broken app rather than one waiting on a
+    /// prompt. Better to give up in three seconds and fall back to the estimate.
     private static func securityToolRead() -> String? {
         for service in services {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-            process.arguments = ["find-generic-password", "-s", service, "-w"]
-            let pipe = Pipe()
-            process.standardOutput = pipe
-            process.standardError = FileHandle.nullDevice
-            guard (try? process.run()) != nil else { continue }
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-            guard process.terminationStatus == 0, let token = parse(data) else { continue }
+            guard let token = runSecurity(service: service, timeout: 3) else { continue }
             return token
         }
         return nil
+    }
+
+    private static func runSecurity(service: String, timeout: TimeInterval) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        process.arguments = ["find-generic-password", "-s", service, "-w"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        // No controlling terminal, so a prompt cannot be answered here in any case.
+        process.standardInput = FileHandle.nullDevice
+
+        guard (try? process.run()) != nil else { return nil }
+
+        let deadline = Date().addingTimeInterval(timeout)
+        while process.isRunning && Date() < deadline {
+            usleep(50_000)
+        }
+        guard !process.isRunning else {
+            // Almost certainly sitting on an authorization dialog. Kill it, remember
+            // that this path is unusable, and stop trying on every refresh.
+            process.terminate()
+            blocked.set(true)
+            return nil
+        }
+        guard process.terminationStatus == 0 else { return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        return parse(data)
+    }
+
+    /// Set once the tool has been seen to hang. Cleared only by "Retry keychain read"
+    /// in the menu, so a user who fixes their keychain is not stuck with the estimate.
+    private static let blocked = FlagCache()
+
+    static var keychainBlocked: Bool { blocked.get() }
+    static func retryKeychain() {
+        blocked.set(false)
+        cache.clear()
+    }
+
+    private final class FlagCache: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = false
+        func get() -> Bool { lock.lock(); defer { lock.unlock() }; return value }
+        func set(_ new: Bool) { lock.lock(); value = new; lock.unlock() }
     }
 
     private static func parse(_ data: Data) -> String? {
@@ -303,7 +345,10 @@ extension AnthropicSource.Result {
     var statusHint: String? {
         switch state {
         case .ok: return nil
-        case .notConfigured: return "no OAuth token — window inferred from your own history"
+        case .notConfigured:
+            return AnthropicSource.keychainBlocked
+                ? "keychain read blocked — using estimate (⋯ → Retry keychain read)"
+                : "no OAuth token — window inferred from your own history"
         case .noUsageAPI: return "account reports no windows"
         case .offline(let why), .failed(let why): return "\(why) — window inferred from history"
         }

@@ -162,17 +162,37 @@ Traffic routed through a local model router is attributed by model id: a namespa
 (`stealth/ox-alpha`) was billed by OpenRouter, a bare one by Anthropic. Neither side
 double-counts.
 
-## Build
+## Build and install
 
 Needs only the Xcode Command Line Tools.
 
 ```bash
-./doohickey/build.sh && open doohickey/Doohickey.app
+./doohickey/build.sh
+cp -R doohickey/Doohickey.app /Applications/
+open /Applications/Doohickey.app
+```
+
+Install it somewhere stable before running it. An app launched from a build directory by
+a script that then exits can be torn down with the session that started it, which looks
+exactly like a crash: the menu bar item never appears and the only evidence is a
+`status.txt` that stops updating.
+
+To keep it running across logins, `install-agent.sh` writes a LaunchAgent with
+`KeepAlive`. Remove it with:
+
+```bash
+launchctl unload ~/Library/LaunchAgents/local.agentbus.doohickey.plist
+rm ~/Library/LaunchAgents/local.agentbus.doohickey.plist
 ```
 
 The app is ad-hoc signed and marked `LSUIElement`, so it lives in the menu bar with no
-Dock tile. "Rebuild index from scratch" in the ⋯ menu discards the cache and re-reads
-everything.
+Dock tile. The ⋯ menu has "Rebuild index from scratch" and "Retry keychain read".
+
+### If the panel is empty
+
+Check `~/Library/Application Support/Doohickey/status.txt` first — it is rewritten on
+every refresh and names each provider's state. A file that has stopped updating means
+the app is not running; a file full of `notConfigured` means credentials, not the app.
 
 ## Agent Bus integration
 

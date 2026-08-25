@@ -27,6 +27,7 @@ final class Tracker: ObservableObject {
     private let agentBus = AgentBusSource()
 
     private var timer: Timer?
+    private var refreshStartedAt: Date?
 
     /// The single number the menu bar shows: the least headroom left anywhere.
     var headline: (snapshot: ProviderSnapshot, limit: LimitWindow)? {
@@ -55,9 +56,17 @@ final class Tracker: ObservableObject {
     }
 
     func refresh() async {
-        guard !isRefreshing else { return }
+        // A stuck refresh must not wedge the app forever. `defer` only runs when the
+        // function returns, so if something inside never comes back the in-flight guard
+        // would stay set and every later refresh would be skipped silently — the panel
+        // sits empty and looks broken. Past a generous deadline, assume the previous
+        // attempt is lost and start a new one.
+        if isRefreshing {
+            guard let started = refreshStartedAt, Date().timeIntervalSince(started) > 45 else { return }
+        }
         isRefreshing = true
-        defer { isRefreshing = false }
+        refreshStartedAt = Date()
+        defer { isRefreshing = false; refreshStartedAt = nil }
 
         let range = self.range
         let horizon = self.horizon
@@ -235,6 +244,14 @@ final class Tracker: ObservableObject {
             .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Doohickey/status.txt")
         try? lines.joined(separator: "\n").write(to: url, atomically: true, encoding: .utf8)
+    }
+
+    /// Clears the "keychain is unusable" latch and re-reads. Exposed in the menu because
+    /// the latch is deliberately sticky: without it a hung authorization dialog would be
+    /// re-triggered on every single refresh.
+    func retryKeychain() async {
+        AnthropicSource.retryKeychain()
+        await refresh()
     }
 
     func resetCaches() async {
