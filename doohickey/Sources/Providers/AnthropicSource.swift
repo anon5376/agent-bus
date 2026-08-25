@@ -26,16 +26,45 @@ struct AnthropicSource {
         ("seven_day_sonnet", "Weekly Sonnet"),
     ]
 
+    /// Never blocks.
+    ///
+    /// Reading the keychain can put up an authorization dialog, and both the Security
+    /// API and the `security` tool block until it is answered. Doing that inline in a
+    /// refresh is what wedged earlier builds: the dialog appears behind everything (or
+    /// not at all, for a background agent), the refresh never returns, and the panel
+    /// stays empty forever. So the read happens on its own detached task and this only
+    /// ever hands back what has already been fetched.
     var token: String? {
-        if let fromKeychain = Self.keychainToken() { return fromKeychain }
+        if let onDisk = Self.diskToken() { return onDisk }
+        return Self.cache.get() ?? { Self.beginBackgroundRead(); return nil }()
+    }
+
+    /// Some installs keep credentials in a file, which is free to read.
+    private static func diskToken() -> String? {
         let path = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".claude/.credentials.json")
-        guard let data = try? Data(contentsOf: path),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let oauth = json["claudeAiOauth"] as? [String: Any],
-              let value = oauth["accessToken"] as? String, !value.isEmpty
-        else { return nil }
-        return value
+        guard let data = try? Data(contentsOf: path) else { return nil }
+        return parse(data)
+    }
+
+    private static let readLock = NSLock()
+    private static var readInFlight = false
+
+    private static func beginBackgroundRead() {
+        readLock.lock()
+        guard !readInFlight, !blocked.get() else { readLock.unlock(); return }
+        readInFlight = true
+        readLock.unlock()
+
+        // Detached and never awaited. If it blocks on a dialog forever, one background
+        // thread is lost and everything else carries on.
+        Thread.detachNewThread {
+            let token = directRead() ?? securityToolRead()
+            if let token { cache.set(token) }
+            readLock.lock()
+            readInFlight = false
+            readLock.unlock()
+        }
     }
 
     var isPresent: Bool { token != nil }
@@ -103,18 +132,16 @@ struct AnthropicSource {
     /// every minute. Invalidated when the API rejects the token.
     private static let cache = TokenCache()
 
-    private static func keychainToken() -> String? {
-        if let cached = cache.get() { return cached }
-        // Direct read first: it never prompts, it either works or it does not.
-        if let token = directRead() { cache.set(token); return token }
-        guard !blocked.get() else { return nil }
-        if let token = securityToolRead() { cache.set(token); return token }
-        return nil
-    }
-
     /// The direct path. Works when the keychain item's ACL admits this binary, which it
     /// will not for an ad-hoc signed build — hence the fallback below.
     private static func directRead() -> String? {
+        // Turn off keychain UI for this process. Without it `SecItemCopyMatching` puts
+        // up an authorization dialog and blocks on it; with it, the call simply fails
+        // and the `security` fallback gets its turn. Deprecated, but it is the only API
+        // that governs prompting for the file-based keychain these credentials live in.
+        SecKeychainSetUserInteractionAllowed(false)
+        defer { SecKeychainSetUserInteractionAllowed(true) }
+
         for service in services {
             let query: [String: Any] = [
                 kSecClass as String: kSecClassGenericPassword,

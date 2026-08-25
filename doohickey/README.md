@@ -19,7 +19,7 @@ Twenty providers, in three tiers — and the panel keeps them apart on purpose, 
 | --- | --- | --- |
 | Claude Code | `api.anthropic.com/api/oauth/usage` | 5h session and weekly windows, extra-usage overage, plan |
 | Codex | `chatgpt.com/backend-api/wham/usage` | live window, per-model allowances (Spark), reset credits, plan |
-| Cursor | `cursor.com/api/auth/stripe` + `/api/usage` | plan, per-model request allowances, cycle reset |
+| Cursor | `cursor.com/api/usage-summary`, `/api/dashboard/get-sand-usage-status`, `/api/dashboard/get-filtered-usage-events` | requests left of the plan allowance, weekly window, per-model tokens and spend |
 | Grok | `grok.com/rest/rate-limits` | queries left in the window |
 | OpenRouter | `openrouter.ai/api/v1/key` | credit limit, remaining, weekly spend |
 | DeepSeek · Moonshot · SiliconFlow | `/user/balance` and friends | account balance |
@@ -46,21 +46,45 @@ lives in the Cloud console), Together and Copilot (no public per-account endpoin
 
 Ollama appears only while it is running, since local models have no quota to report.
 
-## Reading Claude's token
+### Cursor's dashboard endpoints need Origin and Referer
 
-Claude Code keeps its OAuth token in the login keychain, and the keychain item's ACL
-admits Claude Code — not an ad-hoc signed menu bar app. A direct `SecItemCopyMatching`
-therefore returns nothing.
+A session cookie alone gets 403 from `/api/dashboard/*`. Adding `Origin: https://cursor.com`
+and a `Referer` makes them answer. Without that they look like endpoints that require
+some entitlement the app does not have, which is the wrong conclusion to draw.
 
-The fallback shells out to `/usr/bin/security`, which is Apple-signed and does get
-through; macOS asks once, and "Always Allow" makes it silent afterwards. The token is
-cached for ten minutes and dropped immediately on a 401, so a rotation is picked up on
-the next refresh rather than going stale.
+`usage-summary` states `remaining` and `limit` outright, so no arithmetic can get it
+wrong. It also reports a percentage against *included spend* that disagrees with the
+request-count ratio — both are real and measure different things, so both are shown with
+their own labels rather than picking one and hoping.
 
-If the read fails for any reason the row falls back to a 5-hour block reconstructed from
-transcript history, labelled `est`, with the reason printed underneath. That distinction
-matters: on this machine the estimate read 79% left while the account was actually at
-43% — an estimate that looks reassuring is worse than no estimate at all.
+## Reading Claude's token without hanging
+
+Claude Code keeps its OAuth token in the login keychain. Reading it can put up an
+authorization dialog, and **both** the Security API and `/usr/bin/security` block until
+that dialog is answered.
+
+That is a trap for a menu bar app. The dialog appears behind everything, or not at all
+for a process launched by `launchd`, and meanwhile the refresh that triggered it never
+returns. The in-flight guard never clears, every later refresh is skipped, and the panel
+sits empty — indistinguishable from a crash. It cost several builds to find, because the
+direct path is silent whether it works or not, so the hang only exists on machines that
+actually prompt.
+
+Three defences, all of them necessary:
+
+- `SecKeychainSetUserInteractionAllowed(false)` around the direct read, so it fails
+  instead of prompting. Deprecated, but the only API governing prompts for the
+  file-based keychain these credentials live in.
+- The `security` fallback runs with stdin on `/dev/null` and a 3-second deadline. A hang
+  latches a flag so it is not retried every minute; **⋯ → Retry keychain read** clears it.
+- The whole read happens on a detached thread. `refresh()` only ever reads an
+  already-fetched value, so even a thread lost forever to a dialog cannot stall the UI.
+  The token lands on the following refresh instead.
+
+If it cannot be read the row falls back to a 5-hour block reconstructed from transcript
+history, labelled `est`, with the reason underneath. That distinction earns its keep: the
+estimate read 79% left on this machine while the account was actually at 43%. An estimate
+that looks reassuring is worse than no estimate at all.
 
 ### Seeing what it decided
 

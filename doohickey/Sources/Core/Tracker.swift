@@ -141,6 +141,11 @@ final class Tracker: ObservableObject {
             state: cursorData.state, billing: .subscription
         )
         Self.apply(cursorData.reading, to: &cursorSnapshot)
+        cursorSnapshot.tokens = cursorData.tokens
+        cursorSnapshot.models = cursorData.models
+        cursorSnapshot.notionalUSD = cursorData.costUSD
+        cursorSnapshot.messages = cursorData.events
+        cursorSnapshot.lastActivity = cursorData.lastActivity
         built.append(cursorSnapshot)
 
         // MARK: API-backed quota and balance
