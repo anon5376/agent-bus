@@ -1,40 +1,43 @@
 import Foundation
 import SwiftUI
 
-/// Fans out to every source, folds the results into snapshots and publishes them.
+/// Fans out to every provider in the catalogue, folds the results into snapshots and
+/// publishes them. Local transcript scans and network calls run together, so one slow
+/// provider cannot hold up the rest.
 @MainActor
 final class Tracker: ObservableObject {
-    @Published private(set) var snapshots: [ProviderSnapshot] = []
+    /// Providers with something to show, busiest quota first.
+    @Published private(set) var live: [ProviderSnapshot] = []
+    /// Everything else, with the reason: not set up, or nothing to publish.
+    @Published private(set) var roster: [ProviderSnapshot] = []
     @Published private(set) var isRefreshing = false
     @Published private(set) var lastRefresh: Date?
     @Published var range: Range = .fiveHours { didSet { Task { await refresh() } } }
 
-    /// History kept on disk, independent of the range on screen, so switching to 30d
-    /// is instant instead of triggering a full re-read of every transcript.
+    /// History kept on disk, independent of the range on screen, so switching to 30d is
+    /// instant instead of triggering a full re-read of every transcript.
     private let horizon: TimeInterval = 31 * 86_400
 
     private let claudeCode = ClaudeCodeSource()
     private let codex = CodexSource()
-    private let openRouter = OpenRouterSource()
+    private let cursor = CursorSource()
+    private let ollama = OllamaSource()
     private let agentBus = AgentBusSource()
 
     private var timer: Timer?
 
-    /// The single number the menu bar shows: whichever quota has the least headroom
-    /// left, across every provider. That is the one about to interrupt you.
-    var headline: (kind: ProviderKind, limit: LimitWindow)? {
-        snapshots
-            .compactMap { snapshot in snapshot.headlineLimit.map { (snapshot.kind, $0) } }
+    /// The single number the menu bar shows: the least headroom left anywhere.
+    var headline: (snapshot: ProviderSnapshot, limit: LimitWindow)? {
+        live
+            .compactMap { snapshot in snapshot.headlineLimit.map { (snapshot, $0) } }
             .min { $0.1.remainingFraction < $1.1.remainingFraction }
     }
 
-    /// Money that will appear on a bill.
-    var meteredCost: Double { snapshots.reduce(0) { $0 + $1.costUSD } }
-    /// Money that would have appeared on a bill without the flat-rate plans.
+    var meteredCost: Double { live.reduce(0) { $0 + $1.costUSD } }
     var absorbedCost: Double {
-        snapshots.filter { $0.billing == .subscription }.reduce(0) { $0 + $1.notionalUSD }
+        live.filter { $0.billing == .subscription }.reduce(0) { $0 + $1.notionalUSD }
     }
-    var totalTokens: Int { snapshots.reduce(0) { $0 + $1.tokens.total } }
+    var totalTokens: Int { live.reduce(0) { $0 + $1.tokens.total } }
 
     func start(interval: TimeInterval = 60) {
         Task { await refresh() }
@@ -57,22 +60,28 @@ final class Tracker: ObservableObject {
         let range = self.range
         let horizon = self.horizon
 
-        // Every source is independent; run them together so a slow network call does
-        // not hold up the local file scans.
-        async let claudeResult = claudeCode.load(horizon: horizon)
-        async let codexResult = codex.load(horizon: horizon)
-        async let busResult = agentBus.load(range: range)
-        async let accountResult: OpenRouterSource.Account? = try? await openRouter.load()
+        async let claudeTask = claudeCode.load(horizon: horizon)
+        async let codexTask = codex.load(horizon: horizon)
+        async let cursorTask = cursor.load()
+        async let ollamaTask = ollama.load()
+        async let busTask = agentBus.load(range: range)
+        async let apiTask = Self.fetchAll(Catalogue.apiBacked)
 
-        let claude = await claudeResult
-        let codexData = await codexResult
-        let bus = await busResult
-        let account = await accountResult
+        let claude = await claudeTask
+        let codexData = await codexTask
+        let cursorData = await cursorTask
+        let ollamaData = await ollamaTask
+        let bus = await busTask
+        let apis = await apiTask
 
         var built: [ProviderSnapshot] = []
 
+        // MARK: transcript-backed
         if claudeCode.isPresent {
-            var snapshot = Self.summarise(.claudeCode, buckets: claude.anthropic, range: range)
+            var snapshot = Self.summarise(
+                id: "claude-code", title: "Claude Code", symbol: "asterisk",
+                accent: Catalogue.hue.anthropic, buckets: claude.anthropic, range: range
+            )
             snapshot.billing = Billing.detectClaudeCode()
             snapshot.lastActivity = claude.lastActivity
             snapshot.limits = Self.estimatedBlockLimit(buckets: claude.anthropic)
@@ -81,52 +90,72 @@ final class Tracker: ObservableObject {
         }
 
         if codex.isPresent {
-            var snapshot = Self.summarise(.codex, buckets: codexData.buckets, range: range)
-            // Codex states its own plan; a plan_type means the tokens are prepaid.
+            var snapshot = Self.summarise(
+                id: "codex", title: "Codex", symbol: "chevron.left.forwardslash.chevron.right",
+                accent: Catalogue.hue.openai, buckets: codexData.buckets, range: range
+            )
             snapshot.billing = codexData.planType == nil ? .metered : .subscription
             snapshot.lastActivity = codexData.lastActivity
             snapshot.limits = codexData.limits
-            snapshot.detail = codexData.planType.map { "plan: \($0)" }
+            snapshot.plan = codexData.planType
             built.append(snapshot)
         }
 
-        if openRouter.isPresent {
-            var snapshot = Self.summarise(.openRouter, buckets: claude.routed, range: range)
-            snapshot.lastActivity = claude.lastActivity
-            if let account {
-                // OpenRouter's own dollars are authoritative; the transcript-derived
-                // estimate only supplies the model breakdown below.
-                snapshot.costUSD = Self.spend(account, range: range)
-                snapshot.notionalUSD = snapshot.costUSD
-                if let limit = account.limit, limit > 0 {
-                    snapshot.limits = [LimitWindow(
-                        id: "openrouter-credit",
-                        label: "Credit limit",
-                        usedFraction: 1 - max(0, (account.limitRemaining ?? 0) / limit),
-                        resetsAt: nil,
-                        windowMinutes: nil
-                    )]
-                }
-                snapshot.detail = account.isFreeTier
-                    ? "free tier · $\(String(format: "%.2f", account.usageTotal)) lifetime"
-                    : "$\(String(format: "%.2f", account.usageTotal)) lifetime"
-            } else {
-                snapshot.error = "key unreadable or offline"
+        // MARK: session-backed subscription products
+        var cursorSnapshot = ProviderSnapshot(
+            id: Catalogue.cursor.id, title: Catalogue.cursor.title,
+            symbol: Catalogue.cursor.symbol, accent: Catalogue.cursor.accent,
+            state: cursorData.state, billing: .subscription
+        )
+        Self.apply(cursorData.reading, to: &cursorSnapshot)
+        built.append(cursorSnapshot)
+
+        // MARK: API-backed quota and balance
+        for (spec, result) in apis {
+            var snapshot = ProviderSnapshot(
+                id: spec.id, title: spec.title, symbol: spec.symbol,
+                accent: spec.accent, state: result.state, billing: spec.billing
+            )
+            if let reading = result.reading { Self.apply(reading, to: &snapshot) }
+            // Traffic the local router forwarded to OpenRouter shows up in the Claude
+            // Code transcripts under a namespaced model id; it belongs here.
+            if spec.id == "openrouter" {
+                let routed = Self.summarise(
+                    id: spec.id, title: spec.title, symbol: spec.symbol,
+                    accent: spec.accent, buckets: claude.routed, range: range
+                )
+                snapshot.tokens = routed.tokens
+                snapshot.models = routed.models
+                snapshot.series = routed.series
+                snapshot.messages = routed.messages
+                snapshot.lastActivity = claude.lastActivity
             }
             built.append(snapshot)
         }
 
+        // MARK: local runtimes
+        if let reading = ollamaData {
+            var snapshot = ProviderSnapshot(
+                id: Catalogue.ollama.id, title: Catalogue.ollama.title,
+                symbol: Catalogue.ollama.symbol, accent: Catalogue.ollama.accent, state: .ok
+            )
+            Self.apply(reading, to: &snapshot)
+            built.append(snapshot)
+        }
+
+        // MARK: the broker's own ledger
         if agentBus.isPresent {
-            var snapshot = ProviderSnapshot(kind: .agentBus, isPresent: true)
+            var snapshot = ProviderSnapshot(
+                id: "agent-bus", title: "Agent Bus", symbol: "bus",
+                accent: Catalogue.hue.bus, state: bus.brokerUp ? .ok : .offline("broker offline")
+            )
             snapshot.tokens = bus.byModel.reduce(TokenCounts()) { $0 + $1.tokens }
             snapshot.costUSD = bus.costUSD
             snapshot.notionalUSD = bus.notionalUSD
             snapshot.messages = bus.events
             snapshot.models = bus.byAgent          // agents are the interesting axis here
             snapshot.series = bus.series
-            if !bus.brokerUp {
-                snapshot.error = "broker offline"
-            } else if bus.events == 0 {
+            if bus.brokerUp && bus.events == 0 {
                 snapshot.detail = "ledger empty — agents have not reported this window"
             } else if bus.notionalUSD > bus.costUSD {
                 snapshot.detail = "+\(Format.money(bus.notionalUSD - bus.costUSD)) absorbed by subscription plans"
@@ -134,15 +163,61 @@ final class Tracker: ObservableObject {
             built.append(snapshot)
         }
 
-        snapshots = built.map(Self.finalise)
+        // MARK: known-but-silent providers
+        for spec in Catalogue.unsupported {
+            let configured = spec.credentials.isEmpty ? false : spec.credential() != nil
+            built.append(ProviderSnapshot(
+                id: spec.id, title: spec.title, symbol: spec.symbol, accent: spec.accent,
+                state: configured ? .noUsageAPI : .notConfigured,
+                detail: spec.note
+            ))
+        }
+
+        let finalised = built.map(Self.finalise)
+        // Least headroom first — the quota about to interrupt you belongs at the top.
+        live = finalised.filter { $0.isLive && $0.hasNumbers }.sorted { a, b in
+            let left = a.headlineLimit?.remainingFraction ?? 2
+            let right = b.headlineLimit?.remainingFraction ?? 2
+            if left != right { return left < right }
+            return a.tokens.total > b.tokens.total
+        }
+        roster = finalised.filter { !($0.isLive && $0.hasNumbers) }
+            .sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
         lastRefresh = Date()
     }
 
     func resetCaches() async {
-        // Only reachable from the menu; forces a full re-read on the next tick.
         await JSONLIndex(name: "claude-code").reset()
         await JSONLIndex(name: "codex").reset()
         await refresh()
+    }
+
+    // MARK: - Assembly
+
+    private static func fetchAll(_ specs: [ProviderSpec]) async -> [(ProviderSpec, (state: ProviderState, reading: Reading?))] {
+        await withTaskGroup(of: (ProviderSpec, (state: ProviderState, reading: Reading?)).self) { group in
+            for spec in specs {
+                group.addTask { (spec, await ProviderFetcher.fetch(spec)) }
+            }
+            var results: [(ProviderSpec, (state: ProviderState, reading: Reading?))] = []
+            for await result in group { results.append(result) }
+            // Task groups complete out of order; keep the catalogue's order for stability.
+            return results.sorted { first, second in
+                (specs.firstIndex { $0.id == first.0.id } ?? 0) < (specs.firstIndex { $0.id == second.0.id } ?? 0)
+            }
+        }
+    }
+
+    private static func apply(_ reading: Reading, to snapshot: inout ProviderSnapshot) {
+        snapshot.limits = reading.windows
+        snapshot.balanceUSD = reading.balanceUSD
+        snapshot.limitUSD = reading.limitUSD
+        snapshot.plan = reading.plan
+        if let detail = reading.detail { snapshot.detail = detail }
+        if let used = reading.usedUSD, snapshot.billing == .metered {
+            snapshot.costUSD = used
+            snapshot.notionalUSD = used
+        }
     }
 
     /// A subscription bills nothing per call, so its metered figure is zero and the
@@ -153,13 +228,14 @@ final class Tracker: ObservableObject {
         return copy
     }
 
-    // MARK: - Aggregation
-
-    private static func summarise(_ kind: ProviderKind, buckets: [HourBucket], range: Range) -> ProviderSnapshot {
+    private static func summarise(
+        id: String, title: String, symbol: String, accent: Color,
+        buckets: [HourBucket], range: Range
+    ) -> ProviderSnapshot {
         let cutoffHour = Int((Date().timeIntervalSince1970 - range.seconds) / 3600)
         let inRange = buckets.filter { $0.hour >= cutoffHour }
 
-        var snapshot = ProviderSnapshot(kind: kind, isPresent: true)
+        var snapshot = ProviderSnapshot(id: id, title: title, symbol: symbol, accent: accent, state: .ok)
         var byModel: [String: ModelTotal] = [:]
 
         for bucket in inRange {
@@ -177,8 +253,8 @@ final class Tracker: ObservableObject {
 
         snapshot.models = byModel.values.sorted { $0.tokens.total > $1.tokens.total }
         snapshot.series = series(inRange, range: range)
-        // `summarise` prices everything at list rate; the caller decides whether that
-        // is a bill or a hypothetical by setting `billing`, which `finalise` applies.
+        // Priced at list rate here; the caller decides whether that is a bill or a
+        // hypothetical by setting `billing`, which `finalise` then applies.
         snapshot.notionalUSD = snapshot.costUSD
         return snapshot
     }
@@ -192,7 +268,7 @@ final class Tracker: ObservableObject {
 
         for bucket in buckets {
             // Hourly granularity into sub-hour slots: everything in an hour lands in the
-            // slot that hour starts in. Fine for a sparkline, and honest about it.
+            // slot that hour starts in. Fine for a bar chart, and honest about it.
             let stamp = Double(bucket.hour) * 3600
             guard stamp >= start else { continue }
             let slot = min(count - 1, max(0, Int((stamp - start) / width)))
@@ -205,12 +281,10 @@ final class Tracker: ObservableObject {
     ///
     /// The window is not a rolling five hours: a block is anchored to the first activity
     /// after an idle gap of five hours or more, and expires five hours after that anchor.
-    /// Reporting it as rolling produces a reset time that is always about to happen,
-    /// which is worse than no reset time.
+    /// Reporting it as rolling produces a reset time that is always about to happen.
     ///
-    /// The percentage is against the busiest block in the retained history rather than a
-    /// real cap, because the cap is not published anywhere. It is a relative gauge and is
-    /// labelled `est` wherever it is shown.
+    /// The percentage is against the busiest block in retained history rather than a real
+    /// cap, because the cap is not published anywhere. It is labelled `est` on screen.
     private static func estimatedBlockLimit(buckets: [HourBucket]) -> [LimitWindow] {
         guard !buckets.isEmpty else { return [] }
 
@@ -221,7 +295,6 @@ final class Tracker: ObservableObject {
         let active = byHour.filter { $0.value > 0 }.keys.sorted()
         guard !active.isEmpty else { return [] }
 
-        // Split activity into blocks, carrying the busiest total as the reference peak.
         var peak = 0
         var blockStart = active[0]
         var blockTotal = 0
@@ -237,8 +310,6 @@ final class Tracker: ObservableObject {
         guard peak > 0 else { return [] }
 
         let currentHour = Int(Date().timeIntervalSince1970 / 3600)
-        // The last block has expired if five hours have passed since it was anchored;
-        // there is then no live window to report.
         guard currentHour - blockStart < 5 else { return [] }
 
         return [LimitWindow(
@@ -249,13 +320,5 @@ final class Tracker: ObservableObject {
             windowMinutes: 300,
             isEstimate: true
         )]
-    }
-
-    private static func spend(_ account: OpenRouterSource.Account, range: Range) -> Double {
-        switch range {
-        case .fiveHours, .day: return account.usageDaily
-        case .week: return account.usageWeekly
-        case .month: return account.usageMonthly
-        }
     }
 }

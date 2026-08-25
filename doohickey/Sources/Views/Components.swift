@@ -1,16 +1,5 @@
 import SwiftUI
 
-extension ProviderKind {
-    var accent: Color {
-        switch self {
-        case .claudeCode: return Color(red: 0.85, green: 0.47, blue: 0.30)
-        case .codex: return Color(red: 0.32, green: 0.72, blue: 0.60)
-        case .openRouter: return Color(red: 0.45, green: 0.55, blue: 0.92)
-        case .agentBus: return Color(red: 0.72, green: 0.50, blue: 0.86)
-        }
-    }
-}
-
 /// Keyed on headroom left, so the scale runs the same direction as the bar: full and
 /// green, draining to red. Amber at 30% left, red at 10% — a bar that goes red at 60%
 /// used teaches you to ignore it.

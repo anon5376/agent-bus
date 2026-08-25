@@ -24,7 +24,7 @@ struct MenuBarLabel: View {
     var body: some View {
         HStack(spacing: 3) {
             if let headline = tracker.headline {
-                Image(systemName: headline.kind.symbol)
+                Image(systemName: headline.snapshot.symbol)
                     .font(.system(size: 10, weight: .semibold))
                 Text("\(Int((headline.limit.remainingFraction * 100).rounded()))%")
                     .font(.system(size: 11, weight: .medium, design: .rounded))

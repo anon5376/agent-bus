@@ -32,18 +32,13 @@ PLIST
 echo '</plist>' >> "$APP/Contents/Info.plist"
 
 echo "compiling…"
+# Globbed rather than listed: a new file under Sources/ should not need a build edit.
+SOURCES=()
+while IFS= read -r file; do SOURCES+=("$file"); done < <(find "$ROOT/Sources" -name '*.swift' | sort)
+[[ ${#SOURCES[@]} -gt 0 ]] || { echo "no sources found under $ROOT/Sources" >&2; exit 1; }
+
 swiftc -parse-as-library -O -swift-version 5 \
-  "$ROOT/Sources/DoohickeyApp.swift" \
-  "$ROOT/Sources/Core/Models.swift" \
-  "$ROOT/Sources/Core/JSONLIndex.swift" \
-  "$ROOT/Sources/Core/Pricing.swift" \
-  "$ROOT/Sources/Core/Tracker.swift" \
-  "$ROOT/Sources/Providers/ClaudeCodeSource.swift" \
-  "$ROOT/Sources/Providers/CodexSource.swift" \
-  "$ROOT/Sources/Providers/OpenRouterSource.swift" \
-  "$ROOT/Sources/Providers/AgentBusSource.swift" \
-  "$ROOT/Sources/Views/Components.swift" \
-  "$ROOT/Sources/Views/PanelView.swift" \
+  "${SOURCES[@]}" \
   -o "$APP/Contents/MacOS/Doohickey"
 
 # Ad-hoc signature so macOS runs it and remembers its position in the bar.

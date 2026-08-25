@@ -1,30 +1,5 @@
 import Foundation
-
-/// Where a number came from. Drives grouping and colour in the panel.
-enum ProviderKind: String, CaseIterable, Codable, Sendable {
-    case claudeCode
-    case codex
-    case openRouter
-    case agentBus
-
-    var title: String {
-        switch self {
-        case .claudeCode: return "Claude Code"
-        case .codex: return "Codex"
-        case .openRouter: return "OpenRouter"
-        case .agentBus: return "Agent Bus"
-        }
-    }
-
-    var symbol: String {
-        switch self {
-        case .claudeCode: return "asterisk"
-        case .codex: return "chevron.left.forwardslash.chevron.right"
-        case .openRouter: return "arrow.triangle.branch"
-        case .agentBus: return "bus"
-        }
-    }
-}
+import SwiftUI
 
 /// How a provider's usage is paid for. The distinction matters more than it looks:
 /// on a flat-rate plan the dollar figure is not a bill, it is what the same tokens
@@ -46,17 +21,16 @@ enum Billing: String, Codable, Sendable {
 struct LimitWindow: Identifiable, Codable, Sendable {
     var id: String
     var label: String
-    /// 0…1. Values above 1 are clamped by the view, not here.
+    /// 0…1. Values outside the range are clamped by `remainingFraction`.
     var usedFraction: Double
-
     var resetsAt: Date?
     var windowMinutes: Int?
     /// Set when the number is inferred locally rather than reported by the provider.
     var isEstimate: Bool = false
 
-    /// What the panel actually shows. Quota is read as headroom left, not ground
-    /// covered — "18% left" answers the question you open the app with, where
-    /// "82% used" makes you do the subtraction yourself.
+    /// What the panel shows. Quota reads as headroom left, not ground covered —
+    /// "18% left" answers the question you open the app with, where "82% used" makes
+    /// you do the subtraction yourself.
     var remainingFraction: Double { max(0, min(1, 1 - usedFraction)) }
 
     var resetsInText: String? {
@@ -112,32 +86,62 @@ struct ModelTotal: Identifiable, Sendable {
 
 /// Everything the panel knows about one provider after a refresh.
 struct ProviderSnapshot: Identifiable, Sendable {
-    var id: ProviderKind { kind }
-    var kind: ProviderKind
-    /// Nil when the provider isn't configured on this machine — it stays hidden.
-    var isPresent: Bool
+    var id: String
+    var title: String
+    var symbol: String
+    var accent: Color
+    var state: ProviderState
     var billing: Billing = .metered
+
+    /// Quota windows, expressed as headroom by `remainingFraction`.
     var limits: [LimitWindow] = []
+    /// Credit left, for providers that meter against a balance rather than a window.
+    var balanceUSD: Double?
+    var limitUSD: Double?
+
     var tokens: TokenCounts = TokenCounts()
-    /// Actually charged. Zero on a subscription.
     var costUSD: Double = 0
-    /// List-price equivalent, whatever the plan.
     var notionalUSD: Double = 0
     var messages: Int = 0
     var models: [ModelTotal] = []
     /// Evenly spaced, oldest first, covering the selected range.
     var series: [Double] = []
+    var plan: String?
     var detail: String?
-    var error: String?
     var lastActivity: Date?
 
-    /// The window the menu bar should show for this provider: the one closest to full.
+    /// The window to headline: whichever has the least room left.
     var headlineLimit: LimitWindow? {
-        limits.max { $0.usedFraction < $1.usedFraction }
+        limits.min { $0.remainingFraction < $1.remainingFraction }
     }
 
-    /// What to print as this provider's headline figure.
     var displayCost: Double { billing == .metered ? costUSD : notionalUSD }
+
+    /// Whether there is a number worth showing. Drives whether the row lands in the
+    /// main list or the collapsed roster underneath it.
+    var isLive: Bool {
+        switch state {
+        case .ok, .offline, .failed: return true
+        case .notConfigured, .noUsageAPI: return false
+        }
+    }
+
+    var statusNote: String? {
+        switch state {
+        case .ok: return nil
+        case .notConfigured: return "not set up"
+        case .noUsageAPI: return "no usage API"
+        case .offline(let why), .failed(let why): return why
+        }
+    }
+
+    /// Whether the row earns a place in the main list. A usage-based plan with no
+    /// ceiling (Cursor) reports a plan and a running count but no window to draw — that
+    /// is still a working, configured provider and belongs above the fold, not filed
+    /// under "not set up".
+    var hasNumbers: Bool {
+        !limits.isEmpty || balanceUSD != nil || tokens.total > 0 || plan != nil
+    }
 }
 
 enum Range: String, CaseIterable, Identifiable, Sendable {
@@ -202,13 +206,21 @@ enum Format {
         if elapsed < 60 { return "just now" }
         return duration(elapsed) + " ago"
     }
+
+    static func bytes(_ value: Double) -> String {
+        switch abs(value) {
+        case 1_000_000_000...: return String(format: "%.1fGB", value / 1_000_000_000)
+        case 1_000_000...: return String(format: "%.0fMB", value / 1_000_000)
+        default: return String(format: "%.0fKB", value / 1_000)
+        }
+    }
 }
 
 extension Billing {
-    /// Claude Code signs in with OAuth against a Pro/Max plan by default; an API key
-    /// in the environment is the exception and means metered billing. Deliberately not
-    /// read from the Keychain — an unsigned menu bar app prompting for Keychain access
-    /// on first launch is worse than the heuristic being occasionally wrong.
+    /// Claude Code signs in with OAuth against a Pro/Max plan by default; an API key in
+    /// the environment is the exception and means metered billing. Deliberately not read
+    /// from the Keychain — an unsigned menu bar app prompting for Keychain access on
+    /// first launch is worse than the heuristic being occasionally wrong.
     ///
     /// Override with `{"claudeCode":"metered"}` in
     /// `~/Library/Application Support/Doohickey/billing.json`.

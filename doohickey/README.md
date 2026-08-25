@@ -10,15 +10,45 @@ running out, across every provider. Click it for the breakdown.
 
 ## What it tracks
 
-| Source | Quota | Tokens | Cost |
-| --- | --- | --- | --- |
-| **Codex** | reported by Codex (`used_percent`, window, reset) | per-turn from rollouts | notional — plan is prepaid |
-| **Claude Code** | reconstructed 5-hour block, marked `est` | per-message from transcripts | notional on a Pro/Max plan, billed with an API key |
-| **OpenRouter** | credit limit when one is set | from routed transcripts | **real dollars**, from `/api/v1/key` |
-| **Agent Bus** | — | from the broker's usage ledger | split metered vs. absorbed by plan |
+Twenty providers, in three tiers — and the panel keeps them apart on purpose, because
+"18% left" and "we cannot know" should not look the same.
 
-Nothing is reported that the machine cannot actually observe. Gemini and Cursor keep no
-local token record, so they are absent rather than shown as empty cards.
+**Quota or balance from the provider itself.** These are the only rows where a
+percentage is a fact rather than a reconstruction.
+
+| Provider | What it reports |
+| --- | --- |
+| Codex | `used_percent`, window length, reset time |
+| Cursor | plan, per-model request allowances, cycle reset |
+| Grok | queries left in the current window |
+| OpenRouter | credit limit, remaining, weekly spend |
+| DeepSeek · Moonshot · SiliconFlow | account balance |
+| Novita | credit balance |
+| xAI · Z.ai | key state only — neither publishes spend |
+
+**Local transcripts.** No usage API exists, but the tool writes token counts to disk.
+Tokens are exact; any quota figure is inferred and labelled `est`.
+
+| Provider | Source |
+| --- | --- |
+| Claude Code | `~/.claude/projects/**.jsonl` |
+| Codex | `~/.codex/sessions/**.jsonl` |
+| Agent Bus | the broker's usage ledger, per agent |
+
+**Nothing to report.** Listed with a reason rather than silently absent, so a missing
+provider is explained instead of looking like something you forgot to configure:
+Anthropic API and OpenAI API (no per-key usage endpoint; OpenAI's needs an admin key),
+Groq, Mistral, Together, Fireworks (no balance endpoint), Gemini and Copilot (their CLIs
+keep no local token record).
+
+Ollama appears only while it is running, since local models have no quota to report.
+
+### Adding a provider
+
+`Sources/Providers/Catalogue.swift` is a list of declarations — credential sources, an
+endpoint, and a closure mapping the response onto a `Reading`. Credentials resolve from
+an env var, a key file, a JSON field, or a named cookie, first match wins. No new code
+path is needed for a provider that fits that shape.
 
 ## Metered vs. on plan
 
