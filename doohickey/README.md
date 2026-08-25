@@ -52,11 +52,13 @@ invented rate.
 
 | | Doohickey | CodexBar |
 | --- | --- | --- |
-| bundle | **764 KB** | 151 MB |
-| memory (phys_footprint) | **59 MB** | 681 MB |
+| bundle | **780 KB** | 151 MB |
+| memory, steady state | **27 MB** | 681 MB |
+| memory, after a first full scan | 59 MB | — |
 | idle CPU | 0% between refreshes | — |
 
-Measured on the same machine, both idle, `footprint -p`.
+Measured on the same machine, both idle, `footprint -p`. The higher figure is the peak
+left behind by a cold scan of a 14 GB archive; it settles back on the next launch.
 
 One Swift binary against the system frameworks: no Electron, no bundled Node, no
 embedded browser. The transcripts it reads are the interesting part — this machine has

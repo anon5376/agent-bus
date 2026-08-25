@@ -225,7 +225,7 @@ See [`docs/usage-ledger.md`](docs/usage-ledger.md).
 ### Doohickey
 
 [`doohickey/`](doohickey/) is a menu bar app showing quota left and tokens spent across
-Codex, Claude Code, OpenRouter and this broker's ledger. One Swift binary, 764 KB, no
+Codex, Claude Code, OpenRouter and this broker's ledger. One Swift binary, 780 KB, no
 Electron. It is the only view that shows *which agent* spent what — a swarm run is
 otherwise one undifferentiated pile of tokens in the underlying transcripts.
 
