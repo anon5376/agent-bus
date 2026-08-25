@@ -13,21 +13,23 @@ running out, across every provider. Click it for the breakdown.
 Twenty providers, in three tiers — and the panel keeps them apart on purpose, because
 "18% left" and "we cannot know" should not look the same.
 
-**Quota or balance from the provider itself.** These are the only rows where a
-percentage is a fact rather than a reconstruction.
+**Live quota, straight from the account.** These rows are facts, not reconstructions.
 
-| Provider | What it reports |
-| --- | --- |
-| Codex | `used_percent`, window length, reset time |
-| Cursor | plan, per-model request allowances, cycle reset |
-| Grok | queries left in the current window |
-| OpenRouter | credit limit, remaining, weekly spend |
-| DeepSeek · Moonshot · SiliconFlow | account balance |
-| Novita | credit balance |
-| xAI · Z.ai | key state only — neither publishes spend |
+| Provider | Endpoint | What it gives |
+| --- | --- | --- |
+| Claude Code | `api.anthropic.com/api/oauth/usage` | 5h session and weekly windows, extra-usage overage, plan |
+| Codex | `chatgpt.com/backend-api/wham/usage` | live window, per-model allowances (Spark), reset credits, plan |
+| Cursor | `cursor.com/api/auth/stripe` + `/api/usage` | plan, per-model request allowances, cycle reset |
+| Grok | `grok.com/rest/rate-limits` | queries left in the window |
+| OpenRouter | `openrouter.ai/api/v1/key` | credit limit, remaining, weekly spend |
+| DeepSeek · Moonshot · SiliconFlow | `/user/balance` and friends | account balance |
+| Novita | `api.novita.ai/v3/user` | credit balance |
+| xAI · Z.ai | key endpoints | key state only — neither publishes spend |
 
-**Local transcripts.** No usage API exists, but the tool writes token counts to disk.
-Tokens are exact; any quota figure is inferred and labelled `est`.
+Claude and Codex are read with the OAuth tokens their own CLIs already hold, so there is
+nothing extra to configure. Claude's lives in the login keychain; see below.
+
+**Local transcripts.** Exact token counts, from files the tools write anyway.
 
 | Provider | Source |
 | --- | --- |
@@ -35,13 +37,36 @@ Tokens are exact; any quota figure is inferred and labelled `est`.
 | Codex | `~/.codex/sessions/**.jsonl` |
 | Agent Bus | the broker's usage ledger, per agent |
 
-**Nothing to report.** Listed with a reason rather than silently absent, so a missing
-provider is explained instead of looking like something you forgot to configure:
-Anthropic API and OpenAI API (no per-key usage endpoint; OpenAI's needs an admin key),
-Groq, Mistral, Together, Fireworks (no balance endpoint), Gemini and Copilot (their CLIs
-keep no local token record).
+**Nothing to report.** Listed with the reason rather than silently absent, so a missing
+provider is explained instead of looking like something you forgot to configure. Most of
+these do publish usage — behind a *console web session* rather than an API key, so the
+blocker is credential shape, not a missing endpoint: Groq and Mistral (console session),
+OpenAI (org costs need an admin key), Fireworks (needs an account id too), Gemini (quota
+lives in the Cloud console), Together and Copilot (no public per-account endpoint).
 
 Ollama appears only while it is running, since local models have no quota to report.
+
+## Reading Claude's token
+
+Claude Code keeps its OAuth token in the login keychain, and the keychain item's ACL
+admits Claude Code — not an ad-hoc signed menu bar app. A direct `SecItemCopyMatching`
+therefore returns nothing.
+
+The fallback shells out to `/usr/bin/security`, which is Apple-signed and does get
+through; macOS asks once, and "Always Allow" makes it silent afterwards. The token is
+cached for ten minutes and dropped immediately on a 401, so a rotation is picked up on
+the next refresh rather than going stale.
+
+If the read fails for any reason the row falls back to a 5-hour block reconstructed from
+transcript history, labelled `est`, with the reason printed underneath. That distinction
+matters: on this machine the estimate read 79% left while the account was actually at
+43% — an estimate that looks reassuring is worse than no estimate at all.
+
+### Seeing what it decided
+
+Every refresh writes `~/Library/Application Support/Doohickey/status.txt`: each
+provider's state, quota, plan and token counts. A menu bar app has nowhere to print, and
+"the credential read failed" otherwise looks exactly like "you have plenty left".
 
 ### Adding a provider
 

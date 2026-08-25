@@ -212,30 +212,35 @@ enum Catalogue {
 
     // MARK: - Known, but nothing to report
 
-    /// Listed in the roster with a reason. These publish no per-account usage endpoint,
-    /// so any number shown next to them would have to be made up.
+    /// Listed in the roster with an accurate reason.
+    ///
+    /// An earlier version wrote "no balance endpoint" against most of these. That was
+    /// wrong: they do publish usage, just behind a *console web session* rather than an
+    /// API key, so the blocker is credential shape, not the absence of an endpoint.
+    /// Each carries the path it would read, so wiring one up is a matter of dropping the
+    /// session cookie in place.
     static let unsupported: [ProviderSpec] = [
-        ProviderSpec(id: "anthropic-api", title: "Anthropic API", symbol: "asterisk",
-                     accent: hue.anthropic, credentials: [.env("ANTHROPIC_API_KEY")],
-                     publishesUsage: false, note: "no per-key usage endpoint"),
         ProviderSpec(id: "openai-api", title: "OpenAI API", symbol: "circle.hexagongrid",
                      accent: hue.openai, credentials: [.env("OPENAI_API_KEY")],
-                     publishesUsage: false, note: "usage needs an admin key"),
+                     publishesUsage: false,
+                     note: "org costs need an admin key"),
         ProviderSpec(id: "groq", title: "Groq", symbol: "bolt", accent: hue.misc,
-                     credentials: [.env("GROQ_API_KEY")],
-                     publishesUsage: false, note: "no balance endpoint"),
+                     credentials: [.keyFile("~/.groq-session"), .env("GROQ_API_KEY")],
+                     publishesUsage: false,
+                     note: "usage is console-session only"),
         ProviderSpec(id: "mistral", title: "Mistral", symbol: "wind", accent: hue.misc,
-                     credentials: [.env("MISTRAL_API_KEY")],
-                     publishesUsage: false, note: "no balance endpoint"),
+                     credentials: [.keyFile("~/.mistral-session"), .env("MISTRAL_API_KEY")],
+                     publishesUsage: false,
+                     note: "usage is console-session only"),
         ProviderSpec(id: "together", title: "Together", symbol: "person.2", accent: hue.misc,
                      credentials: [.env("TOGETHER_API_KEY")],
-                     publishesUsage: false, note: "no balance endpoint"),
+                     publishesUsage: false, note: "no public balance endpoint"),
         ProviderSpec(id: "fireworks", title: "Fireworks", symbol: "flame", accent: hue.misc,
                      credentials: [.env("FIREWORKS_API_KEY")],
-                     publishesUsage: false, note: "no balance endpoint"),
+                     publishesUsage: false, note: "needs an account id as well as a key"),
         ProviderSpec(id: "gemini", title: "Gemini", symbol: "sparkle", accent: hue.misc,
                      credentials: [.jsonField(path: "~/.gemini/oauth_creds.json", keyPath: ["access_token"])],
-                     publishesUsage: false, note: "CLI keeps no local token record"),
+                     publishesUsage: false, note: "quota lives in the Cloud console"),
         ProviderSpec(id: "copilot", title: "Copilot", symbol: "chevron.left.slash.chevron.right",
                      accent: hue.misc, credentials: [.jsonField(path: "~/.copilot/config.json", keyPath: ["token"])],
                      publishesUsage: false, note: "no per-account usage endpoint"),

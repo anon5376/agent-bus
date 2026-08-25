@@ -21,6 +21,8 @@ final class Tracker: ObservableObject {
     private let claudeCode = ClaudeCodeSource()
     private let codex = CodexSource()
     private let cursor = CursorSource()
+    private let anthropic = AnthropicSource()
+    private let chatGPT = ChatGPTSource()
     private let ollama = OllamaSource()
     private let agentBus = AgentBusSource()
 
@@ -63,6 +65,8 @@ final class Tracker: ObservableObject {
         async let claudeTask = claudeCode.load(horizon: horizon)
         async let codexTask = codex.load(horizon: horizon)
         async let cursorTask = cursor.load()
+        async let anthropicTask = anthropic.load()
+        async let chatGPTTask = chatGPT.load()
         async let ollamaTask = ollama.load()
         async let busTask = agentBus.load(range: range)
         async let apiTask = Self.fetchAll(Catalogue.apiBacked)
@@ -70,6 +74,8 @@ final class Tracker: ObservableObject {
         let claude = await claudeTask
         let codexData = await codexTask
         let cursorData = await cursorTask
+        let anthropicQuota = await anthropicTask
+        let chatGPTQuota = await chatGPTTask
         let ollamaData = await ollamaTask
         let bus = await busTask
         let apis = await apiTask
@@ -84,8 +90,17 @@ final class Tracker: ObservableObject {
             )
             snapshot.billing = Billing.detectClaudeCode()
             snapshot.lastActivity = claude.lastActivity
-            snapshot.limits = Self.estimatedBlockLimit(buckets: claude.anthropic)
-            snapshot.detail = "no quota API — window inferred from your own history"
+            // Real quota when the account will tell us; the reconstruction is only a
+            // fallback for when the token is missing or expired.
+            if case .ok = anthropicQuota.state, !anthropicQuota.reading.windows.isEmpty {
+                snapshot.limits = anthropicQuota.reading.windows
+                snapshot.plan = anthropicQuota.reading.plan
+                snapshot.detail = anthropicQuota.reading.detail
+            } else {
+                snapshot.limits = Self.estimatedBlockLimit(buckets: claude.anthropic)
+                snapshot.detail = anthropicQuota.statusHint
+                    ?? "no quota reading — window inferred from your own history"
+            }
             built.append(snapshot)
         }
 
@@ -94,10 +109,19 @@ final class Tracker: ObservableObject {
                 id: "codex", title: "Codex", symbol: "chevron.left.forwardslash.chevron.right",
                 accent: Catalogue.hue.openai, buckets: codexData.buckets, range: range
             )
-            snapshot.billing = codexData.planType == nil ? .metered : .subscription
             snapshot.lastActivity = codexData.lastActivity
-            snapshot.limits = codexData.limits
-            snapshot.plan = codexData.planType
+            // The rollout's rate_limits block is only as fresh as the last turn; the
+            // backend knows the window that is live right now.
+            if case .ok = chatGPTQuota.state, !chatGPTQuota.reading.windows.isEmpty {
+                snapshot.limits = chatGPTQuota.reading.windows
+                snapshot.plan = chatGPTQuota.reading.plan ?? codexData.planType
+                snapshot.detail = chatGPTQuota.reading.detail
+            } else {
+                snapshot.limits = codexData.limits
+                snapshot.plan = codexData.planType
+                snapshot.detail = chatGPTQuota.statusHint
+            }
+            snapshot.billing = snapshot.plan == nil ? .metered : .subscription
             built.append(snapshot)
         }
 
@@ -184,6 +208,33 @@ final class Tracker: ObservableObject {
         roster = finalised.filter { !($0.isLive && $0.hasNumbers) }
             .sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
         lastRefresh = Date()
+        Self.writeStatusDump(live: live, roster: roster)
+    }
+
+    /// A plain-text dump of the last refresh, written next to the index caches.
+    ///
+    /// A menu bar app has nowhere to print, and "the keychain read failed" looks exactly
+    /// like "you have plenty of quota left" if the fallback silently produces an estimate.
+    /// This makes the difference inspectable without attaching a debugger.
+    private static func writeStatusDump(live: [ProviderSnapshot], roster: [ProviderSnapshot]) {
+        var lines = ["Doohickey status — \(Date())", ""]
+        for snapshot in live {
+            let quota = snapshot.limits.map {
+                "\($0.label)=\(Int(($0.remainingFraction * 100).rounded()))% left\($0.isEstimate ? " (est)" : "")"
+            }.joined(separator: ", ")
+            lines.append("\(snapshot.title): state=\(snapshot.state) plan=\(snapshot.plan ?? "-")")
+            lines.append("   quota: \(quota.isEmpty ? "none" : quota)")
+            lines.append("   tokens=\(Format.tokens(snapshot.tokens.total)) cost=\(Format.money(snapshot.displayCost)) \(snapshot.billing.rawValue)")
+            if let detail = snapshot.detail { lines.append("   note: \(detail)") }
+        }
+        lines.append("")
+        for snapshot in roster {
+            lines.append("\(snapshot.title): \(snapshot.statusNote ?? "-") — \(snapshot.detail ?? "")")
+        }
+        let url = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Doohickey/status.txt")
+        try? lines.joined(separator: "\n").write(to: url, atomically: true, encoding: .utf8)
     }
 
     func resetCaches() async {
