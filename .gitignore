@@ -6,3 +6,5 @@ gui/AgentBus.app/
 .claude-flow/
 *.log
 .DS_Store
+dist-test/
+doohickey/Doohickey.app/

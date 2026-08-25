@@ -101,9 +101,73 @@ export interface UsageMetrics {
   turns: number;
   inputTokens: number;
   outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  reasoningTokens: number;
+  totalTokens: number;
+  /** Actually billed. Zero when the model runs on a flat-rate plan. */
+  costUSD: number;
+  /** What the same tokens would cost metered, regardless of plan. */
+  notionalUSD: number;
+  latencyMs: number;
+}
+
+/**
+ * One append-only ledger entry. The broker writes these; nothing rewrites them.
+ * Rollups in `UsageMetrics` are derived and can always be rebuilt from the events,
+ * which is what makes a windowed view (last 5h, last week) possible at all.
+ */
+export interface UsageEvent {
+  id: string;
+  ts: number;
+  agentId: string;
+  taskId: string | null;
+  runId: string | null;
+  /** Config model id, e.g. `opus-current`. */
+  modelId: string;
+  /** Wire model name the harness actually called, e.g. `claude-opus-4-8`. */
+  model: string;
+  provider: string;
+  harness: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  reasoningTokens: number;
   totalTokens: number;
   costUSD: number;
+  notionalUSD: number;
+  billing: "metered" | "subscription" | "local";
+  pricingSource: "config" | "table" | "unknown";
   latencyMs: number;
+  /** How the numbers arrived: self-reported by the agent, or derived by the broker. */
+  source: "agent" | "task_submit" | "harness" | "operator";
+}
+
+export interface UsageBucket {
+  key: string;
+  label: string;
+  events: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  reasoningTokens: number;
+  totalTokens: number;
+  costUSD: number;
+  notionalUSD: number;
+}
+
+export interface UsageSummary {
+  windowMs: number;
+  since: number;
+  until: number;
+  totals: UsageBucket;
+  byAgent: UsageBucket[];
+  byModel: UsageBucket[];
+  byProvider: UsageBucket[];
+  /** Evenly spaced buckets across the window, oldest first, for sparklines. */
+  series: { ts: number; totalTokens: number; costUSD: number; notionalUSD: number }[];
 }
 
 export interface TaskEvent {
@@ -187,7 +251,18 @@ export interface ModelTelemetry {
 }
 
 export function emptyUsage(): UsageMetrics {
-  return { turns: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, costUSD: 0, latencyMs: 0 };
+  return {
+    turns: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    reasoningTokens: 0,
+    totalTokens: 0,
+    costUSD: 0,
+    notionalUSD: 0,
+    latencyMs: 0,
+  };
 }
 
 export function newId(prefix: string): string {

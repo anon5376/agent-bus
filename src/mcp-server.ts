@@ -13,6 +13,9 @@ import {
   MAX_WAIT_MS,
   Message,
   Task,
+  UsageBucket,
+  UsageEvent,
+  UsageSummary,
   brokerAlive,
   brokerCall,
 } from "./protocol.js";
@@ -309,6 +312,61 @@ server.tool(
       validation: validation ?? [],
     });
     return `Submitted ${task.id} round ${task.round}. Reviewer: ${task.reviewerId ?? task.assigner}.`;
+  }),
+);
+
+server.tool(
+  "bus_record_usage",
+  "Report the tokens your last turn consumed. The broker prices them; you do not send a cost. Call it after finishing a turn so swarm spend is attributable per agent instead of vanishing into your own session.",
+  {
+    input_tokens: z.number().int().nonnegative().default(0),
+    output_tokens: z.number().int().nonnegative().default(0),
+    cache_read_tokens: z.number().int().nonnegative().default(0),
+    cache_write_tokens: z.number().int().nonnegative().default(0),
+    reasoning_tokens: z.number().int().nonnegative().default(0),
+    task_id: z.string().optional(),
+    model: z.string().optional(),
+  },
+  async ({ input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens, task_id, model }) =>
+    guarded(async () => {
+      const { recorded, event } = await authCall<{ recorded: boolean; event: UsageEvent | null }>("/usage/record", {
+        inputTokens: input_tokens,
+        outputTokens: output_tokens,
+        cacheReadTokens: cache_read_tokens,
+        cacheWriteTokens: cache_write_tokens,
+        reasoningTokens: reasoning_tokens,
+        taskId: task_id,
+        model,
+      });
+      if (!recorded || !event) return "Nothing recorded — the report totalled zero tokens.";
+      const priced = event.billing === "metered"
+        ? `$${event.costUSD.toFixed(4)}`
+        : `$${event.notionalUSD.toFixed(4)} notional (${event.billing})`;
+      return `Recorded ${event.totalTokens.toLocaleString()} tokens on ${event.model || event.modelId} → ${priced}.`;
+    }),
+);
+
+server.tool(
+  "bus_usage",
+  "Show what the swarm has spent over a trailing window, broken down by agent, model and provider.",
+  {
+    window_hours: z.number().positive().max(2160).default(5),
+  },
+  async ({ window_hours }) => guarded(async () => {
+    const { summary } = await brokerCall<{ summary: UsageSummary }>("/usage/summary", {
+      windowMs: Math.round(window_hours * 3_600_000),
+    });
+    if (!summary.totals.events) return `No usage recorded in the last ${window_hours}h.`;
+    const line = (bucket: UsageBucket) =>
+      `  ${bucket.label.padEnd(24)} ${bucket.totalTokens.toLocaleString().padStart(12)} tok  $${bucket.costUSD.toFixed(4)}` +
+      (bucket.notionalUSD > bucket.costUSD ? ` (+$${(bucket.notionalUSD - bucket.costUSD).toFixed(4)} on plan)` : "");
+    return [
+      `Last ${window_hours}h — ${summary.totals.totalTokens.toLocaleString()} tokens across ${summary.totals.events} turns, $${summary.totals.costUSD.toFixed(4)} metered, $${summary.totals.notionalUSD.toFixed(4)} notional.`,
+      "By agent:",
+      ...summary.byAgent.map(line),
+      "By model:",
+      ...summary.byModel.map(line),
+    ].join("\n");
   }),
 );
 

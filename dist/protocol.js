@@ -11,7 +11,18 @@ export const DEFAULT_BLOCK_MS = Number(process.env.AGENT_BUS_BLOCK_SEC ?? 900) *
 export const MAX_BLOCK_MS = 3_600_000;
 export const STALE_AGENT_MS = 15 * 60_000;
 export function emptyUsage() {
-    return { turns: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0, costUSD: 0, latencyMs: 0 };
+    return {
+        turns: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheWriteTokens: 0,
+        reasoningTokens: 0,
+        totalTokens: 0,
+        costUSD: 0,
+        notionalUSD: 0,
+        latencyMs: 0,
+    };
 }
 export function newId(prefix) {
     return `${prefix}_${randomUUID().replace(/-/g, "").slice(0, 12)}`;

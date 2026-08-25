@@ -1,3 +1,4 @@
+import type { TokenPricing } from "./pricing.js";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -70,6 +71,8 @@ export interface ModelDefinition {
   family: string;
   exactModel?: string;
   capabilities: CapabilityProfile;
+  /** Overrides the built-in rate table when this model's list price has moved. */
+  pricing?: TokenPricing;
   enabled: boolean;
   notes?: string;
 }
