@@ -202,6 +202,37 @@ Real provider verification remains dependent on the installed CLI version, authe
 
 See [`docs/provider-support.md`](docs/provider-support.md) for the support matrix.
 
+## Usage and cost
+
+The broker keeps an append-only ledger of what each agent spends. Callers report tokens
+only; the broker prices them from its own rate table, so a self-declared cost cannot skew
+the numbers.
+
+```
+POST /usage/record     one turn's tokens
+POST /usage/summary    trailing window, by agent / model / provider
+POST /usage/events     raw events
+```
+
+Subscription-plan models bill nothing per call. Their tokens are still priced, into
+`notionalUSD`, so a swarm running on a flat-rate plan still reports what it consumed
+without claiming it cost money.
+
+Agents report with the `bus_record_usage` MCP tool and read totals with `bus_usage`.
+
+See [`docs/usage-ledger.md`](docs/usage-ledger.md).
+
+### Doohickey
+
+[`doohickey/`](doohickey/) is a menu bar app showing quota left and tokens spent across
+Codex, Claude Code, OpenRouter and this broker's ledger. One Swift binary, 764 KB, no
+Electron. It is the only view that shows *which agent* spent what — a swarm run is
+otherwise one undifferentiated pile of tokens in the underlying transcripts.
+
+```bash
+./doohickey/build.sh && open doohickey/Doohickey.app
+```
+
 ## Runtime architecture
 
 ```text

@@ -3,7 +3,7 @@ import { mkdirSync } from "node:fs";
 import { dirname, relative, resolve, sep } from "node:path";
 import type { AgentPermissions, Authority } from "./config.js";
 import type { RoutingDecision } from "./router.js";
-import type { Agent, Message, ModelTelemetry, Run, Task, UsageMetrics } from "./protocol.js";
+import type { Agent, Message, ModelTelemetry, Run, Task, UsageBucket, UsageEvent, UsageMetrics, UsageSummary } from "./protocol.js";
 
 interface IdentityRow {
   id: string;
@@ -24,6 +24,46 @@ function parse<T>(value: string): T {
 
 function stringify(value: unknown): string {
   return JSON.stringify(value);
+}
+
+function round6(value: number): number {
+  return Math.round(value * 1e6) / 1e6;
+}
+
+function emptyBucket(key: string, label: string): UsageBucket {
+  return {
+    key,
+    label,
+    events: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    reasoningTokens: 0,
+    totalTokens: 0,
+    costUSD: 0,
+    notionalUSD: 0,
+  };
+}
+
+function bucketFor(map: Map<string, UsageBucket>, key: string, label: string): UsageBucket {
+  const existing = map.get(key);
+  if (existing) return existing;
+  const created = emptyBucket(key, label);
+  map.set(key, created);
+  return created;
+}
+
+function accumulate(bucket: UsageBucket, event: UsageEvent): void {
+  bucket.events += 1;
+  bucket.inputTokens += event.inputTokens;
+  bucket.outputTokens += event.outputTokens;
+  bucket.cacheReadTokens += event.cacheReadTokens;
+  bucket.cacheWriteTokens += event.cacheWriteTokens;
+  bucket.reasoningTokens += event.reasoningTokens;
+  bucket.totalTokens += event.totalTokens;
+  bucket.costUSD = round6(bucket.costUSD + event.costUSD);
+  bucket.notionalUSD = round6(bucket.notionalUSD + event.notionalUSD);
 }
 
 function average(previous: number, count: number, next: number): number {
@@ -105,6 +145,22 @@ export class StateStore {
         json TEXT NOT NULL,
         updated_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS usage_events (
+        id TEXT PRIMARY KEY,
+        ts INTEGER NOT NULL,
+        agent_id TEXT NOT NULL,
+        task_id TEXT,
+        run_id TEXT,
+        model_id TEXT NOT NULL,
+        model TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        total_tokens INTEGER NOT NULL,
+        cost_usd REAL NOT NULL,
+        notional_usd REAL NOT NULL,
+        json TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS usage_events_ts_idx ON usage_events(ts);
+      CREATE INDEX IF NOT EXISTS usage_events_agent_idx ON usage_events(agent_id, ts);
       CREATE TABLE IF NOT EXISTS telemetry (
         agent_id TEXT PRIMARY KEY,
         json TEXT NOT NULL,
@@ -301,6 +357,89 @@ export class StateStore {
   allUsage(): Record<string, UsageMetrics> {
     const rows = this.db.prepare("SELECT agent_id, json FROM usage").all() as unknown as { agent_id: string; json: string }[];
     return Object.fromEntries(rows.map((row) => [row.agent_id, parse<UsageMetrics>(row.json)]));
+  }
+
+  appendUsageEvent(event: UsageEvent): void {
+    this.db.prepare(`
+      INSERT OR IGNORE INTO usage_events(
+        id, ts, agent_id, task_id, run_id, model_id, model, provider, total_tokens, cost_usd, notional_usd, json
+      ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      event.id,
+      event.ts,
+      event.agentId,
+      event.taskId,
+      event.runId,
+      event.modelId,
+      event.model,
+      event.provider,
+      event.totalTokens,
+      event.costUSD,
+      event.notionalUSD,
+      stringify(event),
+    );
+  }
+
+  usageEvents(sinceTs: number, limit = 20_000): UsageEvent[] {
+    const rows = this.db
+      .prepare("SELECT json FROM usage_events WHERE ts >= ? ORDER BY ts ASC LIMIT ?")
+      .all(sinceTs, limit) as unknown as JsonRow[];
+    return rows.map((row) => parse<UsageEvent>(row.json));
+  }
+
+  /**
+   * Roll the ledger up over a trailing window. Recomputed on demand rather than
+   * maintained incrementally: the event count over any window a human cares about
+   * is small, and a derived-on-read summary can never drift from the events.
+   */
+  usageSummary(windowMs: number, now = Date.now(), bucketCount = 24): UsageSummary {
+    const since = now - windowMs;
+    const events = this.usageEvents(since);
+    const totals = emptyBucket("total", "total");
+    const byAgent = new Map<string, UsageBucket>();
+    const byModel = new Map<string, UsageBucket>();
+    const byProvider = new Map<string, UsageBucket>();
+
+    const width = Math.max(1, Math.floor(windowMs / Math.max(1, bucketCount)));
+    const series = Array.from({ length: bucketCount }, (_, index) => ({
+      ts: since + index * width,
+      totalTokens: 0,
+      costUSD: 0,
+      notionalUSD: 0,
+    }));
+
+    for (const event of events) {
+      accumulate(totals, event);
+      accumulate(bucketFor(byAgent, event.agentId, event.agentId), event);
+      accumulate(bucketFor(byModel, event.modelId || event.model, event.model || event.modelId), event);
+      accumulate(bucketFor(byProvider, event.provider || "unknown", event.provider || "unknown"), event);
+      const slot = Math.min(bucketCount - 1, Math.max(0, Math.floor((event.ts - since) / width)));
+      series[slot].totalTokens += event.totalTokens;
+      series[slot].costUSD = round6(series[slot].costUSD + event.costUSD);
+      series[slot].notionalUSD = round6(series[slot].notionalUSD + event.notionalUSD);
+    }
+
+    const rank = (buckets: Map<string, UsageBucket>) =>
+      [...buckets.values()].sort((a, b) => b.totalTokens - a.totalTokens);
+
+    return {
+      windowMs,
+      since,
+      until: now,
+      totals,
+      byAgent: rank(byAgent),
+      byModel: rank(byModel),
+      byProvider: rank(byProvider),
+      series,
+    };
+  }
+
+  /** Trim the ledger. Rollups in `usage` are unaffected, so lifetime totals survive. */
+  pruneUsageEvents(olderThanTs: number): number {
+    const before = this.db.prepare("SELECT COUNT(*) AS n FROM usage_events").get() as unknown as { n: number };
+    this.db.prepare("DELETE FROM usage_events WHERE ts < ?").run(olderThanTs);
+    const after = this.db.prepare("SELECT COUNT(*) AS n FROM usage_events").get() as unknown as { n: number };
+    return before.n - after.n;
   }
 
   telemetry(): ModelTelemetry[] {

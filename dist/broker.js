@@ -6,10 +6,26 @@ import { DEFAULT_CONFIG_PATH, enabledAgents, loadConfig, resolveAgent } from "./
 import { configDigest, resolvedExecutionConfig } from "./config-transitions.js";
 import { processParentPid, verifiedSupervisorProcess } from "./instance-processes.js";
 import { BUS_HOME, BUS_HOST, BUS_PORT, MAX_WAIT_MS, STALE_AGENT_MS, emptyUsage, newId, } from "./protocol.js";
+import { costFor, findModel } from "./pricing.js";
 import { routeTask, } from "./router.js";
 import { OPERATOR_TOKEN_PATH, createBearerToken, ensurePrivateDirectories, hashToken, readTokenFile, writePrivateToken, } from "./security.js";
 import { StateStore } from "./store.js";
 const APPLICATION_ROOT = resolve(process.env.AGENT_BUS_APPLICATION_ROOT ?? join(dirname(fileURLToPath(import.meta.url)), ".."));
+/** A rolling 5 hours, matching the window the subscription plans reset on. */
+const DEFAULT_USAGE_WINDOW_MS = 5 * 60 * 60 * 1000;
+const MAX_USAGE_WINDOW_MS = 90 * 24 * 60 * 60 * 1000;
+function clampWindow(windowMs) {
+    if (!Number.isFinite(windowMs) || windowMs <= 0)
+        return DEFAULT_USAGE_WINDOW_MS;
+    return Math.min(MAX_USAGE_WINDOW_MS, Math.floor(windowMs));
+}
+function nonNegative(value) {
+    const parsed = Number(value ?? 0);
+    return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 0;
+}
+function round6(value) {
+    return Math.round(value * 1e6) / 1e6;
+}
 class AuthError extends Error {
 }
 class PermissionError extends Error {
@@ -155,6 +171,75 @@ export class BrokerService {
     }
     configIdentity() {
         return { path: this.configPath, digest: configDigest(this.config) };
+    }
+    /**
+     * Fold one increment of token spend into the ledger.
+     *
+     * Everything cost-related is computed here from the configured rate table — the
+     * caller supplies tokens and nothing else that touches money. An agent that
+     * reports an inflated `costUSD` is ignored rather than believed.
+     */
+    recordUsage(input) {
+        const counts = {
+            inputTokens: nonNegative(input.inputTokens),
+            outputTokens: nonNegative(input.outputTokens),
+            cacheReadTokens: nonNegative(input.cacheReadTokens),
+            cacheWriteTokens: nonNegative(input.cacheWriteTokens),
+            reasoningTokens: nonNegative(input.reasoningTokens),
+        };
+        const totalTokens = counts.inputTokens + counts.outputTokens + counts.cacheReadTokens + counts.cacheWriteTokens;
+        // A no-op report is not worth a ledger row; it would only dilute the series.
+        if (totalTokens <= 0)
+            return null;
+        const agent = this.agents.get(input.agentId);
+        const usedAgentModel = input.model === undefined;
+        const modelName = input.model ?? agent?.model ?? "";
+        const definition = findModel(this.config, modelName);
+        const cost = costFor(definition, modelName, counts);
+        // The agent's own provider/harness only describe the agent's configured model.
+        // When a caller names some other model that the catalogue does not know, inheriting
+        // them would file OpenAI traffic under whatever the agent happens to run on.
+        const fallbackProvider = usedAgentModel ? agent?.provider ?? "unknown" : "unknown";
+        const fallbackHarness = usedAgentModel ? agent?.harness ?? "unknown" : "unknown";
+        const event = {
+            id: newId("use"),
+            ts: Date.now(),
+            agentId: input.agentId,
+            taskId: input.taskId ?? null,
+            runId: input.runId ?? null,
+            modelId: definition?.id ?? modelName,
+            model: definition?.exactModel ?? modelName,
+            provider: definition?.provider ?? fallbackProvider,
+            harness: definition?.harness ?? fallbackHarness,
+            ...counts,
+            totalTokens,
+            costUSD: cost.costUSD,
+            notionalUSD: cost.notionalUSD,
+            billing: cost.billing,
+            pricingSource: cost.pricingSource,
+            latencyMs: nonNegative(input.latencyMs),
+            source: input.source,
+        };
+        this.store.appendUsageEvent(event);
+        const previous = this.usageByAgent.get(input.agentId) ?? emptyUsage();
+        const rollup = {
+            turns: previous.turns + 1,
+            inputTokens: previous.inputTokens + counts.inputTokens,
+            outputTokens: previous.outputTokens + counts.outputTokens,
+            cacheReadTokens: previous.cacheReadTokens + counts.cacheReadTokens,
+            cacheWriteTokens: previous.cacheWriteTokens + counts.cacheWriteTokens,
+            reasoningTokens: previous.reasoningTokens + counts.reasoningTokens,
+            totalTokens: previous.totalTokens + totalTokens,
+            costUSD: round6(previous.costUSD + cost.costUSD),
+            notionalUSD: round6(previous.notionalUSD + cost.notionalUSD),
+            latencyMs: Math.max(previous.latencyMs, event.latencyMs),
+        };
+        this.usageByAgent.set(input.agentId, rollup);
+        this.store.saveUsage(input.agentId, rollup);
+        // Onto bus.jsonl, so anything tailing the log sees spend in the same stream as
+        // the messages and kills it already follows.
+        this.audit("usage_event", event);
+        return event;
     }
     audit(kind, data) {
         this.bumpStateRevision();
@@ -733,20 +818,66 @@ export class BrokerService {
                     throw new PermissionError(`only ${identity.id} may resolve its execution configuration`);
                 return { agent: resolvedExecutionConfig(this.config, id), configIdentity: this.configIdentity() };
             }
+            // Legacy shape: the agent reports its *cumulative* totals for the session. We
+            // keep accepting it, but translate the growth since last time into a ledger
+            // entry so old harnesses show up in the windowed views like everyone else.
             case "/usage": {
                 const identity = this.caller(body);
                 const previous = this.usageByAgent.get(identity.id) ?? emptyUsage();
-                const usage = {
-                    turns: Math.max(previous.turns, Number(body.turns ?? previous.turns) || 0),
-                    inputTokens: Math.max(previous.inputTokens, Number(body.inputTokens ?? previous.inputTokens) || 0),
-                    outputTokens: Math.max(previous.outputTokens, Number(body.outputTokens ?? previous.outputTokens) || 0),
-                    totalTokens: Math.max(previous.totalTokens, Number(body.totalTokens ?? body.tokens ?? previous.totalTokens) || 0),
-                    costUSD: Math.max(previous.costUSD, Number(body.costUSD ?? previous.costUSD) || 0),
-                    latencyMs: Math.max(previous.latencyMs, Number(body.latencyMs ?? previous.latencyMs) || 0),
-                };
-                this.usageByAgent.set(identity.id, usage);
-                this.store.saveUsage(identity.id, usage);
-                return { ok: true };
+                const reportedInput = Number(body.inputTokens ?? 0) || 0;
+                const reportedOutput = Number(body.outputTokens ?? 0) || 0;
+                const reportedTotal = Number(body.totalTokens ?? body.tokens ?? 0) || 0;
+                const event = this.recordUsage({
+                    agentId: identity.id,
+                    model: body.model ? String(body.model) : undefined,
+                    taskId: body.taskId ? String(body.taskId) : null,
+                    inputTokens: Math.max(0, reportedInput - previous.inputTokens),
+                    outputTokens: Math.max(0, reportedOutput - previous.outputTokens),
+                    // Only a bare total was sent: attribute the remainder to input rather than
+                    // dropping it, which is the conservative direction for a cost estimate.
+                    cacheReadTokens: reportedInput || reportedOutput
+                        ? 0
+                        : Math.max(0, reportedTotal - previous.totalTokens),
+                    latencyMs: Number(body.latencyMs ?? 0) || 0,
+                    source: "agent",
+                });
+                return { ok: true, recorded: Boolean(event), usage: this.usageByAgent.get(identity.id) ?? emptyUsage() };
+            }
+            // Preferred shape: one turn's tokens, added to the ledger as-is.
+            case "/usage/record": {
+                const identity = this.caller(body);
+                const target = String(body.agentId ?? identity.id);
+                if (identity.authority !== "operator" && target !== identity.id) {
+                    throw new PermissionError(`only ${identity.id} may record its own usage`);
+                }
+                const event = this.recordUsage({
+                    agentId: target,
+                    taskId: body.taskId ? String(body.taskId) : null,
+                    runId: body.runId ? String(body.runId) : null,
+                    model: body.model ? String(body.model) : undefined,
+                    inputTokens: Number(body.inputTokens ?? 0),
+                    outputTokens: Number(body.outputTokens ?? 0),
+                    cacheReadTokens: Number(body.cacheReadTokens ?? body.cachedInputTokens ?? 0),
+                    cacheWriteTokens: Number(body.cacheWriteTokens ?? 0),
+                    reasoningTokens: Number(body.reasoningTokens ?? 0),
+                    latencyMs: Number(body.latencyMs ?? 0),
+                    source: identity.authority === "operator" && target !== identity.id ? "operator" : "agent",
+                });
+                return { ok: true, recorded: Boolean(event), event };
+            }
+            case "/usage/summary": {
+                this.caller(body);
+                const windowMs = clampWindow(Number(body.windowMs ?? 0) || DEFAULT_USAGE_WINDOW_MS);
+                const buckets = Math.max(1, Math.min(240, Number(body.buckets ?? 24) || 24));
+                const summary = this.store.usageSummary(windowMs, Date.now(), buckets);
+                return { summary, lifetime: this.store.allUsage() };
+            }
+            case "/usage/events": {
+                this.caller(body);
+                const windowMs = clampWindow(Number(body.windowMs ?? 0) || DEFAULT_USAGE_WINDOW_MS);
+                const limit = Math.max(1, Math.min(5000, Number(body.limit ?? 500) || 500));
+                const events = this.store.usageEvents(Date.now() - windowMs).slice(-limit);
+                return { events };
             }
             case "/roster":
                 return { roster: this.roster() };
@@ -928,14 +1059,33 @@ export class BrokerService {
                     throw new ConflictError(`task ${task.id} is already ${task.state}`);
                 task.result = resultPayload(body);
                 task.state = "submitted";
+                const latencyMs = Date.now() - (task.history.find((event) => event.kind === "assigned")?.ts ?? task.createdAt);
+                // Tokens quoted on submit are the worker's own count for this round. Price
+                // them here so a finished task carries a real cost, not a self-declared one.
+                const usageEvent = this.recordUsage({
+                    agentId: identity.id,
+                    taskId: task.id,
+                    runId: task.runId,
+                    model: task.routing?.selectedModel ?? undefined,
+                    inputTokens: Number(body.inputTokens ?? 0),
+                    outputTokens: Number(body.outputTokens ?? 0),
+                    cacheReadTokens: Number(body.cacheReadTokens ?? body.cachedInputTokens ?? 0),
+                    cacheWriteTokens: Number(body.cacheWriteTokens ?? 0),
+                    reasoningTokens: Number(body.reasoningTokens ?? 0),
+                    latencyMs,
+                    source: "task_submit",
+                });
                 task.usage = {
-                    ...task.usage,
-                    totalTokens: Number(body.totalTokens ?? task.usage.totalTokens) || task.usage.totalTokens,
-                    inputTokens: Number(body.inputTokens ?? task.usage.inputTokens) || task.usage.inputTokens,
-                    outputTokens: Number(body.outputTokens ?? task.usage.outputTokens) || task.usage.outputTokens,
-                    costUSD: Number(body.costUSD ?? task.usage.costUSD) || task.usage.costUSD,
-                    latencyMs: Date.now() - (task.history.find((event) => event.kind === "assigned")?.ts ?? task.createdAt),
                     turns: Math.max(1, task.usage.turns + 1),
+                    inputTokens: task.usage.inputTokens + (usageEvent?.inputTokens ?? 0),
+                    outputTokens: task.usage.outputTokens + (usageEvent?.outputTokens ?? 0),
+                    cacheReadTokens: task.usage.cacheReadTokens + (usageEvent?.cacheReadTokens ?? 0),
+                    cacheWriteTokens: task.usage.cacheWriteTokens + (usageEvent?.cacheWriteTokens ?? 0),
+                    reasoningTokens: task.usage.reasoningTokens + (usageEvent?.reasoningTokens ?? 0),
+                    totalTokens: task.usage.totalTokens + (usageEvent?.totalTokens ?? (Number(body.totalTokens ?? 0) || 0)),
+                    costUSD: round6(task.usage.costUSD + (usageEvent?.costUSD ?? 0)),
+                    notionalUSD: round6(task.usage.notionalUSD + (usageEvent?.notionalUSD ?? 0)),
+                    latencyMs,
                 };
                 this.addEvent(task, identity.id, "submitted", "submitted", task.result.summary, { changedFiles: task.result.changedFiles, validation: task.result.validation });
                 this.touch(identity.id, "idle");
