@@ -417,8 +417,8 @@ async function handleApi(req, res, pathname, params, service, sessions, operator
             running = true;
             try {
                 pruneStaleSupervisors(service);
-                const snapshot = await service.handle("/snapshot", { sinceSeq: since });
-                since = Number(snapshot.seq ?? since);
+                const snapshot = service.snapshot(since);
+                since = snapshot.seq;
                 if (!closed)
                     res.write(`event: snapshot\ndata: ${JSON.stringify({ ...snapshot, incremental: true })}\n\n`);
             }
@@ -441,7 +441,7 @@ async function handleApi(req, res, pathname, params, service, sessions, operator
     }
     if (pathname === "/api/state" && req.method === "GET") {
         pruneStaleSupervisors(service);
-        return sendJson(res, 200, await service.handle("/snapshot", { sinceSeq: 0 }));
+        return sendJson(res, 200, service.snapshot(0));
     }
     if (pathname === "/api/catalog" && req.method === "GET")
         return sendJson(res, 200, await service.handle("/catalog", {}));

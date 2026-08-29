@@ -15,6 +15,16 @@ import {
   Task,
   brokerAlive,
   brokerCall,
+  parsePeekResponse,
+  parseRegisterResponse,
+  parseRosterResponse,
+  parseRoutePreview,
+  parseSendResponse,
+  parseStatusResponse,
+  parseTaskEnvelope,
+  parseTaskGetResponse,
+  parseTaskListResponse,
+  parseWaitResponse,
 } from "./protocol.js";
 
 const AGENT_ID = process.env.AGENT_ID;
@@ -44,12 +54,12 @@ let registered = false;
 async function ensureRegistered(): Promise<void> {
   if (registered) return;
   await ensureBroker();
-  await brokerCall("/register", { token: AGENT_TOKEN, id: AGENT_ID });
+  await brokerCall("/register", { token: AGENT_TOKEN, id: AGENT_ID }, parseRegisterResponse);
   registered = true;
 }
 
-function authCall<T = any>(path: string, payload: object, timeoutMs?: number): Promise<T> {
-  return brokerCall<T>(path, { ...payload, token: AGENT_TOKEN }, timeoutMs);
+function authCall<T>(path: string, payload: object, parse: (value: unknown) => T, timeoutMs?: number): Promise<T> {
+  return brokerCall(path, { ...payload, token: AGENT_TOKEN }, parse, timeoutMs);
 }
 
 function text(value: string) {
@@ -99,7 +109,7 @@ function renderTask(task: Task): string {
 }
 
 async function inferredParentTaskId(): Promise<string | null> {
-  const { roster } = await brokerCall<{ roster: { id: string; currentTaskId?: string | null }[] }>("/roster", {});
+  const { roster } = await brokerCall("/roster", {}, parseRosterResponse);
   return roster.find((agent) => agent.id === AGENT_ID)?.currentTaskId ?? null;
 }
 
@@ -130,7 +140,7 @@ server.tool(
   "Show your broker-enforced identity, authority, permissions, model/provider/harness and the live roster.",
   {},
   async () => guarded(async () => {
-    const { roster } = await brokerCall<{ roster: any[] }>("/roster", {});
+    const { roster } = await brokerCall("/roster", {}, parseRosterResponse);
     const me = roster.find((agent) => agent.id === AGENT_ID);
     const lines = roster.map((agent) =>
       `  ${agent.id === AGENT_ID ? "*" : " "} ${agent.id} (${agent.role}; ${agent.family}/${agent.model} via ${agent.harness}) — ${agent.status}` +
@@ -158,8 +168,8 @@ server.tool(
     refs: z.array(contextRefSchema).optional(),
   },
   async ({ to, subject, body, type, task_id, refs }) => guarded(async () => {
-    const response = await authCall<any>("/send", { to, subject, body, type, taskId: task_id, refs: refs ?? [] });
-    const delivered = response.delivered?.map((item: any) => item.to).join(", ") || "nobody";
+    const response = await authCall("/send", { to, subject, body, type, taskId: task_id, refs: refs ?? [] }, parseSendResponse);
+    const delivered = response.delivered.map((item) => item.to).join(", ") || "nobody";
     const unknown = response.unknownRecipients?.length ? `; unknown: ${response.unknownRecipients.join(", ")}` : "";
     return `Delivered to ${delivered}${unknown}.`;
   }),
@@ -177,13 +187,14 @@ server.tool(
     const deadline = Date.now() + totalMs;
     while (Date.now() < deadline) {
       const chunk = Math.min(MAX_WAIT_MS, deadline - Date.now());
-      const response = await authCall<{ messages: Message[]; timedOut: boolean }>(
+      const response = await authCall(
         "/wait",
         { timeoutMs: chunk, reason: reason ?? "" },
+        parseWaitResponse,
         chunk + 15_000,
       );
       if (response.messages.length) {
-        await authCall("/status", { status: "idle" });
+        await authCall("/status", { status: "idle" }, parseStatusResponse);
         return renderMessages(response.messages, false);
       }
     }
@@ -196,7 +207,7 @@ server.tool(
   "Read and drain your inbox without blocking.",
   {},
   async () => guarded(async () => {
-    const response = await authCall<{ messages: Message[] }>("/peek", {});
+    const response = await authCall("/peek", {}, parsePeekResponse);
     return renderMessages(response.messages, false);
   }),
 );
@@ -218,7 +229,7 @@ server.tool(
     implementation_family: z.string().optional(),
   },
   async (input) => guarded(async () => {
-    const { decision } = await brokerCall<any>("/route/preview", {
+    const { decision } = await brokerCall("/route/preview", {
       role: input.role,
       complexity: input.complexity,
       contextTokens: input.context_tokens,
@@ -230,11 +241,11 @@ server.tool(
       exactModel: input.exact_model,
       exactAgent: input.exact_agent,
       implementationFamily: input.implementation_family,
-    });
+    }, parseRoutePreview);
     return [
       decision.reason,
       "",
-      ...decision.candidates.map((candidate: any) =>
+      ...decision.candidates.map((candidate) =>
         `${candidate.eligible ? "ELIGIBLE" : "REJECTED"} ${candidate.agentId} score=${candidate.score.toFixed(3)}${candidate.rejectedBy.length ? ` — ${candidate.rejectedBy.join("; ")}` : ""}`,
       ),
     ].join("\n");
@@ -265,7 +276,7 @@ server.tool(
   },
   async (input) => guarded(async () => {
     const parentTaskId = input.parent_task_id ?? await inferredParentTaskId();
-    const { task } = await authCall<{ task: Task }>("/task/create", {
+    const { task } = await authCall("/task/create", {
       assignee: input.to,
       title: input.title,
       brief: input.brief,
@@ -283,7 +294,7 @@ server.tool(
       families: input.families ?? [],
       providers: input.providers ?? [],
       exactModel: input.exact_model,
-    });
+    }, parseTaskEnvelope);
     return `${renderTask(task)}\nRouting: ${task.routing?.reason ?? "not available"}.`;
   }),
 );
@@ -300,14 +311,14 @@ server.tool(
     validation: z.array(validationObservationSchema).optional(),
   },
   async ({ task_id, summary, details, changed_files, artifacts, validation }) => guarded(async () => {
-    const { task } = await authCall<{ task: Task }>("/task/submit", {
+    const { task } = await authCall("/task/submit", {
       taskId: task_id,
       summary,
       details: details ?? "",
       changedFiles: changed_files ?? [],
       artifacts: artifacts ?? [],
       validation: validation ?? [],
-    });
+    }, parseTaskEnvelope);
     return `Submitted ${task.id} round ${task.round}. Reviewer: ${task.reviewerId ?? task.assigner}.`;
   }),
 );
@@ -321,7 +332,7 @@ server.tool(
     feedback: z.string(),
   },
   async ({ task_id, accepted, feedback }) => guarded(async () => {
-    const { task } = await authCall<{ task: Task }>("/task/review", { taskId: task_id, accepted, feedback });
+    const { task } = await authCall("/task/review", { taskId: task_id, accepted, feedback }, parseTaskEnvelope);
     return accepted ? `Accepted ${task.id}.` : `Requested changes on ${task.id}; round ${task.round}.`;
   }),
 );
@@ -335,11 +346,11 @@ server.tool(
     run_id: z.string().optional(),
   },
   async ({ mine_only, include_closed, run_id }) => guarded(async () => {
-    const { tasks } = await brokerCall<{ tasks: Task[] }>("/task/list", {
+    const { tasks } = await brokerCall("/task/list", {
       agent: mine_only ? AGENT_ID : null,
       openOnly: !include_closed,
       runId: run_id,
-    });
+    }, parseTaskListResponse);
     return tasks.length ? tasks.map(renderTask).join("\n") : "No matching tasks.";
   }),
 );
@@ -349,7 +360,7 @@ server.tool(
   "Show one task's graph links, scoped context, routing rationale, result, review and complete retry history.",
   { task_id: z.string() },
   async ({ task_id }) => guarded(async () => {
-    const { task, routingHistory } = await brokerCall<{ task: Task; routingHistory: any[] }>("/task/get", { taskId: task_id });
+    const { task, routingHistory } = await brokerCall("/task/get", { taskId: task_id }, parseTaskGetResponse);
     const history = task.history.map((event) =>
       `  ${new Date(event.ts).toISOString()} ${event.actor} ${event.kind} → ${event.state}\n    ${event.note.replace(/\n/g, "\n    ")}`,
     ).join("\n");

@@ -2,6 +2,7 @@ import "./entry.ts";
 import { Component, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { createRoot } from "react-dom/client";
+import type { BusSnapshot, Message, RosterEntry as Agent, Run, Task } from "../../src/protocol.ts";
 import "./styles.css";
 
 const bootMonitor=()=>((window as any).__AGENT_BUS_BOOT__ as {checkpoint?:(number:number,detail?:unknown)=>void;fail?:(title:string,detail:unknown)=>void;diagnose?:(title:string,detail:unknown)=>void;record?:(kind:string,detail:unknown)=>void}|undefined);
@@ -9,17 +10,12 @@ const checkpoint=(number:number,detail?:unknown)=>bootMonitor()?.checkpoint?.(nu
 checkpoint(3,"React application module evaluated");
 checkpoint(4,"React and react-dom/client imports resolved");
 
-type Usage = { turns:number; inputTokens:number; outputTokens:number; totalTokens:number; costUSD:number; latencyMs:number };
-type Agent = { id:string; role:string; model:string; family:string; provider:string; harness:string; description:string; status:string; currentTaskId:string|null; pendingMessages:number; lastSeenSecondsAgo:number; stalled:boolean; supervisorPid:number|null; workdir?:string|null; usage:Usage; permissions:any };
-type Run = { id:string; goal:string; projectRoot:string; status:string; rootTaskId:string|null; createdAt:number; updatedAt:number };
-type Task = { id:string; runId:string|null; parentTaskId:string|null; childTaskIds:string[]; dependencyIds:string[]; title:string; brief:string; assignee:string; assigner:string; role:string; complexity:number; state:string; round:number; attempts:number; maxRetries:number; depth:number; updatedAt:number; routing?:any; result?:any; history:any[]; usage:Usage };
-type Message = { id:string; seq:number; ts:number; from:string; to:string; type:string; subject:string; body:string; taskId:string|null };
-type Snapshot = { roster:Agent[]; tasks:Task[]; runs:Run[]; messages:Message[]; seq:number; telemetry?:any[]; pathLeases:any[] };
+type Snapshot = BusSnapshot;
 type Catalog = { providers:Record<string,any>; harnesses:Record<string,any>; models:Record<string,any>; roles:Record<string,any>; agents:Record<string,any>; capabilityNotice:string };
 type Project = { path:string; name:string; createdAt:number; lastUsedAt:number };
 type ProviderStatus = { id:string; displayName:string; configured:boolean; cliFound:boolean; authKind:string; authSource:string; subscriptionBacked:boolean; liveVerification:string; harnesses:any[] };
 
-const empty: Snapshot = { roster:[], tasks:[], runs:[], messages:[], seq:0, pathLeases:[] };
+const empty: Snapshot = { roster:[], tasks:[], runs:[], waiting:[], telemetry:[], pathLeases:[], revision:0, configIdentity:{path:null,digest:""}, messages:[], seq:0, brokerPid:0 };
 
 async function api<T=any>(path:string, init:RequestInit={}):Promise<T>{
   const res=await fetch(path,{credentials:"same-origin",headers:{"content-type":"application/json",...(init.headers||{})},...init});
@@ -102,7 +98,7 @@ function App(){
   </div>;
 }
 
-function mergeSnapshot(prev:Snapshot,n:any):Snapshot{if(!n.incremental)return n;const map=new Map(prev.messages.map(m=>[m.id,m]));for(const m of n.messages||[])map.set(m.id,m);return {...prev,...n,messages:[...map.values()].sort((a,b)=>a.seq-b.seq).slice(-5000)}}
+function mergeSnapshot(prev:Snapshot,n:BusSnapshot & {incremental?:boolean}):Snapshot{if(!n.incremental)return n;const map=new Map(prev.messages.map(m=>[m.id,m]));for(const m of n.messages||[])map.set(m.id,m);return {...prev,...n,messages:[...map.values()].sort((a,b)=>a.seq-b.seq).slice(-5000)}}
 function Section({title,action,children}:{title:string;action?:any;children:any}){return <section><div className="section-head"><span>{title}</span>{action}</div><div className="stack">{children}</div></section>}
 function Panel({title,badge,children}:{title:string;badge:number;children:any}){return <section className="panel"><div className="panel-head"><span>{title}</span><b>{badge}</b></div><div className="scroll">{children||<div className="empty">Nothing here yet.</div>}</div></section>}
 function Metric({label,value,detail}:{label:string;value:string;detail:string}){return <div className="metric"><span>{label}</span><b>{value}</b><small>{detail}</small></div>}

@@ -13,6 +13,8 @@ import {
   Message,
   Run,
   Task,
+  parseBusState,
+  parseStateWaitResponse,
 } from "./protocol.js";
 import {
   OPERATOR_TOKEN_PATH,
@@ -38,14 +40,6 @@ export class OperatorControlError extends Error {
     super(message);
     this.name = "OperatorControlError";
   }
-}
-
-interface OperatorState {
-  revision?: number;
-  configIdentity?: { path?: string | null; digest?: string };
-  roster?: Array<Record<string, unknown>>;
-  tasks?: Task[];
-  runs?: Run[];
 }
 
 interface InstanceProbe {
@@ -171,7 +165,7 @@ export class OperatorControl {
         ...(probe.reason ? { reason: probe.reason } : {}),
       };
     }
-    let state = await this.call<OperatorState>("/state");
+    let state = parseBusState(await this.call("/state"));
     let pruned = false;
     for (const entry of state.roster ?? []) {
       const agentId = String(entry.id ?? "");
@@ -179,7 +173,7 @@ export class OperatorControl {
       if (!agentId || !Number.isInteger(pid) || pid <= 0) continue;
       if (await this.clearStaleSupervisor(agentId, pid)) pruned = true;
     }
-    if (pruned) state = await this.call<OperatorState>("/state");
+    if (pruned) state = parseBusState(await this.call("/state"));
     return { ok: true, running: true, occupied: true, health: probe.health, ...state };
   }
 
@@ -217,7 +211,7 @@ export class OperatorControl {
   async startAgent(agentId: string, projectRootValue: unknown): Promise<Record<string, unknown>> {
     await this.ensureRunning();
     const projectRoot = validProjectRoot(projectRootValue);
-    const state = await this.call<OperatorState>("/state");
+    const state = parseBusState(await this.call("/state"));
     const live = (state.roster ?? []).find((entry) => entry.id === agentId && Number(entry.supervisorPid) > 0);
     if (live) {
       const pid = Number(live.supervisorPid);
@@ -239,12 +233,12 @@ export class OperatorControl {
     const deadline = Date.now() + 8_000;
     let revision = Number(state.revision ?? 0);
     while (Date.now() < deadline) {
-      const waited = await this.call<{ revision: number }>("/state/wait", {
+      const waited = parseStateWaitResponse(await this.call("/state/wait", {
         sinceRevision: revision,
         timeoutMs: Math.min(1_000, deadline - Date.now()),
-      });
+      }));
       revision = waited.revision;
-      const next = await this.call<OperatorState>("/state");
+      const next = parseBusState(await this.call("/state"));
       const registered = (next.roster ?? []).find((entry) => entry.id === agentId && Number(entry.supervisorPid) > 0);
       if (registered) return { ok: true, agentId, started: true, pid: Number(registered.supervisorPid), projectRoot };
     }
@@ -379,7 +373,7 @@ export class OperatorControl {
     await this.ensureRunning();
     const timeoutMs = Math.min(Math.max(1, Number(input.timeoutMs ?? MAX_WAIT_MS)), MAX_WAIT_MS);
     const deadline = Date.now() + timeoutMs;
-    let state = await this.call<OperatorState>("/state");
+    let state = parseBusState(await this.call("/state"));
     let revision = Number(state.revision ?? 0);
     for (;;) {
       if (input.taskId) {
@@ -400,16 +394,16 @@ export class OperatorControl {
       // /peek updates operator presence and therefore the broker revision. Absorb
       // that self-generated revision before blocking so this remains a true
       // notification wait rather than a polling loop.
-      state = await this.call<OperatorState>("/state");
+      state = parseBusState(await this.call("/state"));
       revision = Math.max(revision, Number(state.revision ?? 0));
       const remaining = deadline - Date.now();
       if (remaining <= 0) throw new OperatorControlError("TIMEOUT", `timed out waiting for ${input.taskId ?? input.runId}`);
-      const waited = await this.call<{ revision: number; changed: boolean }>("/state/wait", {
+      const waited = parseStateWaitResponse(await this.call("/state/wait", {
         sinceRevision: revision,
         timeoutMs: Math.min(remaining, MAX_WAIT_MS),
-      });
+      }));
       revision = waited.revision;
-      state = await this.call<OperatorState>("/state");
+      state = parseBusState(await this.call("/state"));
       revision = Math.max(revision, Number(state.revision ?? 0));
     }
   }

@@ -4,7 +4,7 @@ import { ownedAgentBusPids, verifiedSupervisorProcess } from "./instance-process
 import { APPLICATION_ROOT, EXPECTED_BUILD_ID, ensureAgentBusRunning, stopAgentBusInstance } from "./lifecycle.js";
 import { fetchHealth, listenerPids } from "./process-management.js";
 import { PRODUCT_NAME, PRODUCT_PROTOCOL_VERSION } from "./product-runtime.js";
-import { BUS_HOME, BUS_PORT, BUS_URL, MAX_WAIT_MS, } from "./protocol.js";
+import { BUS_HOME, BUS_PORT, BUS_URL, MAX_WAIT_MS, parseBusState, parseStateWaitResponse, } from "./protocol.js";
 import { OPERATOR_TOKEN_PATH, agentTokenPath, readTokenFile, writePrivateToken, } from "./security.js";
 import { launchSupervisor } from "./supervisor-launch.js";
 export class OperatorControlError extends Error {
@@ -131,7 +131,7 @@ export class OperatorControl {
                 ...(probe.reason ? { reason: probe.reason } : {}),
             };
         }
-        let state = await this.call("/state");
+        let state = parseBusState(await this.call("/state"));
         let pruned = false;
         for (const entry of state.roster ?? []) {
             const agentId = String(entry.id ?? "");
@@ -142,7 +142,7 @@ export class OperatorControl {
                 pruned = true;
         }
         if (pruned)
-            state = await this.call("/state");
+            state = parseBusState(await this.call("/state"));
         return { ok: true, running: true, occupied: true, health: probe.health, ...state };
     }
     async catalog() {
@@ -182,7 +182,7 @@ export class OperatorControl {
     async startAgent(agentId, projectRootValue) {
         await this.ensureRunning();
         const projectRoot = validProjectRoot(projectRootValue);
-        const state = await this.call("/state");
+        const state = parseBusState(await this.call("/state"));
         const live = (state.roster ?? []).find((entry) => entry.id === agentId && Number(entry.supervisorPid) > 0);
         if (live) {
             const pid = Number(live.supervisorPid);
@@ -205,12 +205,12 @@ export class OperatorControl {
         const deadline = Date.now() + 8_000;
         let revision = Number(state.revision ?? 0);
         while (Date.now() < deadline) {
-            const waited = await this.call("/state/wait", {
+            const waited = parseStateWaitResponse(await this.call("/state/wait", {
                 sinceRevision: revision,
                 timeoutMs: Math.min(1_000, deadline - Date.now()),
-            });
+            }));
             revision = waited.revision;
-            const next = await this.call("/state");
+            const next = parseBusState(await this.call("/state"));
             const registered = (next.roster ?? []).find((entry) => entry.id === agentId && Number(entry.supervisorPid) > 0);
             if (registered)
                 return { ok: true, agentId, started: true, pid: Number(registered.supervisorPid), projectRoot };
@@ -307,7 +307,7 @@ export class OperatorControl {
         await this.ensureRunning();
         const timeoutMs = Math.min(Math.max(1, Number(input.timeoutMs ?? MAX_WAIT_MS)), MAX_WAIT_MS);
         const deadline = Date.now() + timeoutMs;
-        let state = await this.call("/state");
+        let state = parseBusState(await this.call("/state"));
         let revision = Number(state.revision ?? 0);
         for (;;) {
             if (input.taskId) {
@@ -328,17 +328,17 @@ export class OperatorControl {
             // /peek updates operator presence and therefore the broker revision. Absorb
             // that self-generated revision before blocking so this remains a true
             // notification wait rather than a polling loop.
-            state = await this.call("/state");
+            state = parseBusState(await this.call("/state"));
             revision = Math.max(revision, Number(state.revision ?? 0));
             const remaining = deadline - Date.now();
             if (remaining <= 0)
                 throw new OperatorControlError("TIMEOUT", `timed out waiting for ${input.taskId ?? input.runId}`);
-            const waited = await this.call("/state/wait", {
+            const waited = parseStateWaitResponse(await this.call("/state/wait", {
                 sinceRevision: revision,
                 timeoutMs: Math.min(remaining, MAX_WAIT_MS),
-            });
+            }));
             revision = waited.revision;
-            state = await this.call("/state");
+            state = parseBusState(await this.call("/state"));
             revision = Math.max(revision, Number(state.revision ?? 0));
         }
     }

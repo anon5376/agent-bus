@@ -3,7 +3,7 @@ import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getHarnessAdapter } from "./adapters.js";
-import { BUS_HOME, MAX_WAIT_MS, brokerAlive, brokerCall, } from "./protocol.js";
+import { BUS_HOME, MAX_WAIT_MS, brokerAlive, brokerCall, parseExecutionConfig, parseOkResponse, parsePresenceResponse, parseRegisterResponse, parseStatusResponse, parseTaskEnvelope, parseWaitResponse, } from "./protocol.js";
 import { agentTokenPath, readTokenFile } from "./security.js";
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const MCP_SERVER = join(ROOT, "dist", "mcp-server.js");
@@ -181,7 +181,7 @@ async function reportPresence(token, agent, workdir, childPid) {
         childPid,
         workdir,
         cli: agent.harnessDefinition.id,
-    }).catch(() => { });
+    }, parsePresenceResponse).catch(() => { });
 }
 export async function supervise(agentId, workdir) {
     mkdirSync(LOG_DIR, { recursive: true });
@@ -193,14 +193,14 @@ export async function supervise(agentId, workdir) {
     if (!token) {
         throw new Error(`no token for ${agentId}; provision it explicitly with: agent-bus provision ${agentId}`);
     }
-    const preflight = await brokerCall("/agent/execution-config", { token, id: agentId });
+    const preflight = await brokerCall("/agent/execution-config", { token, id: agentId }, parseExecutionConfig);
     if (!preflight.agent.enabled)
         throw new Error(`agent ${agentId} is disabled in the running broker configuration`);
-    await brokerCall("/register", { token, id: agentId, pid: process.pid, workdir, cli: preflight.agent.harnessDefinition.id });
+    await brokerCall("/register", { token, id: agentId, pid: process.pid, workdir, cli: preflight.agent.harnessDefinition.id }, parseRegisterResponse);
     // Registration establishes verified live-supervisor ownership. Resolve once more
     // from the broker so any edit that raced startup is either rejected by the
     // config-transition guard or reflected in the execution config used here.
-    const resolved = await brokerCall("/agent/execution-config", { token, id: agentId });
+    const resolved = await brokerCall("/agent/execution-config", { token, id: agentId }, parseExecutionConfig);
     const agent = resolved.agent;
     if (!agent.enabled)
         throw new Error(`agent ${agentId} was disabled while the supervisor was starting`);
@@ -214,10 +214,10 @@ export async function supervise(agentId, workdir) {
     catch { /* best effort */ }
     log(agentId, `supervising ${agent.id} via ${agent.harnessDefinition.id} in ${workdir}`);
     for (;;) {
-        await brokerCall("/status", { token, status: "waiting" });
-        const response = await brokerCall("/wait", { token, timeoutMs: MAX_WAIT_MS, reason: "supervisor holds the wait" }, MAX_WAIT_MS + 15_000).catch((error) => {
+        await brokerCall("/status", { token, status: "waiting" }, parseStatusResponse);
+        const response = await brokerCall("/wait", { token, timeoutMs: MAX_WAIT_MS, reason: "supervisor holds the wait" }, parseWaitResponse, MAX_WAIT_MS + 15_000).catch((error) => {
             log(agentId, `broker wait failed: ${error.message}`);
-            return { messages: [] };
+            return { messages: [], timedOut: true };
         });
         if (!response.messages.length)
             continue;
@@ -228,10 +228,10 @@ export async function supervise(agentId, workdir) {
         const relevantTasks = taskMessages(response.messages).filter((message) => !message.subject.startsWith("[CANCELLED"));
         for (const message of relevantTasks) {
             if (message.taskId && (message.type === "task" || message.subject.startsWith("[RETRY") || message.subject.startsWith("[REROUTED"))) {
-                await brokerCall("/task/start", { token, taskId: message.taskId }).catch(() => { });
+                await brokerCall("/task/start", { token, taskId: message.taskId }, parseTaskEnvelope).catch(() => { });
             }
         }
-        await brokerCall("/status", { token, status: "working" });
+        await brokerCall("/status", { token, status: "working" }, parseStatusResponse);
         const prompt = buildSupervisorPrompt(response.messages, agent);
         const context = {
             agent,
@@ -258,7 +258,7 @@ export async function supervise(agentId, workdir) {
             session.sessionId = normalized.sessionId;
         writeSession(agentId, session);
         appendTranscript(agent, session.turns, response.messages, normalized, processResult);
-        await brokerCall("/usage", { token, ...session }).catch(() => { });
+        await brokerCall("/usage", { token, ...session }, parseOkResponse).catch(() => { });
         const failed = processResult.code !== 0 || processResult.timedOut || normalized.malformed;
         if (failed) {
             consecutiveFailures += 1;
@@ -276,7 +276,7 @@ export async function supervise(agentId, workdir) {
                     error,
                     exitCode: processResult.code,
                     malformed: normalized.malformed,
-                }).catch((brokerError) => log(agentId, `failure report rejected: ${brokerError.message}`));
+                }, parseTaskEnvelope).catch((brokerError) => log(agentId, `failure report rejected: ${brokerError.message}`));
             }
             const delay = retryDelayMs(consecutiveFailures);
             log(agentId, `${error}; broker owns retry/reroute policy; backing off ${delay / 1000}s`);
@@ -301,7 +301,7 @@ export async function supervise(agentId, workdir) {
                     outputTokens: normalized.usage.outputTokens,
                     totalTokens: normalized.usage.totalTokens,
                     costUSD: normalized.usage.costUSD,
-                }).catch((error) => log(agentId, `auto-submit failed for ${message.taskId}: ${error.message}`));
+                }, parseTaskEnvelope).catch((error) => log(agentId, `auto-submit failed for ${message.taskId}: ${error.message}`));
             }
         }
         log(agentId, `turn complete in ${processResult.durationMs} ms`);
