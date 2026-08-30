@@ -248,7 +248,7 @@ async function verifyRuntimeAssets(baseUrl) {
 }
 
 function fakeConfig() {
-  const config = JSON.parse(readFileSync(new URL("../agent-bus.config.json", import.meta.url), "utf8"));
+  const config = JSON.parse(readFileSync(new URL("../tests/fixtures/test-bus.config.json", import.meta.url), "utf8"));
   for (const [id, provider] of Object.entries(config.providers)) if (id !== "fake") provider.enabled = false;
   for (const [id, harness] of Object.entries(config.harnesses)) if (id !== "fake") harness.enabled = false;
   for (const [id, model] of Object.entries(config.models)) if (!id.startsWith("fake-")) model.enabled = false;

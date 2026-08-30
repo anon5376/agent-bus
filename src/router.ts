@@ -17,6 +17,8 @@ export interface RoutingTask {
   exactAgent?: string;
   families?: string[];
   providers?: string[];
+  harness?: string;
+  allowedAgentIds?: string[];
   excludedFamilies?: string[];
   preferSubscription?: boolean;
   implementationFamily?: string;
@@ -142,6 +144,9 @@ function scoreCandidate(
     rejectedBy.push("agent, provider, model, or harness is disabled");
   }
   if (task.exactAgent && task.exactAgent !== agent.id) rejectedBy.push(`exact agent ${task.exactAgent} required`);
+  if (task.allowedAgentIds?.length && !task.allowedAgentIds.includes(agent.id)) {
+    rejectedBy.push(`agent ${agent.id} is outside this manager's spawn list`);
+  }
   if (task.exactModel && task.exactModel !== agent.modelDefinition.id && task.exactModel !== agent.modelDefinition.exactModel) {
     rejectedBy.push(`exact model ${task.exactModel} required`);
   }
@@ -167,6 +172,9 @@ function scoreCandidate(
   const allowedProviders = task.providers?.length ? task.providers : policy.providers;
   if (allowedProviders?.length && !allowedProviders.includes(agent.modelDefinition.provider)) {
     rejectedBy.push(`provider ${agent.modelDefinition.provider} is outside [${allowedProviders.join(", ")}]`);
+  }
+  if (task.harness && task.harness !== agent.harnessDefinition.id && task.harness !== agent.harnessDefinition.adapter) {
+    rejectedBy.push(`harness ${agent.harnessDefinition.id} is not ${task.harness}`);
   }
   if (config.constraints.permittedProviders.length && !config.constraints.permittedProviders.includes(agent.modelDefinition.provider)) {
     rejectedBy.push(`provider ${agent.modelDefinition.provider} denied by global constraints`);

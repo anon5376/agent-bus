@@ -700,6 +700,10 @@ export class BrokerService {
     const complexity = Math.max(1, Math.min(5, Number(body.complexity ?? 3) || 3));
     const readOnly = Boolean(body.readOnly ?? !this.config.roles[role].requireWrite);
     const requestedAssignee = body.assignee ? String(body.assignee) : "";
+    const spawnAllow = identity.id === OPERATOR_ID ? [] : (identity.permissions.allowedChildAgentIds ?? []);
+    if (spawnAllow.length && requestedAssignee && !spawnAllow.includes(requestedAssignee)) {
+      throw new PermissionError(`${identity.id} is not allowed to create work for ${requestedAssignee}`);
+    }
     const routingRequest: RoutingTask = {
       role,
       complexity,
@@ -710,7 +714,9 @@ export class BrokerService {
       exactAgent: requestedAssignee || undefined,
       exactModel: body.exactModel ? String(body.exactModel) : undefined,
       families: stringList(body.families),
-      providers: stringList(body.providers),
+      providers: stringList(body.providers ?? (body.provider ? [body.provider] : [])),
+      harness: body.harness ? String(body.harness) : undefined,
+      allowedAgentIds: spawnAllow.length ? spawnAllow : undefined,
       implementationFamily: body.implementationFamily ? String(body.implementationFamily) : undefined,
       preferSubscription: body.preferSubscription === undefined ? undefined : Boolean(body.preferSubscription),
     };
@@ -918,6 +924,7 @@ export class BrokerService {
           models: this.config.models,
           roles: this.config.roles,
           agents: this.config.agents,
+          routing: this.config.routing,
           constraints: this.config.constraints,
         };
 
@@ -934,6 +941,8 @@ export class BrokerService {
           exactModel: request.exactModel ? String(request.exactModel) : undefined,
           families: request.families ? stringList(request.families) : undefined,
           providers: request.providers ? stringList(request.providers) : undefined,
+          harness: request.harness ? String(request.harness) : undefined,
+          allowedAgentIds: request.allowedAgentIds ? stringList(request.allowedAgentIds) : undefined,
           excludedFamilies: request.excludedFamilies ? stringList(request.excludedFamilies) : undefined,
           preferSubscription: request.preferSubscription,
           implementationFamily: request.implementationFamily,

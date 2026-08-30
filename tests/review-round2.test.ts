@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { configPathFromProject, loadConfig, resolveAgent } from "../src/config.js";
 import { knownAgentBusCommand } from "../src/process-management.js";
+import { testConfig } from "./helpers.js";
 
 test("explicit AGENT_BUS_CONFIG wins over project-local config for supervisor resolution", () => {
   const root = mkdtempSync(join(tmpdir(), "agent-bus-config-precedence-"));
@@ -13,7 +14,7 @@ test("explicit AGENT_BUS_CONFIG wins over project-local config for supervisor re
   mkdirSync(localDir, { recursive: true });
   const explicitPath = join(root, "explicit.json");
   const localPath = join(localDir, "config.json");
-  const base = structuredClone(loadConfig());
+  const base = structuredClone(testConfig());
   const explicit = structuredClone(base);
   const local = structuredClone(base);
   explicit.agents["fake-small"].model = "fake-strong";

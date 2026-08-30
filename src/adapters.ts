@@ -322,6 +322,59 @@ const geminiAdapter: HarnessAdapter = {
   parse: defaultResult,
 };
 
+const cursorAdapter: HarnessAdapter = {
+  id: "cursor",
+  prepare(context) {
+    mkdirSync(join(context.workdir, ".cursor"), { recursive: true });
+    const cfgPath = join(context.workdir, ".cursor", "mcp.json");
+    let cfg: Record<string, unknown> = {};
+    try { cfg = JSON.parse(readFileSync(cfgPath, "utf8")) as Record<string, unknown>; } catch { /* new project-local MCP config */ }
+    const mcp = (cfg.mcpServers && typeof cfg.mcpServers === "object" ? cfg.mcpServers : {}) as Record<string, unknown>;
+    mcp["agent-bus"] = {
+      command: process.execPath,
+      args: [context.mcpServerPath],
+      env: commonEnvironment(context),
+    };
+    cfg.mcpServers = mcp;
+    writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
+  },
+  build(context) {
+    const env = commonEnvironment(context);
+    const args = ["-p", context.prompt, "--output-format", "json", "--force", "--trust", "--approve-mcps"];
+    if (context.sessionId) args.push("--resume", context.sessionId);
+    if (context.agent.modelDefinition.exactModel) args.push("--model", context.agent.modelDefinition.exactModel);
+    return {
+      command: context.agent.harnessDefinition.command,
+      args,
+      environment: { ...env, AGENT_BUS_BLOCK_SEC: "900" },
+      autoReport: false,
+      timeoutMs: 60 * 60_000,
+    };
+  },
+  parse(stdout, exitCode) {
+    for (const row of jsonLines(stdout).reverse()) {
+      const text = row.result ?? row.text ?? row.content ?? row.message;
+      if (typeof text !== "string") continue;
+      const usage = (row.usage ?? {}) as Record<string, unknown>;
+      const input = asNumber(usage.input_tokens ?? usage.inputTokens);
+      const output = asNumber(usage.output_tokens ?? usage.outputTokens);
+      return {
+        text,
+        sessionId: typeof row.session_id === "string" ? row.session_id : typeof row.sessionId === "string" ? row.sessionId : typeof row.chatId === "string" ? row.chatId : null,
+        usage: {
+          inputTokens: input,
+          outputTokens: output,
+          totalTokens: asNumber(usage.total_tokens ?? usage.totalTokens) || input + output,
+          costUSD: asNumber(usage.cost_usd ?? usage.costUSD),
+        },
+        structured: row,
+        malformed: false,
+      };
+    }
+    return defaultResult(stdout, exitCode);
+  },
+};
+
 const grokAdapter: HarnessAdapter = {
   id: "grok",
   build(context) {
@@ -464,6 +517,7 @@ const ADAPTERS: Record<string, HarnessAdapter> = {
   codex: codexAdapter,
   kimi: kimiAdapter,
   gemini: geminiAdapter,
+  cursor: cursorAdapter,
   grok: grokAdapter,
   opencode: opencodeAdapter,
   hermes: hermesAdapter,
@@ -495,15 +549,24 @@ function runCommand(command: string, args: string[], timeoutMs = 10_000): Promis
   });
 }
 
-export async function probeHarness(agent: ResolvedAgent): Promise<HarnessProbe> {
-  const harness = agent.harnessDefinition;
-  const result = await runCommand(harness.command, harness.probeArgs ?? ["--version"]);
+export async function probeCommand(command: string, probeArgs: string[] = ["--version"]): Promise<{ available: boolean; version: string | null; error: string | null }> {
+  const result = await runCommand(command, probeArgs);
   return {
-    harness: harness.id,
-    command: harness.command,
     available: result.code === 0,
     version: result.code === 0 ? result.output.split("\n")[0] || null : null,
     error: result.code === 0 ? null : result.output || `exit ${result.code}`,
+  };
+}
+
+export async function probeHarness(agent: ResolvedAgent): Promise<HarnessProbe> {
+  const harness = agent.harnessDefinition;
+  const probe = await probeCommand(harness.command, harness.probeArgs ?? ["--version"]);
+  return {
+    harness: harness.id,
+    command: harness.command,
+    available: probe.available,
+    version: probe.version,
+    error: probe.error,
   };
 }
 

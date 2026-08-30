@@ -34,6 +34,9 @@ export interface ProviderDefinition {
   enabled: boolean;
   optional?: boolean;
   notes?: string;
+  loginCommand?: string;
+  installHint?: string;
+  apiKeyEnv?: string;
 }
 
 export interface HarnessFeatureSet {
@@ -82,6 +85,8 @@ export interface AgentPermissions {
   network: boolean;
   maxDelegationDepth: number;
   allowedPaths?: string[];
+  /** When set and non-empty, this manager may only create work for these agent ids. */
+  allowedChildAgentIds?: string[];
 }
 
 export interface AgentDefinition {

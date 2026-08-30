@@ -16,6 +16,7 @@ import {
   parseBusState,
   parseStateWaitResponse,
 } from "./protocol.js";
+import { resolveDelegateTarget } from "./resolve-target.js";
 import {
   OPERATOR_TOKEN_PATH,
   agentTokenPath,
@@ -303,7 +304,10 @@ export class OperatorControl {
     shell?: boolean;
     network?: boolean;
     exactAgent?: string;
+    agent?: string;
     exactModel?: string;
+    provider?: string;
+    harness?: string;
     families?: string[];
     providers?: string[];
     implementationFamily?: string;
@@ -313,21 +317,32 @@ export class OperatorControl {
     reviewRequired?: boolean;
   }): Promise<Record<string, unknown>> {
     await this.ensureRunning();
+    const catalog = await this.call<BusConfig>("/catalog");
+    const target = resolveDelegateTarget(catalog, {
+      agent: input.agent,
+      exactAgent: input.exactAgent,
+      exactModel: input.exactModel,
+      provider: input.provider,
+      harness: input.harness,
+      providers: input.providers,
+      role: input.role,
+    });
     const created = await this.call<{ task: Task }>("/task/create", {
       runId: input.runId,
       parentTaskId: input.parentTaskId,
       title: input.title,
       brief: input.description,
-      role: input.role ?? "implementation",
+      role: input.role ?? target.role ?? "implementation",
       complexity: input.complexity ?? 3,
       estimatedContextTokens: input.contextTokens ?? 8_000,
       readOnly: !Boolean(input.writeAccess),
       shell: Boolean(input.shell ?? input.writeAccess),
       network: Boolean(input.network),
-      assignee: input.exactAgent,
-      exactModel: input.exactModel,
+      assignee: target.exactAgent,
+      exactModel: target.exactModel,
       families: input.families ?? [],
-      providers: input.providers ?? [],
+      providers: target.providers ?? [],
+      harness: target.harness,
       implementationFamily: input.implementationFamily,
       dependencies: input.dependencies ?? [],
       pathScopes: input.pathScopes ?? [],

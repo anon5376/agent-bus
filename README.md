@@ -49,9 +49,11 @@ The runtime report includes the resolved launcher, immutable application release
 
 Directly visiting the dashboard URL does not grant operator privileges. `agent-bus start` and `agent-bus open` issue a short-lived one-time browser ticket derived from the private local operator credential.
 
-The first authenticated visit opens `/setup` so a new operator can configure providers, named agents, roles, delegation depth, and a project before the console. After **Enter console**, later visits go straight to the strip bay. **Configure** in the header returns to that page. Existing buses that already have runs are not forced through setup again.
+The first authenticated visit opens `/setup`. Installed provider CLIs are scanned and can be added automatically. Missing CLIs can still be wired with a binary path and the provider's login command. You name agents yourself and drag workers onto a manager to choose who that manager may create. After **Open dashboard**, later visits go to the run view. **Settings** in the header returns to configuration. Existing buses that already have runs are not forced through setup again.
 
-Each real provider CLI must still be installed and authenticated through its own normal login flow. Finding a binary proves only executable availability. It does not prove login state, subscription entitlement, quota, or access to a particular model.
+Each real provider CLI must still be installed and authenticated through its own login flow (`claude auth login`, `codex login`, `agent login`, `grok login`, and so on). Finding a binary proves only executable availability.
+
+To delegate from another chat (for example GPT 5.6 asking Agent Bus to send work to Claude via Anthropic or Grok via Cursor), attach the operator MCP from `agent-bus mcp-config` and call `agent_bus_delegate` with `agent` / `exactModel` / `provider` / `harness`.
 
 ## Product surface
 

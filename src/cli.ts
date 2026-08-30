@@ -14,6 +14,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { discoverHarnessModels, probeHarness } from "./adapters.js";
 import { BusConfig, DEFAULT_CONFIG_PATH, enabledAgents, loadConfig } from "./config.js";
+import { scanProviders } from "./discover.js";
 import { recordCurrentAgentBusProcess } from "./instance-processes.js";
 import {
   fetchHealth,
@@ -193,7 +194,27 @@ case "runtime":{
   return
 }
 case "models":{const config=loadConfig();printModels(config);if(hasFlag("--discover")){console.log("\nLIVE DISCOVERY");const seen=new Set<string>();for(const agent of enabledAgents(config)){if(seen.has(agent.harnessDefinition.id))continue;seen.add(agent.harnessDefinition.id);const result=await discoverHarnessModels(agent);console.log(`  ${result.harness}: ${result.error??(result.models.join(", ")||"no models returned")}`)}}return}
-case "doctor":{const config=loadConfig();const seen=new Set<string>();let failures=0;for(const agent of enabledAgents(config)){if(seen.has(agent.harnessDefinition.id))continue;seen.add(agent.harnessDefinition.id);const probe=await probeHarness(agent);if(!probe.available)failures+=1;console.log(`${probe.available?"✓":"×"} ${probe.harness.padEnd(10)} ${probe.version??probe.error}`)}console.log("CLI discovery proves executable availability only. Authentication, subscription entitlement, quota, and exact model access remain live-unverified until a real provider call succeeds.");process.exitCode=failures?1:0;return}
+case "doctor":{
+  const config=loadConfig();
+  const scans=await scanProviders(config);
+  let failures=0;
+  for(const scan of scans){
+    const mark=scan.cliFound?"✓":scan.enabled?"×":"·";
+    if(scan.enabled && !scan.cliFound)failures+=1;
+    console.log(`${mark} ${scan.displayName.padEnd(16)} ${scan.cliFound?(scan.version??scan.resolvedPath):scan.error}`);
+    if(!scan.cliFound)console.log(`    login: ${scan.loginCommand||scan.installHint}`);
+  }
+  const seen=new Set<string>();
+  for(const agent of enabledAgents(config)){
+    if(seen.has(agent.harnessDefinition.id))continue;
+    seen.add(agent.harnessDefinition.id);
+    const probe=await probeHarness(agent);
+    if(!probe.available)failures+=1;
+  }
+  console.log("CLI discovery proves executable availability only. Authentication, subscription entitlement, quota, and exact model access remain live-unverified until a real provider call succeeds.");
+  process.exitCode=failures?1:0;
+  return
+}
 case "status":{if(!(await brokerAlive()))throw new Error(`broker not running at ${BUS_URL}`);console.log(await renderState());return}
 case "watch":{if(!(await brokerAlive()))throw new Error(`broker not running at ${BUS_URL}`);const tick=async()=>{const content=await renderState().catch(e=>`broker unreachable: ${e.message}`);process.stdout.write(`\x1b[2J\x1b[H\x1b[1magent-bus\x1b[0m ${new Date().toLocaleTimeString()}\n\n${content}\n`)};await tick();setInterval(tick,1500);return}
 case "usage":{if(!(await brokerAlive()))throw new Error(`broker not running at ${BUS_URL}`);const usage=renderUsage(await brokerCall("/state",{},parseBusState));if(usage)console.log(usage);return}
