@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 export const BUS_HOME = process.env.AGENT_BUS_HOME ?? join(homedir(), ".agent-bus");
-export const BUS_PORT = Number(process.env.AGENT_BUS_PORT ?? 7717);
+export const BUS_PORT = Number(process.env.AGENT_BUS_PORT ?? 11511);
 export const BUS_HOST = process.env.AGENT_BUS_HOST ?? "127.0.0.1";
 export const BUS_URL = process.env.AGENT_BUS_URL ?? `http://${BUS_HOST}:${BUS_PORT}`;
 export const MAX_WAIT_MS = 240_000;

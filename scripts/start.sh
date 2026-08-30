@@ -24,13 +24,16 @@ AGENTS=("$@")
 
 [[ -f "$ROOT/dist/cli.js" ]] || { echo "build first: (cd '$ROOT' && npm run build)" >&2; exit 1; }
 
+PORT="${AGENT_BUS_PORT:-11511}"
+HEALTH="http://127.0.0.1:${PORT}/health"
+
 # 1. broker ------------------------------------------------------------------
-if curl -s -m 2 http://127.0.0.1:7717/health >/dev/null 2>&1; then
+if curl -s -m 2 "$HEALTH" >/dev/null 2>&1; then
   echo "broker    · already running"
 else
   node "$ROOT/scripts/daemonize.js" "$BUS_HOME/broker.log" "$ROOT/dist/cli.js" broker >/dev/null
   sleep 1.2
-  curl -s -m 2 http://127.0.0.1:7717/health >/dev/null 2>&1 \
+  curl -s -m 2 "$HEALTH" >/dev/null 2>&1 \
     && echo "broker    · started" \
     || { echo "broker    ! failed to start, see $BUS_HOME/broker.log" >&2; exit 1; }
 fi

@@ -76,7 +76,7 @@ function App(){
   async function review(accepted:boolean){if(!task)return;const feedback=(document.querySelector<HTMLTextAreaElement>("#task-feedback")?.value||"").trim()||(accepted?"Accepted.":"Changes requested.");try{await post(`/api/tasks/${task.id}/review`,{accepted,feedback});setModal(null)}catch(e:any){note(e.message)}}
 
   return <div className="app" data-agent-bus-mounted="true">
-    <header><div className="brand"><div className="logo">AB</div><div><b>Agent Bus</b><span>local control plane</span></div></div><div className="header-actions"><span className="live"><i/>127.0.0.1:7717</span><button onClick={()=>setModal("run")}>New run</button><button className="danger" onClick={stopAll}>STOP ALL</button></div></header>
+    <header><div className="brand"><div className="logo">AB</div><div><b>Agent Bus</b><span>local control plane</span></div></div><div className="header-actions"><span className="live"><i/>{location.host}</span><button onClick={()=>setModal("run")}>New run</button><button className="danger" onClick={stopAll}>STOP ALL</button></div></header>
     <aside className="left">
       <Section title="Projects" action={<button onClick={()=>setModal("project")}>+</button>}>{projects.map(p=><button className={`nav-row ${currentRun?.projectRoot===p.path?"selected":""}`} key={p.path} onClick={()=>{const r=snap.runs.find(x=>x.projectRoot===p.path);if(r)setRunId(r.id)}}><b>{p.name}</b><small>{p.path}</small></button>)}</Section>
       <Section title="Recent runs">{snap.runs.map(r=><button className={`nav-row ${r.id===runId?"selected":""}`} key={r.id} onClick={()=>setRunId(r.id)}><b>{r.goal}</b><small>{r.status} · {fmtAgo(r.updatedAt)}</small></button>)}</Section>

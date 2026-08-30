@@ -118,13 +118,13 @@ jobs:
             }
             res.statusCode = 404; res.end('{}');
           });
-          server.listen(7717, '127.0.0.1');
+          server.listen(11511, '127.0.0.1');
           process.on('SIGTERM', () => server.close(() => process.exit(0)));
           PR5CLI
           "$REAL_NODE" "$PR5_APP/dist/cli.js" broker &
           pr5_pid="$!"
-          for _ in $(seq 1 50); do curl -fsS http://127.0.0.1:7717/health >/dev/null 2>&1 && break; sleep 0.1; done
-          curl -fsS http://127.0.0.1:7717/health | grep '"buildId":"merged-pr5-checkout"'
+          for _ in $(seq 1 50); do curl -fsS http://127.0.0.1:11511/health >/dev/null 2>&1 && break; sleep 0.1; done
+          curl -fsS http://127.0.0.1:11511/health | grep '"buildId":"merged-pr5-checkout"'
 
           bash install.sh
           for _ in $(seq 1 50); do kill -0 "$pr5_pid" 2>/dev/null || break; sleep 0.1; done
@@ -156,12 +156,12 @@ jobs:
 
           cd "$RUNNER_TEMP"
           agent-bus start --no-open
-          health="$(curl -fsS http://127.0.0.1:7717/health)"
+          health="$(curl -fsS http://127.0.0.1:11511/health)"
           printf '%s\n' "$health" | grep '"product":"agent-bus"'
           printf '%s\n' "$health" | grep '"dashboard":true'
           printf '%s\n' "$health" | grep '"runtime"'
           printf '%s\n' "$health" | grep "\"busHome\":\"$AGENT_BUS_HOME\""
-          curl -fsS 'http://127.0.0.1:7717/?install-smoke=1' | grep 'data-boot-stage="10"'
+          curl -fsS 'http://127.0.0.1:11511/?install-smoke=1' | grep 'data-boot-stage="10"'
           agent-bus runtime --json | tee "$RUNNER_TEMP/runtime-before-reinstall.json"
           node "$GITHUB_WORKSPACE/scripts/installed-operator-mcp-smoke.mjs"
 
@@ -171,7 +171,7 @@ jobs:
 
           first_pid="$(printf '%s' "$health" | node -pe 'JSON.parse(require("fs").readFileSync(0,"utf8")).pid')"
           agent-bus start --no-open
-          second_pid="$(curl -fsS http://127.0.0.1:7717/health | node -pe 'JSON.parse(require("fs").readFileSync(0,"utf8")).pid')"
+          second_pid="$(curl -fsS http://127.0.0.1:11511/health | node -pe 'JSON.parse(require("fs").readFileSync(0,"utf8")).pid')"
           test "$first_pid" = "$second_pid"
 
           # Same home, different ports must be isolated by the process registry's port identity.
@@ -193,7 +193,7 @@ jobs:
           AGENT_BUS_PORT="$alt_port" AGENT_BUS_URL="$alt_url" agent-bus stop
           alt_port=""
           agent-bus start --no-open
-          health="$(curl -fsS http://127.0.0.1:7717/health)"
+          health="$(curl -fsS http://127.0.0.1:11511/health)"
           first_pid="$(printf '%s' "$health" | node -pe 'JSON.parse(require("fs").readFileSync(0,"utf8")).pid')"
 
           for release_id in 11111111111111111111 22222222222222222222 33333333333333333333; do
@@ -218,7 +218,7 @@ jobs:
 
           cd "$RUNNER_TEMP"
           agent-bus start --no-open
-          curl -fsS http://127.0.0.1:7717/health | grep '"product":"agent-bus"'
+          curl -fsS http://127.0.0.1:11511/health | grep '"product":"agent-bus"'
           agent-bus runtime --json | tee "$RUNNER_TEMP/runtime-after-reinstall.json"
           node "$GITHUB_WORKSPACE/scripts/installed-operator-mcp-smoke.mjs"
           node "$GITHUB_WORKSPACE/scripts/installed-browser-smoke.mjs"
@@ -226,8 +226,8 @@ jobs:
 
           agent-bus stop
           sleep 0.3
-          if lsof -nP -iTCP:7717 -sTCP:LISTEN; then
-            echo "port 7717 is still listening after agent-bus stop" >&2
+          if lsof -nP -iTCP:11511 -sTCP:LISTEN; then
+            echo "port 11511 is still listening after agent-bus stop" >&2
             exit 1
           fi
           trap - EXIT

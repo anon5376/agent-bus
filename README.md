@@ -20,7 +20,7 @@ agent-bus start
 
 - runs `npm ci`
 - compiles the lifecycle code, safely stops any identifiable previous Agent Bus instance, then builds the production React/Vite dashboard
-- refuses to kill an unrelated application merely because it owns port `7717`
+- refuses to kill an unrelated application merely because it owns port `11511`
 - packages the completed runtime into an immutable release under `~/.agent-bus/app/releases/<artifact-id>`
 - atomically switches `~/.agent-bus/app/current` to that release, so a running broker can never observe a half-rebuilt frontend tree
 - finds positively identified stale `agent-bus`, `agent-bus-mcp`, and `agent-bus-openai-compatible` launchers throughout the current `PATH` and common Homebrew/npm/nvm/pnpm/yarn locations
@@ -33,7 +33,7 @@ The canonical launchers resolve the active Node executable at invocation time, w
 `agent-bus start` starts or reuses the exact installed localhost product and opens:
 
 ```text
-http://127.0.0.1:7717
+http://127.0.0.1:11511
 ```
 
 Before opening the browser, the CLI verifies the running product identity, application root, static root, build ID, MIME types, and SHA-256 hashes of the served HTML/JS/CSS against the installed release. A different or legacy Agent Bus instance is replaced safely. An unrelated port owner is preserved and reported.
@@ -208,7 +208,7 @@ See [`docs/provider-support.md`](docs/provider-support.md) for the support matri
 browser dashboard / CLI / MCP
              │
              ▼
-127.0.0.1:7717
+127.0.0.1:11511
 single Agent Bus HTTP server
              │
              ├── React production assets
