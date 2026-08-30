@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { parseAppearance } from "./appearance.js";
 import { resolveAgent, validateConfig, } from "./config.js";
 import { mergeCatalogProvider } from "./discover.js";
 export function configDigest(config) {
@@ -218,5 +219,12 @@ export function stageConstraintsPatch(baseConfig, body) {
         constraints.preferSubscription = Boolean(body.preferSubscription);
     validateConfig(config);
     return { constraints, config };
+}
+export function stageAppearancePatch(baseConfig, body) {
+    const config = structuredClone(baseConfig);
+    const appearance = parseAppearance({ ...(config.appearance ?? {}), ...body });
+    config.appearance = appearance;
+    validateConfig(config);
+    return { appearance, config };
 }
 //# sourceMappingURL=config-transitions.js.map

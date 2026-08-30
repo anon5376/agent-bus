@@ -2,6 +2,7 @@ import { createServer, IncomingMessage, Server, ServerResponse } from "node:http
 import { appendFileSync, existsSync, mkdirSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseAppearance } from "./appearance.js";
 import type { AgentPermissions, BusConfig, ResolvedAgent } from "./config.js";
 import { DEFAULT_CONFIG_PATH, enabledAgents, loadConfig, resolveAgent } from "./config.js";
 import { configDigest, resolvedExecutionConfig } from "./config-transitions.js";
@@ -28,6 +29,7 @@ import {
   BusState,
   RosterEntry,
   emptyUsage,
+  envValue,
   newId,
   normalizeUsageMetrics,
 } from "./protocol.js";
@@ -47,7 +49,7 @@ import {
 } from "./security.js";
 import { StateStore, StoredIdentity } from "./store.js";
 
-const APPLICATION_ROOT = resolve(process.env.AGENT_BUS_APPLICATION_ROOT ?? join(dirname(fileURLToPath(import.meta.url)), ".."));
+const APPLICATION_ROOT = resolve(envValue("QAGENT_APPLICATION_ROOT", "AGENT_BUS_APPLICATION_ROOT") ?? join(dirname(fileURLToPath(import.meta.url)), ".."));
 
 interface Waiter {
   agentId: string;
@@ -190,7 +192,7 @@ export class BrokerService {
   private readonly operatorTokenPath: string;
 
   constructor(options: BrokerOptions = {}) {
-    this.configPath = options.config ? null : resolve(options.configPath ?? process.env.AGENT_BUS_CONFIG ?? DEFAULT_CONFIG_PATH);
+    this.configPath = options.config ? null : resolve(options.configPath ?? envValue("QAGENT_CONFIG", "AGENT_BUS_CONFIG") ?? DEFAULT_CONFIG_PATH);
     this.config = options.config ?? loadConfig(this.configPath ?? undefined);
     this.instancePort = options.port ?? BUS_PORT;
     const statePath = options.statePath ?? join(BUS_HOME, "state.sqlite");
@@ -926,6 +928,7 @@ export class BrokerService {
           agents: this.config.agents,
           routing: this.config.routing,
           constraints: this.config.constraints,
+          appearance: parseAppearance(this.config.appearance ?? {}),
         };
 
       case "/route/preview": {
@@ -1468,7 +1471,7 @@ export async function startBroker(options: BrokerOptions = {}): Promise<BrokerHa
   const address = server.address();
   const port = typeof address === "object" && address ? address.port : requestedPort;
   const url = `http://${host}:${port}`;
-  process.stderr.write(`agent-bus broker listening on ${url} (SQLite: ${service.store.path})\n`);
+  process.stderr.write(`qagent broker listening on ${url} (SQLite: ${service.store.path})\n`);
   return {
     service,
     server,

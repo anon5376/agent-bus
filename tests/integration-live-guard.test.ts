@@ -11,7 +11,7 @@ async function fixture(){
   const configPath=join(root,"config.json");
   const staticRoot=join(root,"web");
   mkdirSync(staticRoot);
-  writeFileSync(join(staticRoot,"index.html"),"<!doctype html><title>Agent Bus</title><div id=root></div>");
+  writeFileSync(join(staticRoot,"index.html"),"<!doctype html><title>Qagent</title><div id=root></div>");
   writeFileSync(configPath,JSON.stringify(testConfig(),null,2));
   const handle=await startProductServer({port:0,configPath,statePath:join(root,"state.sqlite"),logPath:join(root,"bus.jsonl"),operatorTokenPath,staticRoot});
   const token=readFileSync(operatorTokenPath,"utf8").trim();

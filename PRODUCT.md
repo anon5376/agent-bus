@@ -8,11 +8,11 @@ web
 
 ## Users
 
-Primary user is a human operator of a local multi-agent coding setup. Other people may install the same product. Job: configure providers and a roster from scratch, then run work from the dashboard, CLI, or chat (`@agent-bus`).
+Primary user is a human operator of a local multi-agent coding setup. Other people may install the same product. Job: configure providers and a roster from scratch, then run work from the dashboard, CLI, or chat (`@qagent`).
 
 ## Product Purpose
 
-Agent Bus is a local-first control plane for heterogeneous autonomous agents. Success is: a fresh install has no demo roster; the operator can autodetect installed CLIs, name agents, set who a manager may create, and delegate exact model+provider targets from chat.
+Qagent is a local-first control plane for heterogeneous autonomous agents. Success is: a fresh install has no demo roster; the operator can autodetect installed CLIs, name agents, set who a manager may create, and delegate exact model+provider targets from chat.
 
 ## Positioning
 
@@ -20,11 +20,11 @@ Independent model CLIs (Anthropic, OpenAI, Cursor, xAI, Moonshot, and others) st
 
 ## Operating Context
 
-Desk use on the operator's machine. Commands: `agent-bus start`, `agent-bus open`, `agent-bus status`. Dashboard requires a one-time CLI ticket. Default listen address is `127.0.0.1:11511`. Attach operator MCP with `agent-bus mcp-config` so a chat model can call `agent_bus_delegate`.
+Desk use on the operator's machine. Commands: `qagent start`, `qagent open`, `qagent status` (`agent-bus` is an alias). Dashboard requires a one-time CLI ticket. Default listen address is `127.0.0.1:11511`. Attach operator MCP with `qagent mcp-config` so a chat model can call `qagent_delegate`.
 
 ## Brand Commitments
 
-Name: Agent Bus. Mark: "AB". Visual language follows Cursor-style dashboard chrome (dark panels, rounded rows, blue accent) without Cursor trademarks.
+Name: Qagent. Mark: "Q". Visual language follows Cursor-style dashboard chrome (dark panels, rounded rows, blue accent) without Cursor trademarks. Operators can change the dashboard colors in Settings.
 
 ## Product Principles
 

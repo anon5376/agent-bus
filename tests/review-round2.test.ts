@@ -41,7 +41,7 @@ test("CLI autostart supervisors are pinned to the broker config source", () => {
   assert.match(source, /startSupervisor\(agent\.id,workdir,configPath\)/);
 });
 
-test("scoped Agent Bus command matching does not claim a generic checkout", () => {
+test("scoped Qagent command matching does not claim a generic checkout", () => {
   const command = "/opt/homebrew/bin/node /Users/me/code/agent-bus/dist/cli.js broker";
   assert.equal(knownAgentBusCommand(command, { busHome: "/tmp/instance-a", applicationRoot: "/tmp/instance-a/app/current" }), false);
 });

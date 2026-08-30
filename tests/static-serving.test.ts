@@ -81,7 +81,7 @@ test("production static server separates SPA routes from assets and APIs", async
 
   const health = await fetch(`${f.handle.url}/health`);
   const healthBody = await health.json() as any;
-  assert.equal(healthBody.product, "agent-bus");
+  assert.equal(healthBody.product, "qagent");
   assert.equal(typeof healthBody.productProtocol, "number");
   assert.equal(typeof healthBody.buildId, "string");
   assert.equal(healthBody.dashboard, true);

@@ -2,14 +2,15 @@ import { createServer } from "node:http";
 import { appendFileSync, existsSync, mkdirSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseAppearance } from "./appearance.js";
 import { DEFAULT_CONFIG_PATH, enabledAgents, loadConfig, resolveAgent } from "./config.js";
 import { configDigest, resolvedExecutionConfig } from "./config-transitions.js";
 import { processParentPid, verifiedSupervisorProcess } from "./instance-processes.js";
-import { BUS_HOME, BUS_HOST, BUS_PORT, MAX_WAIT_MS, STALE_AGENT_MS, emptyUsage, newId, normalizeUsageMetrics, } from "./protocol.js";
+import { BUS_HOME, BUS_HOST, BUS_PORT, MAX_WAIT_MS, STALE_AGENT_MS, emptyUsage, envValue, newId, normalizeUsageMetrics, } from "./protocol.js";
 import { routeTask, } from "./router.js";
 import { OPERATOR_TOKEN_PATH, createBearerToken, ensurePrivateDirectories, hashToken, readTokenFile, writePrivateToken, } from "./security.js";
 import { StateStore } from "./store.js";
-const APPLICATION_ROOT = resolve(process.env.AGENT_BUS_APPLICATION_ROOT ?? join(dirname(fileURLToPath(import.meta.url)), ".."));
+const APPLICATION_ROOT = resolve(envValue("QAGENT_APPLICATION_ROOT", "AGENT_BUS_APPLICATION_ROOT") ?? join(dirname(fileURLToPath(import.meta.url)), ".."));
 class AuthError extends Error {
 }
 class PermissionError extends Error {
@@ -112,7 +113,7 @@ export class BrokerService {
     logPath;
     operatorTokenPath;
     constructor(options = {}) {
-        this.configPath = options.config ? null : resolve(options.configPath ?? process.env.AGENT_BUS_CONFIG ?? DEFAULT_CONFIG_PATH);
+        this.configPath = options.config ? null : resolve(options.configPath ?? envValue("QAGENT_CONFIG", "AGENT_BUS_CONFIG") ?? DEFAULT_CONFIG_PATH);
         this.config = options.config ?? loadConfig(this.configPath ?? undefined);
         this.instancePort = options.port ?? BUS_PORT;
         const statePath = options.statePath ?? join(BUS_HOME, "state.sqlite");
@@ -820,6 +821,7 @@ export class BrokerService {
                     agents: this.config.agents,
                     routing: this.config.routing,
                     constraints: this.config.constraints,
+                    appearance: parseAppearance(this.config.appearance ?? {}),
                 };
             case "/route/preview": {
                 const request = body;
@@ -1387,7 +1389,7 @@ export async function startBroker(options = {}) {
     const address = server.address();
     const port = typeof address === "object" && address ? address.port : requestedPort;
     const url = `http://${host}:${port}`;
-    process.stderr.write(`agent-bus broker listening on ${url} (SQLite: ${service.store.path})\n`);
+    process.stderr.write(`qagent broker listening on ${url} (SQLite: ${service.store.path})\n`);
     return {
         service,
         server,

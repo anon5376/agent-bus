@@ -4,7 +4,7 @@ import { ownedAgentBusPids, verifiedSupervisorProcess } from "./instance-process
 import { APPLICATION_ROOT, EXPECTED_BUILD_ID, ensureAgentBusRunning, stopAgentBusInstance } from "./lifecycle.js";
 import { fetchHealth, listenerPids } from "./process-management.js";
 import { PRODUCT_NAME, PRODUCT_PROTOCOL_VERSION } from "./product-runtime.js";
-import { BUS_HOME, BUS_PORT, BUS_URL, MAX_WAIT_MS, parseBusState, parseStateWaitResponse, } from "./protocol.js";
+import { BUS_HOME, BUS_PORT, BUS_URL, MAX_WAIT_MS, envValue, parseBusState, parseStateWaitResponse, } from "./protocol.js";
 import { resolveDelegateTarget } from "./resolve-target.js";
 import { OPERATOR_TOKEN_PATH, agentTokenPath, readTokenFile, writePrivateToken, } from "./security.js";
 import { launchSupervisor } from "./supervisor-launch.js";
@@ -79,8 +79,8 @@ export class OperatorControl {
         if (!occupied)
             return { running: false, occupied: false, health: null };
         const reason = ownedBrokerPids.size > 0
-            ? "registered Agent Bus process failed current-instance verification"
-            : "unrelated listener occupies the configured Agent Bus port";
+            ? "registered Qagent process failed current-instance verification"
+            : "unrelated listener occupies the configured Qagent port";
         return { running: false, occupied: true, health, reason };
     }
     async call(path, body = {}) {
@@ -191,7 +191,7 @@ export class OperatorControl {
                 return { ok: true, agentId, started: false, pid, projectRoot };
             }
         }
-        const configPath = String(state.configIdentity?.path ?? process.env.AGENT_BUS_CONFIG ?? "").trim();
+        const configPath = String(state.configIdentity?.path ?? envValue("QAGENT_CONFIG", "AGENT_BUS_CONFIG") ?? "").trim();
         if (!configPath)
             throw new OperatorControlError("CONFIG_UNAVAILABLE", "running broker does not expose a persistent configuration path");
         await this.ensureAgentToken(agentId);

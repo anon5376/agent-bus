@@ -104,7 +104,7 @@ export function addOrUpdateIntegration(
   const role = String(input.role ?? (kind === "openai-compatible" ? "cheap-worker" : "implementation"));
   if (!config.roles[role]) throw new Error(`unknown role: ${role}`);
   if (kind === "openai-compatible" && ["manager", "reviewer"].includes(role)) {
-    throw new Error("raw OpenAI-compatible endpoints cannot act as manager/reviewer because they do not have Agent Bus tools; use a tool-capable CLI harness for those roles");
+    throw new Error("raw OpenAI-compatible endpoints cannot act as manager/reviewer because they do not have Qagent tools; use a tool-capable CLI harness for those roles");
   }
 
   const provider: ProviderDefinition = {
@@ -115,7 +115,7 @@ export function addOrUpdateIntegration(
     subscriptionBacked: Boolean(input.subscriptionBacked),
     enabled: input.enabled !== false,
     optional: true,
-    notes: "Added through Agent Bus integration editor.",
+    notes: "Added through Qagent integration editor.",
   };
 
   const command = kind === "openai-compatible" ? process.execPath : String(input.command ?? "").trim();
@@ -131,7 +131,7 @@ export function addOrUpdateIntegration(
       : ["--version"],
     features: featureSet(false),
     notes: kind === "openai-compatible"
-      ? "Generic OpenAI-compatible chat-completions endpoint. Text-only lane: no native Agent Bus MCP tools."
+      ? "Generic OpenAI-compatible chat-completions endpoint. Text-only lane: no native Qagent MCP tools."
       : "Generic command-template harness. Use a native adapter when deeper tool integration exists.",
   };
 

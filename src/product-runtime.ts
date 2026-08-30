@@ -3,8 +3,12 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const PRODUCT_NAME = "agent-bus";
+export const PRODUCT_NAME = "qagent";
+export const PRODUCT_DISPLAY_NAME = "Qagent";
+export const PRODUCT_MARK = "Q";
+export const LEGACY_PRODUCT_NAME = "agent-bus";
 export const PRODUCT_PROTOCOL_VERSION = 3;
+export const SESSION_COOKIE = "qagent_session";
 
 const MODULE_DIR = dirname(fileURLToPath(import.meta.url));
 

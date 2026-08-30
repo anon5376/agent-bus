@@ -23,7 +23,7 @@ if command -v kimi >/dev/null 2>&1; then
     let cfg = {};
     try { cfg = JSON.parse(fs.readFileSync(path, "utf8")); } catch {}
     cfg.mcpServers = cfg.mcpServers ?? {};
-    cfg.mcpServers["agent-bus"] = {
+    cfg.mcpServers["qagent"] = cfg.mcpServers["agent-bus"] = {
       command: node,
       args: [server],
       env: {

@@ -55,7 +55,7 @@ function brokerLogTail(maxBytes = 16_000): string {
 function unrelatedDiagnostic(owners: Awaited<ReturnType<typeof inspectPort>>): string | null {
   const owner = owners.find((item) => item.kind === "unrelated");
   if (!owner) return null;
-  return `Port ${BUS_PORT} is already owned by an unrelated process (PID ${owner.pid}${owner.command ? `: ${owner.command}` : ""}). Agent Bus will not terminate it.`;
+  return `Port ${BUS_PORT} is already owned by an unrelated process (PID ${owner.pid}${owner.command ? `: ${owner.command}` : ""}). Qagent will not terminate it.`;
 }
 
 function sha256(value: ArrayBuffer): string {
@@ -80,7 +80,7 @@ export async function verifyServedDashboard(): Promise<void> {
     const pathname = asset.path === "index.html" ? "/" : asset.url;
     if (!pathname) throw new Error(`production manifest has no browser URL for ${asset.path}`);
     const separator = pathname.includes("?") ? "&" : "?";
-    const response = await fetch(`${BUS_URL}${pathname}${separator}agent_bus_verify=${nonce}`, {
+    const response = await fetch(`${BUS_URL}${pathname}${separator}qagent_verify=${nonce}`, {
       headers: { "cache-control": "no-cache" },
       signal: AbortSignal.timeout(3500),
     });
@@ -92,7 +92,7 @@ export async function verifyServedDashboard(): Promise<void> {
 
 export async function ensureAgentBusRunning(): Promise<{ url: string; buildId: string; reused: boolean }> {
   if (!existsSync(STATIC_INDEX)) {
-    throw new Error(`dashboard build missing at ${STATIC_INDEX}; run \`npm run build\` and reinstall Agent Bus`);
+    throw new Error(`dashboard build missing at ${STATIC_INDEX}; run \`npm run build\` and reinstall Qagent`);
   }
   const initialHealth = await fetchHealth(BUS_URL);
   if (isCurrentHealth(initialHealth)) {
@@ -113,7 +113,7 @@ export async function ensureAgentBusRunning(): Promise<{ url: string; buildId: s
     applicationRoot: ROOT,
   });
   if (stopped.unrelated.length) throw new Error(unrelatedDiagnostic(stopped.unrelated) ?? "Port is occupied by an unrelated process.");
-  if (!(await waitForPortFree(BUS_PORT, 5000))) throw new Error(`Agent Bus could not release port ${BUS_PORT}.`);
+  if (!(await waitForPortFree(BUS_PORT, 5000))) throw new Error(`Qagent could not release port ${BUS_PORT}.`);
 
   rotateBrokerLog();
   const log = openSync(BROKER_LOG, "a");
@@ -131,7 +131,7 @@ export async function ensureAgentBusRunning(): Promise<{ url: string; buildId: s
   const conflict = unrelatedDiagnostic(owners);
   const tail = brokerLogTail();
   throw new Error([
-    `Agent Bus failed to start at ${BUS_URL}.`,
+    `Qagent failed to start at ${BUS_URL}.`,
     conflict ?? "The broker process did not become healthy.",
     tail ? `Broker log tail:\n${tail}` : "Broker log did not contain an error.",
     `Log: ${BROKER_LOG}`,

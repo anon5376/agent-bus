@@ -10,7 +10,7 @@ import { BUS_HOME, DEFAULT_BLOCK_MS, MAX_BLOCK_MS, MAX_WAIT_MS, brokerAlive, bro
 const AGENT_ID = process.env.AGENT_ID;
 const AGENT_TOKEN = process.env.AGENT_TOKEN;
 if (!AGENT_ID || !AGENT_TOKEN) {
-    process.stderr.write("agent-bus: AGENT_ID and AGENT_TOKEN are required. Provision through `agent-bus provision <id>`.\n");
+    process.stderr.write("qagent: AGENT_ID and AGENT_TOKEN are required. Provision through `qagent provision <id>`.\n");
     process.exit(1);
 }
 const AGENT_ROLE = process.env.AGENT_ROLE ?? "worker";
@@ -51,7 +51,7 @@ async function guarded(fn) {
     }
     catch (error) {
         return {
-            content: [{ type: "text", text: `agent-bus error: ${error.message}` }],
+            content: [{ type: "text", text: `qagent error: ${error.message}` }],
             isError: true,
         };
     }
@@ -108,7 +108,7 @@ const validationObservationSchema = z.object({
     summary: z.string(),
     artifact: z.string().optional(),
 });
-const server = new McpServer({ name: "agent-bus", version: "0.2.0" });
+const server = new McpServer({ name: "qagent", version: "0.2.0" });
 server.tool("bus_whoami", "Show your broker-enforced identity, authority, permissions, model/provider/harness and the live roster.", {}, async () => guarded(async () => {
     const { roster } = await brokerCall("/roster", {}, parseRosterResponse);
     const me = roster.find((agent) => agent.id === AGENT_ID);
@@ -286,11 +286,11 @@ server.tool("bus_task_detail", "Show one task's graph links, scoped context, rou
     ].filter(Boolean).join("\n");
 }));
 async function main() {
-    await ensureRegistered().catch((error) => process.stderr.write(`agent-bus: ${error.message}\n`));
+    await ensureRegistered().catch((error) => process.stderr.write(`qagent: ${error.message}\n`));
     await server.connect(new StdioServerTransport());
 }
 main().catch((error) => {
-    process.stderr.write(`agent-bus fatal: ${error?.stack ?? error}\n`);
+    process.stderr.write(`qagent fatal: ${error?.stack ?? error}\n`);
     process.exit(1);
 });
 //# sourceMappingURL=mcp-server.js.map

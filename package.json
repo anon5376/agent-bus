@@ -6,6 +6,9 @@
   "description": "Local-first control plane and universal harness for heterogeneous autonomous coding and research agents.",
   "engines": {"node": ">=22.5"},
   "bin": {
+    "qagent": "./dist/cli.js",
+    "qagent-mcp": "./dist/mcp-server.js",
+    "qagent-openai-compatible": "./dist/openai-compatible-harness.js",
     "agent-bus": "./dist/cli.js",
     "agent-bus-mcp": "./dist/mcp-server.js",
     "agent-bus-openai-compatible": "./dist/openai-compatible-harness.js"

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Finds Agent Bus launchers across the current PATH and common macOS Node/package
+# Finds Qagent launchers across the current PATH and common macOS Node/package
 # manager locations. Identified legacy launchers are replaced in place when a
 # wrapper directory is supplied. Replacing instead of merely deleting matters:
 # zsh/bash may have cached the old executable path in the parent shell.
-# Persistent state under ~/.agent-bus (or AGENT_BUS_HOME) is never touched.
+# Persistent state under ~/.qagent or ~/.agent-bus is never touched.
 
 PRIMARY_DIR="${1:-}"
 WRAPPER_DIR="${2:-}"
@@ -44,25 +44,25 @@ launcher_payload() {
   fi
 }
 
-is_agent_bus_launcher() {
+is_qagent_launcher() {
   local path="$1"
   [[ -L "$path" || -f "$path" ]] || return 1
   local payload name expected
   payload="$(launcher_payload "$path")"
   name="$(basename "$path")"
-  [[ "$payload" == *"# Agent Bus canonical launcher"* ]] && return 0
-  [[ "$payload" == *"node_modules/agent-bus/"* ]] && return 0
+  [[ "$payload" == *"# Qagent canonical launcher"* ]] && return 0
+  [[ "$payload" == *"node_modules/agent-bus/"* || "$payload" == *"node_modules/qagent/"* ]] && return 0
   case "$name" in
-    agent-bus) expected="dist/cli.js" ;;
-    agent-bus-mcp) expected="dist/mcp-server.js" ;;
-    agent-bus-openai-compatible) expected="dist/openai-compatible-harness.js" ;;
+    qagent|agent-bus) expected="dist/cli.js" ;;
+    qagent-mcp|agent-bus-mcp) expected="dist/mcp-server.js" ;;
+    qagent-openai-compatible|agent-bus-openai-compatible) expected="dist/openai-compatible-harness.js" ;;
     *) return 1 ;;
   esac
   # Checkout directory names are not stable. An old clone may be named
-  # agent-bus-old, old-agent-bus, or anything else containing agent-bus.
+  # agent-bus-old, old-agent-bus, qagent, or anything else containing those ids.
   # The executable name plus the exact permanent dist entrypoint keeps this
   # narrow while still finding those installations.
-  [[ "$payload" == *"agent-bus"*"$expected"* ]]
+  [[ "$payload" == *"agent-bus"*"$expected"* || "$payload" == *"qagent"*"$expected"* ]]
 }
 
 install_at() {
@@ -79,11 +79,11 @@ install_at() {
   fi
 }
 
-NAMES=(agent-bus agent-bus-mcp agent-bus-openai-compatible)
+NAMES=(qagent qagent-mcp qagent-openai-compatible agent-bus agent-bus-mcp agent-bus-openai-compatible)
 for dir in "${DIRS[@]}"; do
   for name in "${NAMES[@]}"; do
     path="$dir/$name"
-    is_agent_bus_launcher "$path" || continue
+    is_qagent_launcher "$path" || continue
     if [[ -n "$WRAPPER_DIR" && -f "$WRAPPER_DIR/$name" ]]; then
       echo "Canonicalizing stale launcher: $path"
       install_at "$WRAPPER_DIR/$name" "$path"

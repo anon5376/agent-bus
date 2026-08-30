@@ -29,20 +29,20 @@ function handler(fn) {
     };
 }
 export function createOperatorMcpServer(control = new OperatorControl()) {
-    const server = new McpServer({ name: "agent-bus-operator", version: "0.2.0" });
-    server.registerTool("agent_bus_status", {
-        description: "Return the authoritative Agent Bus instance, agent roster, runs, tasks, supervisor PIDs, config identity, and state revision.",
+    const server = new McpServer({ name: "qagent-operator", version: "0.2.0" });
+    server.registerTool("qagent_status", {
+        description: "Return the authoritative Qagent instance, agent roster, runs, tasks, supervisor PIDs, config identity, and state revision.",
         inputSchema: {},
     }, handler(async () => await control.status()));
-    server.registerTool("agent_bus_catalog", {
+    server.registerTool("qagent_catalog", {
         description: "Return the configured providers, harnesses, models, agents, roles, routing policy, and constraints from the running broker.",
         inputSchema: {},
     }, handler(async () => await control.catalog()));
-    server.registerTool("agent_bus_start", {
-        description: "Ensure the local Agent Bus broker and dashboard are running using the same ownership-safe lifecycle path as `agent-bus start`, without opening a browser.",
+    server.registerTool("qagent_start", {
+        description: "Ensure the local Qagent broker and dashboard are running using the same ownership-safe lifecycle path as `qagent start`, without opening a browser.",
         inputSchema: {},
     }, handler(async () => await control.ensureRunning()));
-    server.registerTool("agent_bus_create_run", {
+    server.registerTool("qagent_create_run", {
         description: "Create a durable project run and routed root task, provision the assigned agent, and start its verified supervisor.",
         inputSchema: {
             projectRoot: z.string().describe("Absolute or relative project directory"),
@@ -52,8 +52,8 @@ export function createOperatorMcpServer(control = new OperatorControl()) {
             startSupervisor: z.boolean().optional(),
         },
     }, handler(async (input) => await control.createRun(input)));
-    server.registerTool("agent_bus_execute", {
-        description: "Create a run, start the routed supervisor, and block on broker state notifications until the root task is submitted or terminal. Use agent_bus_review to accept or request revision.",
+    server.registerTool("qagent_execute", {
+        description: "Create a run, start the routed supervisor, and block on broker state notifications until the root task is submitted or terminal. Use qagent_review to accept or request revision.",
         inputSchema: {
             projectRoot: z.string(),
             goal: z.string().min(1),
@@ -61,8 +61,8 @@ export function createOperatorMcpServer(control = new OperatorControl()) {
             timeoutMs: z.number().int().positive().max(240_000).optional(),
         },
     }, handler(async (input) => await control.execute(input)));
-    server.registerTool("agent_bus_delegate", {
-        description: "Delegate work to a specific Agent Bus agent. Pass agent/exactAgent for a roster id, or exactModel + provider/harness (example: exactModel=claude-opus-4-6, provider=anthropic; or exactModel=grok-4.6, harness=cursor). Then start that assignee's supervisor.",
+    server.registerTool("qagent_delegate", {
+        description: "Delegate work to a specific Qagent agent. Pass agent/exactAgent for a roster id, or exactModel + provider/harness (example: exactModel=claude-opus-4-6, provider=anthropic; or exactModel=grok-4.6, harness=cursor). Then start that assignee's supervisor.",
         inputSchema: {
             runId: z.string(),
             parentTaskId: z.string().optional(),
@@ -93,7 +93,7 @@ export function createOperatorMcpServer(control = new OperatorControl()) {
             reviewRequired: z.boolean().optional(),
         },
     }, handler(async (input) => await control.delegate(input)));
-    server.registerTool("agent_bus_message", {
+    server.registerTool("qagent_message", {
         description: "Send a durable operator message to an agent, optionally scoped to a task.",
         inputSchema: {
             to: z.string(),
@@ -102,15 +102,15 @@ export function createOperatorMcpServer(control = new OperatorControl()) {
             taskId: z.string().optional(),
         },
     }, handler(async (input) => await control.message(input)));
-    server.registerTool("agent_bus_task", {
+    server.registerTool("qagent_task", {
         description: "Read one durable task with routing, dependencies, history, submission, validation, and artifacts.",
         inputSchema: { taskId: z.string() },
     }, handler(async ({ taskId }) => await control.task(String(taskId))));
-    server.registerTool("agent_bus_run", {
+    server.registerTool("qagent_run", {
         description: "Read one durable run and its complete task DAG.",
         inputSchema: { runId: z.string() },
     }, handler(async ({ runId }) => await control.run(String(runId))));
-    server.registerTool("agent_bus_wait", {
+    server.registerTool("qagent_wait", {
         description: "Block efficiently on broker state notifications until a task is submitted/terminal or a run is terminal. This does not busy-poll.",
         inputSchema: {
             taskId: z.string().optional(),
@@ -118,7 +118,7 @@ export function createOperatorMcpServer(control = new OperatorControl()) {
             timeoutMs: z.number().int().positive().max(240_000).optional(),
         },
     }, handler(async (input) => await control.wait(input)));
-    server.registerTool("agent_bus_review", {
+    server.registerTool("qagent_review", {
         description: "Accept submitted work or request revision through the normal review state transition.",
         inputSchema: {
             taskId: z.string(),
@@ -126,7 +126,7 @@ export function createOperatorMcpServer(control = new OperatorControl()) {
             feedback: z.string().optional(),
         },
     }, handler(async (input) => await control.review(input)));
-    server.registerTool("agent_bus_cancel", {
+    server.registerTool("qagent_cancel", {
         description: "Cancel a task or an entire run using the broker's durable cancellation path.",
         inputSchema: {
             taskId: z.string().optional(),
@@ -134,15 +134,15 @@ export function createOperatorMcpServer(control = new OperatorControl()) {
             reason: z.string().optional(),
         },
     }, handler(async (input) => await control.cancel(input)));
-    server.registerTool("agent_bus_artifacts", {
+    server.registerTool("qagent_artifacts", {
         description: "Retrieve concise changed-file, validation, and artifact references for a task or all tasks in a run.",
         inputSchema: { taskId: z.string().optional(), runId: z.string().optional() },
     }, handler(async (input) => await control.artifacts(input)));
-    server.registerTool("agent_bus_agent_start", {
+    server.registerTool("qagent_agent_start", {
         description: "Provision and start one configured agent supervisor for a project using verified process ownership.",
         inputSchema: { agentId: z.string(), projectRoot: z.string() },
     }, handler(async ({ agentId, projectRoot }) => await control.startAgent(String(agentId), String(projectRoot))));
-    server.registerTool("agent_bus_agent_stop", {
+    server.registerTool("qagent_agent_stop", {
         description: "Stop one agent's fingerprint-verified supervisor and harness processes. Arbitrary client-supplied PIDs are never trusted.",
         inputSchema: { agentId: z.string() },
     }, handler(async ({ agentId }) => await control.stopAgent(String(agentId))));

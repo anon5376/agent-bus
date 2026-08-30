@@ -1,16 +1,75 @@
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { AgentPermissions, Authority, ResolvedAgent } from "./config.js";
 import type { CandidateScore, RoutingDecision } from "./router.js";
 
-export const BUS_HOME = process.env.AGENT_BUS_HOME ?? join(homedir(), ".agent-bus");
-export const BUS_PORT = Number(process.env.AGENT_BUS_PORT ?? 11511);
-export const BUS_HOST = process.env.AGENT_BUS_HOST ?? "127.0.0.1";
-export const BUS_URL = process.env.AGENT_BUS_URL ?? `http://${BUS_HOST}:${BUS_PORT}`;
+export function envValue(...names: string[]): string | undefined {
+  for (const name of names) {
+    const value = process.env[name];
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return undefined;
+}
+
+export function defaultProductHome(): string {
+  const next = join(homedir(), ".qagent");
+  const previous = join(homedir(), ".agent-bus");
+  if (existsSync(next) || !existsSync(previous)) return next;
+  return previous;
+}
+
+export const BUS_HOME = envValue("QAGENT_HOME", "AGENT_BUS_HOME") ?? defaultProductHome();
+export const BUS_PORT = Number(envValue("QAGENT_PORT", "AGENT_BUS_PORT") ?? 11511);
+export const BUS_HOST = envValue("QAGENT_HOST", "AGENT_BUS_HOST") ?? "127.0.0.1";
+export const BUS_URL = envValue("QAGENT_URL", "AGENT_BUS_URL") ?? `http://${BUS_HOST}:${BUS_PORT}`;
+
+export function productEnvBindings(options: {
+  home?: string;
+  host?: string;
+  port?: number | string;
+  url?: string;
+  config?: string;
+  applicationRoot?: string;
+  launcherPath?: string | null;
+  installRoot?: string | null;
+} = {}): Record<string, string> {
+  const home = options.home ?? BUS_HOME;
+  const host = options.host ?? BUS_HOST;
+  const port = String(options.port ?? BUS_PORT);
+  const url = options.url ?? BUS_URL;
+  const env: Record<string, string> = {
+    QAGENT_HOME: home,
+    AGENT_BUS_HOME: home,
+    QAGENT_HOST: host,
+    AGENT_BUS_HOST: host,
+    QAGENT_PORT: port,
+    AGENT_BUS_PORT: port,
+    QAGENT_URL: url,
+    AGENT_BUS_URL: url,
+  };
+  if (options.config) {
+    env.QAGENT_CONFIG = options.config;
+    env.AGENT_BUS_CONFIG = options.config;
+  }
+  if (options.applicationRoot) {
+    env.QAGENT_APPLICATION_ROOT = options.applicationRoot;
+    env.AGENT_BUS_APPLICATION_ROOT = options.applicationRoot;
+  }
+  if (options.launcherPath) {
+    env.QAGENT_LAUNCHER_PATH = options.launcherPath;
+    env.AGENT_BUS_LAUNCHER_PATH = options.launcherPath;
+  }
+  if (options.installRoot) {
+    env.QAGENT_INSTALL_ROOT = options.installRoot;
+    env.AGENT_BUS_INSTALL_ROOT = options.installRoot;
+  }
+  return env;
+}
 export const MAX_WAIT_MS = 240_000;
 export const DEFAULT_WAIT_MS = 180_000;
-export const DEFAULT_BLOCK_MS = Number(process.env.AGENT_BUS_BLOCK_SEC ?? 900) * 1000;
+export const DEFAULT_BLOCK_MS = Number(envValue("QAGENT_BLOCK_SEC", "AGENT_BUS_BLOCK_SEC") ?? 900) * 1000;
 export const MAX_BLOCK_MS = 3_600_000;
 export const STALE_AGENT_MS = 15 * 60_000;
 

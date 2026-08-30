@@ -5,12 +5,12 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { discoverHarnessModels, probeCommand } from "./adapters.js";
 import { DEFAULT_CONFIG_PATH, loadConfig, resolveAgent, } from "./config.js";
-import { stageAgentUpdate, stageConstraintsPatch, stageModelUpsert, stageProviderEnabled, supervisedExecutionConflicts } from "./config-transitions.js";
+import { stageAgentUpdate, stageAppearancePatch, stageConstraintsPatch, stageModelUpsert, stageProviderEnabled, supervisedExecutionConflicts } from "./config-transitions.js";
 import { applyFoundProviders, scanProviders } from "./discover.js";
 import { verifiedSupervisorProcess } from "./instance-processes.js";
 import { addOrUpdateIntegration } from "./integrations.js";
-import { BUS_HOME, BUS_HOST, BUS_PORT, MAX_WAIT_MS } from "./protocol.js";
-import { productArtifactManifest, PRODUCT_NAME, PRODUCT_PROTOCOL_VERSION } from "./product-runtime.js";
+import { BUS_HOME, BUS_HOST, BUS_PORT, MAX_WAIT_MS, envValue } from "./protocol.js";
+import { productArtifactManifest, PRODUCT_NAME, PRODUCT_PROTOCOL_VERSION, SESSION_COOKIE } from "./product-runtime.js";
 import { OPERATOR_TOKEN_PATH, agentTokenPath, hashToken, readTokenFile, writePrivateToken, } from "./security.js";
 import { serveDashboardStatic } from "./static-web.js";
 import { BrokerService } from "./broker.js";
@@ -79,9 +79,9 @@ function cookies(req) {
     return out;
 }
 function requireSession(req, sessions) {
-    const session = cookies(req).agent_bus_session ?? "";
+    const session = cookies(req).qagent_session ?? cookies(req).agent_bus_session ?? "";
     if (!session || !sessions.valid(session)) {
-        throw new BrowserAuthError("dashboard session missing or expired; run `agent-bus open`");
+        throw new BrowserAuthError("dashboard session missing or expired; run `qagent open`");
     }
     return session;
 }
@@ -386,7 +386,7 @@ async function handleApi(req, res, pathname, params, service, sessions, operator
         const body = await readJson(req);
         const session = sessions.exchange(String(body.ticket ?? ""));
         return sendJson(res, 200, { authenticated: true }, {
-            "set-cookie": `agent_bus_session=${encodeURIComponent(session)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${Math.ceil(sessionTtlMs / 1000)}`,
+            "set-cookie": `${SESSION_COOKIE}=${encodeURIComponent(session)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${Math.ceil(sessionTtlMs / 1000)}`,
         });
     }
     const session = requireSession(req, sessions);
@@ -397,7 +397,7 @@ async function handleApi(req, res, pathname, params, service, sessions, operator
     if (pathname === "/api/session/logout" && req.method === "POST") {
         sessions.revoke(session);
         return sendJson(res, 200, { authenticated: false }, {
-            "set-cookie": "agent_bus_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0",
+            "set-cookie": `${SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`,
         });
     }
     if (pathname === "/api/events" && req.method === "GET") {
@@ -535,6 +535,12 @@ async function handleApi(req, res, pathname, params, service, sessions, operator
         persistLiveConfig(service, configPath, result.config);
         return sendJson(res, 200, { constraints: result.constraints, applied: true });
     }
+    if (pathname === "/api/appearance" && req.method === "POST") {
+        const body = await readJson(req);
+        const result = stageAppearancePatch(loadConfig(configPath || undefined), body);
+        persistLiveConfig(service, configPath, result.config);
+        return sendJson(res, 200, { appearance: result.appearance, applied: true });
+    }
     if (pathname === "/api/agents" && req.method === "POST") {
         const body = await readJson(req);
         const result = stageAgentUpdate(loadConfig(configPath || undefined), body);
@@ -586,7 +592,7 @@ export async function startProductServer(options = {}) {
     const host = options.host ?? BUS_HOST;
     const requestedPort = options.port ?? BUS_PORT;
     const operatorTokenPath = options.operatorTokenPath ?? OPERATOR_TOKEN_PATH;
-    const configPath = options.configPath ?? (options.config ? null : (process.env.AGENT_BUS_CONFIG ?? DEFAULT_CONFIG_PATH));
+    const configPath = options.configPath ?? (options.config ? null : (envValue("QAGENT_CONFIG", "AGENT_BUS_CONFIG") ?? DEFAULT_CONFIG_PATH));
     const staticRoot = options.staticRoot ?? DEFAULT_STATIC_ROOT;
     const sessionTtlMs = Math.max(1000, options.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS);
     const ticketTtlMs = Math.max(20, options.loginTicketTtlMs ?? DEFAULT_LOGIN_TICKET_TTL_MS);
@@ -601,8 +607,8 @@ export async function startProductServer(options = {}) {
         staticRoot: resolve(staticRoot),
         entrypoint: resolve(process.argv[1] ?? CLI_PATH),
         modulePath: fileURLToPath(import.meta.url),
-        launcherPath: process.env.AGENT_BUS_LAUNCHER_PATH ?? null,
-        installRoot: process.env.AGENT_BUS_INSTALL_ROOT ?? null,
+        launcherPath: envValue("QAGENT_LAUNCHER_PATH", "AGENT_BUS_LAUNCHER_PATH") ?? null,
+        installRoot: envValue("QAGENT_INSTALL_ROOT", "AGENT_BUS_INSTALL_ROOT") ?? null,
         nodePath: process.execPath,
         nodeVersion: process.version,
         cwd: process.cwd(),
@@ -661,7 +667,7 @@ export async function startProductServer(options = {}) {
     const address = server.address();
     const port = typeof address === "object" && address ? address.port : requestedPort;
     const url = `http://${host}:${port}`;
-    process.stderr.write(`agent-bus listening on ${url} (dashboard + API + broker, SQLite: ${service.store.path})\n`);
+    process.stderr.write(`Qagent listening on ${url} (dashboard + API + broker, SQLite: ${service.store.path})\n`);
     return {
         service,
         server,

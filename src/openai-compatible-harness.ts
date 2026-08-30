@@ -35,7 +35,7 @@ function parseArgs(): Args {
 
 async function main(): Promise<void> {
   if (process.argv.includes("--help") || process.argv.includes("-h")) {
-    process.stdout.write("agent-bus OpenAI-compatible harness\n\n--base-url URL --model MODEL --prompt TEXT [--api-key-env NAME]\n");
+    process.stdout.write("qagent OpenAI-compatible harness\n\n--base-url URL --model MODEL --prompt TEXT [--api-key-env NAME]\n");
     return;
   }
   const args = parseArgs();
@@ -55,7 +55,7 @@ async function main(): Promise<void> {
     method: "POST",
     headers,
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(Number(process.env.AGENT_BUS_HTTP_TIMEOUT_MS ?? 3_600_000)),
+    signal: AbortSignal.timeout(Number(process.env.QAGENT_HTTP_TIMEOUT_MS ?? process.env.AGENT_BUS_HTTP_TIMEOUT_MS ?? 3_600_000)),
   });
   const text = await response.text();
   if (!response.ok) {

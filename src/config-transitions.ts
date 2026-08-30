@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { AppearanceTheme, parseAppearance } from "./appearance.js";
 import {
   AgentDefinition,
   BusConfig,
@@ -235,4 +236,15 @@ export function stageConstraintsPatch(baseConfig: BusConfig, body: Record<string
   if (body.preferSubscription !== undefined) constraints.preferSubscription = Boolean(body.preferSubscription);
   validateConfig(config);
   return { constraints, config };
+}
+
+export function stageAppearancePatch(baseConfig: BusConfig, body: Record<string, unknown>): {
+  appearance: AppearanceTheme;
+  config: BusConfig;
+} {
+  const config = structuredClone(baseConfig);
+  const appearance = parseAppearance({ ...(config.appearance ?? {}), ...body });
+  config.appearance = appearance;
+  validateConfig(config);
+  return { appearance, config };
 }

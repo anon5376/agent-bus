@@ -7,7 +7,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BUS_HOME="${AGENT_BUS_HOME:-$HOME/.agent-bus}"
+BUS_HOME="${QAGENT_HOME:-${AGENT_BUS_HOME:-$HOME/.qagent}}"
 LOGS="$BUS_HOME/logs"
 mkdir -p "$LOGS"
 
@@ -24,7 +24,7 @@ AGENTS=("$@")
 
 [[ -f "$ROOT/dist/cli.js" ]] || { echo "build first: (cd '$ROOT' && npm run build)" >&2; exit 1; }
 
-PORT="${AGENT_BUS_PORT:-11511}"
+PORT="${QAGENT_PORT:-${AGENT_BUS_PORT:-11511}}"
 HEALTH="http://127.0.0.1:${PORT}/health"
 
 # 1. broker ------------------------------------------------------------------

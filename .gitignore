@@ -3,6 +3,7 @@ dist/*.tsbuildinfo
 dist-test/
 gui/AgentBus.app/
 .agent-bus/
+.qagent/
 .claude/
 .claude-flow/
 *.log

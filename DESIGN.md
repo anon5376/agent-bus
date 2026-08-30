@@ -1,5 +1,5 @@
 ---
-name: Agent Bus
+name: Qagent
 description: Local operator dashboard for a multi-agent broker.
 colors:
   bg: "#141414"
@@ -76,11 +76,11 @@ components:
     padding: "16px 18px"
 ---
 
-# Design System: Agent Bus
+# Design System: Qagent
 
 ## Overview
 
-**Creative North Star: Cursor-style operator dashboard.** Agent Bus looks like a Cursor settings/agents surface: near-black panels, 8px rounded rows, a slim top bar, and a blue accent. The product name stays Agent Bus / AB. Do not use Cursor trademarks as branding.
+**Creative North Star: Cursor-style operator dashboard.** Qagent looks like a Cursor settings/agents surface: near-black panels, 8px rounded rows, a slim top bar, and a blue accent. The product name stays Qagent / Q. Operators can restyle those colors from Settings. Do not use Cursor trademarks as branding.
 
 **Key Characteristics:**
 - Near-black field (`#141414`) with raised panels (`#1e1e1e`)

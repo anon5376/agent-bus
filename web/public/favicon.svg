@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Agent Bus">
-  <rect width="64" height="64" fill="#12141a"/>
-  <rect x="10" y="10" width="44" height="44" fill="#e0c14a"/>
-  <path d="M20 46 28.5 18h7L44 46h-6l-1.7-6H27.7L26 46h-6Zm9.3-12h5.4L32 24.4 29.3 34Z" fill="#111"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Qagent">
+  <rect width="64" height="64" rx="14" fill="#141414"/>
+  <rect x="8" y="8" width="48" height="48" rx="10" fill="#4d9fff"/>
+  <path d="M32 18c-7.2 0-13 5.8-13 13 0 5.6 3.5 10.4 8.4 12.2l-3.1 5.4h7.2l2.2-3.8c.7.1 1.5.2 2.3.2 7.2 0 13-5.8 13-13S39.2 18 32 18Zm0 8.2c2.7 0 4.8 2.2 4.8 4.8S34.7 35.8 32 35.8 27.2 33.6 27.2 31 29.3 26.2 32 26.2Z" fill="#141414"/>
 </svg>

@@ -1,17 +1,18 @@
 import "./entry.ts";
-import { Component, useEffect, useState } from "react";
+import { Component, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import type { BusSnapshot, Message, RosterEntry as Agent, Run, Task } from "../../src/protocol.ts";
+import { APPEARANCE_CSS_VARS, APPEARANCE_KEYS, APPEARANCE_PRESETS, DEFAULT_APPEARANCE, type AppearanceKey, type AppearanceTheme } from "../../src/appearance.ts";
 import "./styles.css";
 
-const bootMonitor=()=>((window as any).__AGENT_BUS_BOOT__ as {checkpoint?:(number:number,detail?:unknown)=>void;fail?:(title:string,detail:unknown)=>void;diagnose?:(title:string,detail:unknown)=>void;record?:(kind:string,detail:unknown)=>void}|undefined);
+const bootMonitor=()=>((window as any).__QAGENT_BOOT__ as {checkpoint?:(number:number,detail?:unknown)=>void;fail?:(title:string,detail:unknown)=>void;diagnose?:(title:string,detail:unknown)=>void;record?:(kind:string,detail:unknown)=>void}|undefined);
 const checkpoint=(number:number,detail?:unknown)=>bootMonitor()?.checkpoint?.(number,detail);
 checkpoint(3,"React application module evaluated");
 checkpoint(4,"React and react-dom/client imports resolved");
 
 type Snapshot = BusSnapshot;
-type Catalog = { providers:Record<string,any>; harnesses:Record<string,any>; models:Record<string,any>; roles:Record<string,any>; agents:Record<string,any>; capabilityNotice:string; constraints:{maxDelegationDepth:number;maxConcurrentTasks:number;maxRetries:number;independentReviewComplexity:number;preferSubscription:boolean} };
+type Catalog = { providers:Record<string,any>; harnesses:Record<string,any>; models:Record<string,any>; roles:Record<string,any>; agents:Record<string,any>; capabilityNotice:string; constraints:{maxDelegationDepth:number;maxConcurrentTasks:number;maxRetries:number;independentReviewComplexity:number;preferSubscription:boolean}; appearance?:AppearanceTheme };
 type Project = { path:string; name:string; createdAt:number; lastUsedAt:number };
 type ProviderStatus = { id:string; displayName:string; configured:boolean; enabled?:boolean; cliFound:boolean; authKind:string; authSource:string; loginCommand?:string; installHint?:string; apiKeyEnv?:string; command?:string; resolvedPath?:string|null; version?:string|null; error?:string|null; harnessId?:string; liveVerification:string; harnesses:any[] };
 type SetupStatus = { completed:boolean; completedAt:number|null; required:boolean };
@@ -27,11 +28,32 @@ async function api<T=any>(path:string, init:RequestInit={}):Promise<T>{
 const post=<T=any>(path:string, body:any={})=>api<T>(path,{method:"POST",body:JSON.stringify(body)});
 const fmtTokens=(n:number)=>n>=1_000_000?`${(n/1_000_000).toFixed(1)}m`:n>=1000?`${(n/1000).toFixed(1)}k`:String(n||0);
 
+const COLOR_LABELS: Record<AppearanceKey, string> = {
+  bg: "Page",
+  bg2: "Top bar",
+  panel: "Panels",
+  panel2: "Rows",
+  border: "Borders",
+  text: "Text",
+  muted: "Muted",
+  accent: "Accent",
+  accent2: "Buttons",
+  ok: "Ready",
+  warn: "Warn",
+  alert: "Stop",
+};
+
+function applyAppearance(theme: Partial<AppearanceTheme> | undefined) {
+  const merged = { ...DEFAULT_APPEARANCE, ...(theme ?? {}) };
+  const root = document.documentElement;
+  for (const key of APPEARANCE_KEYS) root.style.setProperty(APPEARANCE_CSS_VARS[key], merged[key]);
+}
+
 class AppErrorBoundary extends Component<{children:ReactNode},{error:string|null}>{
   state={error:null as string|null};
   static getDerivedStateFromError(error:unknown){return{error:error instanceof Error?error.message:String(error)}}
-  componentDidCatch(error:unknown){bootMonitor()?.fail?.("Agent Bus React error boundary",error);(globalThis as any).__AGENT_BUS_BOOTSTRAP__={phase:"react-error",error:error instanceof Error?error.message:String(error)}}
-  render(){if(this.state.error)return <main className="lock"><div className="lock-card"><div className="mark" aria-hidden="true">AB</div><h1>Agent Bus frontend crashed</h1><p className="error">{this.state.error}</p><p>Run <code>agent-bus open</code> again. The broker is still local and your persistent state is unchanged.</p></div></main>;return this.props.children}
+  componentDidCatch(error:unknown){bootMonitor()?.fail?.("Qagent React error boundary",error);(globalThis as any).__QAGENT_BOOTSTRAP__={phase:"react-error",error:error instanceof Error?error.message:String(error)}}
+  render(){if(this.state.error)return <main className="lock"><div className="lock-card"><div className="mark" aria-hidden="true">Q</div><h1>Qagent frontend crashed</h1><p className="error">{this.state.error}</p><p>Run <code>qagent open</code> again. The broker is still local and your persistent state is unchanged.</p></div></main>;return this.props.children}
 }
 
 function Login({onReady}:{onReady:()=>void}){
@@ -44,9 +66,9 @@ function Login({onReady}:{onReady:()=>void}){
       checkpoint(9,"one-time ticket exchanged for HttpOnly session");
       history.replaceState(null,"",location.pathname);
       onReady();
-    }).catch(e=>{history.replaceState(null,"",location.pathname);bootMonitor()?.diagnose?.("Agent Bus ticket exchange failed",e);setError(e.message)});
+    }).catch(e=>{history.replaceState(null,"",location.pathname);bootMonitor()?.diagnose?.("Qagent ticket exchange failed",e);setError(e.message)});
   },[]);
-  return <main className="lock"><div className="lock-card"><div className="mark" aria-hidden="true">AB</div><h1>Agent Bus is locked</h1><p>Open this dashboard through the trusted CLI so the browser receives a one-time operator session.</p><code>agent-bus open</code>{error&&<p className="error">{error}</p>}</div></main>;
+  return <main className="lock"><div className="lock-card"><div className="mark" aria-hidden="true">Q</div><h1>Qagent is locked</h1><p>Open this dashboard through the trusted CLI so the browser receives a one-time operator session.</p><code>qagent open</code>{error&&<p className="error">{error}</p>}</div></main>;
 }
 
 function App(){
@@ -69,16 +91,16 @@ function App(){
     window.addEventListener("popstate",onPop);
     return()=>window.removeEventListener("popstate",onPop);
   },[]);
-  useEffect(()=>{if(!auth)return;Promise.all([api<Snapshot>("/api/state"),api<Catalog>("/api/catalog"),api<any>("/api/projects"),api<any>("/api/providers/status"),api<SetupStatus>("/api/setup")]).then(([s,c,p,ps,setup])=>{setSnap(s);setCatalog(c);setProjects(p.projects||[]);setProviders(ps.providers||[]);setRunId(r=>r||s.runs[0]?.id||null);const required=setup.required??(!setup.completed&&s.runs.length===0);const wantSetup=location.pathname==="/setup"||required;setView(wantSetup?"setup":"console");if(required&&location.pathname!=="/setup")history.replaceState(null,"","/setup");checkpoint(10,"authenticated dashboard committed to the DOM")}).catch(e=>note(e.message));const es=new EventSource("/api/events");es.addEventListener("snapshot",e=>{const n=JSON.parse((e as MessageEvent).data);setSnap(prev=>mergeSnapshot(prev,n))});es.addEventListener("error",()=>note("Live event stream disconnected; reconnecting…"));return()=>es.close()},[auth]);
-  if(auth===null)return <div className="boot">Starting Agent Bus…</div>; if(!auth)return <Login onReady={ready}/>;
-  if(!catalog||!view)return <div className="boot">Starting Agent Bus…</div>;
+  useEffect(()=>{if(!auth)return;Promise.all([api<Snapshot>("/api/state"),api<Catalog>("/api/catalog"),api<any>("/api/projects"),api<any>("/api/providers/status"),api<SetupStatus>("/api/setup")]).then(([s,c,p,ps,setup])=>{setSnap(s);setCatalog(c);applyAppearance(c.appearance);setProjects(p.projects||[]);setProviders(ps.providers||[]);setRunId(r=>r||s.runs[0]?.id||null);const required=setup.required??(!setup.completed&&s.runs.length===0);const wantSetup=location.pathname==="/setup"||required;setView(wantSetup?"setup":"console");if(required&&location.pathname!=="/setup")history.replaceState(null,"","/setup");checkpoint(10,"authenticated dashboard committed to the DOM")}).catch(e=>note(e.message));const es=new EventSource("/api/events");es.addEventListener("snapshot",e=>{const n=JSON.parse((e as MessageEvent).data);setSnap(prev=>mergeSnapshot(prev,n))});es.addEventListener("error",()=>note("Live event stream disconnected; reconnecting…"));return()=>es.close()},[auth]);
+  if(auth===null)return <div className="boot">Starting Qagent…</div>; if(!auth)return <Login onReady={ready}/>;
+  if(!catalog||!view)return <div className="boot">Starting Qagent…</div>;
 
   const currentRun=snap.runs.find(r=>r.id===runId)||null; const tasks=snap.tasks.filter(t=>!runId||t.runId===runId).sort((a,b)=>a.updatedAt-b.updatedAt); const task=snap.tasks.find(t=>t.id===taskId)||null;
   const agents=snap.roster.filter(a=>a.id!=="operator"); const runTaskIds=new Set(tasks.map(t=>t.id)); const messages=snap.messages.filter(m=>!runId||!m.taskId||runTaskIds.has(m.taskId)).slice().sort((a,b)=>b.seq-a.seq);
   const usage=agents.reduce((a,x)=>({tokens:a.tokens+(x.usage?.totalTokens||0),turns:a.turns+(x.usage?.turns||0),cost:a.cost+(x.usage?.costUSD||0)}),{tokens:0,turns:0,cost:0});
   const failures=tasks.filter(t=>t.state==="failed"||t.attempts>0).length;
 
-  async function refreshCatalog(){const [c,p,ps]=await Promise.all([api<Catalog>("/api/catalog"),api<any>("/api/projects"),api<any>("/api/providers/status")]);setCatalog(c);setProjects(p.projects||[]);setProviders(ps.providers||[])}
+  async function refreshCatalog(){const [c,p,ps]=await Promise.all([api<Catalog>("/api/catalog"),api<any>("/api/projects"),api<any>("/api/providers/status")]);setCatalog(c);applyAppearance(c.appearance);setProjects(p.projects||[]);setProviders(ps.providers||[])}
   async function discoverProviders(){
     try{
       const applied=await post("/api/discover",{apply:true});
@@ -108,9 +130,9 @@ function App(){
     <SetupView catalog={catalog} providers={providers} projects={projects} onToast={note} refreshCatalog={refreshCatalog} discoverProviders={discoverProviders} openAgent={(id)=>{setTaskId(id);setModal("agent")}} openProject={()=>setModal("project")} enterConsole={async()=>{try{await post("/api/setup",{completed:true});showConsole()}catch(e:any){note(e.message)}}}/>
     {modals}
   </>;
-  return <div className="app" data-agent-bus-mounted="true">
+  return <div className="app" data-qagent-mounted="true">
     <header className="sector">
-      <div className="sector-id"><span className="mark" aria-hidden="true">AB</span><strong>Agent Bus</strong><span className="host">{location.host}</span></div>
+      <div className="sector-id"><span className="mark" aria-hidden="true">Q</span><strong>Qagent</strong><span className="host">{location.host}</span></div>
       <div className="sector-place">
         <label>Project<select value={projectValue} onChange={e=>{const path=e.target.value;const r=snap.runs.find(x=>x.projectRoot===path);if(r)setRunId(r.id)}}>{projects.length?projects.map(p=><option key={p.path} value={p.path}>{p.name}</option>):<option value="">Add a project…</option>}</select></label>
         <label>Run<select value={runId||""} onChange={e=>setRunId(e.target.value||null)}><option value="">No run</option>{snap.runs.map(r=><option key={r.id} value={r.id}>{r.goal}</option>)}</select></label>
@@ -132,11 +154,11 @@ function App(){
         <button className="alert" onClick={stopAll}>Stop all</button>
       </div>
     </header>
-    <div className={`mission ${currentRun?"":"vacant"}`}>{currentRun?<><div><h1>{currentRun.goal}</h1><p>{currentRun.status} · {currentRun.id} · {currentRun.projectRoot}</p></div><div className="row"><button onClick={()=>setModal("message")}>Message team</button>{currentRun.status==="active"&&<button className="alert subtle" onClick={stopRun}>Stop run</button>}</div></>:<div><h1>No run selected</h1><p>Start a run with a project path and an objective. Attach <code>@agent-bus</code> in chat to delegate from another model.</p></div>}</div>
+    <div className={`mission ${currentRun?"":"vacant"}`}>{currentRun?<><div><h1>{currentRun.goal}</h1><p>{currentRun.status} · {currentRun.id} · {currentRun.projectRoot}</p></div><div className="row"><button onClick={()=>setModal("message")}>Message team</button>{currentRun.status==="active"&&<button className="alert subtle" onClick={stopRun}>Stop run</button>}</div></>:<div><h1>No run selected</h1><p>Start a run with a project path and an objective. Attach <code>@qagent</code> in chat to delegate from another model.</p></div>}</div>
     <div className="bay">
       <section>
         <div className="bay-head">Tasks <b>{tasks.length}</b></div>
-        <div className="strips">{tasks.length?tasks.map(t=><button className={`strip ${t.id===taskId?"selected":""}`} key={t.id} style={{marginLeft:Math.min(6,t.depth||0)*12}} onClick={()=>{setTaskId(t.id);setModal("task")}}><i className={`tab ${t.state}`}/><span className="strip-body"><b>{t.title}</b><small>{t.assignee||"unassigned"} · {t.role}/c{t.complexity} · r{t.round}{t.attempts?` · ${t.attempts} retry`:""}{t.routing?.reason?` · ${t.routing.reason}`:""}</small></span><span className="strip-meta">{t.state}</span></button>):<p className="empty">No tasks yet. Create a run or delegate from chat with @agent-bus.</p>}</div>
+        <div className="strips">{tasks.length?tasks.map(t=><button className={`strip ${t.id===taskId?"selected":""}`} key={t.id} style={{marginLeft:Math.min(6,t.depth||0)*12}} onClick={()=>{setTaskId(t.id);setModal("task")}}><i className={`tab ${t.state}`}/><span className="strip-body"><b>{t.title}</b><small>{t.assignee||"unassigned"} · {t.role}/c{t.complexity} · r{t.round}{t.attempts?` · ${t.attempts} retry`:""}{t.routing?.reason?` · ${t.routing.reason}`:""}</small></span><span className="strip-meta">{t.state}</span></button>):<p className="empty">No tasks yet. Create a run or delegate from chat with @qagent.</p>}</div>
       </section>
       <section>
         <div className="bay-head">Agents <button type="button" data-agent-add="true" onClick={()=>setModal("agent")}>Add</button></div>
@@ -177,9 +199,9 @@ function SetupView({catalog,providers,projects,onToast,refreshCatalog,discoverPr
     }catch(error:any){onToast(error.message)}
     finally{setBusy(false)}
   }
-  return <div className="app setup" data-agent-bus-mounted="true" data-setup-page="true">
+  return <div className="app setup" data-qagent-mounted="true" data-setup-page="true">
     <header className="sector">
-      <div className="sector-id"><span className="mark" aria-hidden="true">AB</span><strong>Agent Bus</strong><span className="host">{location.host}</span></div>
+      <div className="sector-id"><span className="mark" aria-hidden="true">Q</span><strong>Qagent</strong><span className="host">{location.host}</span></div>
       <div className="sector-place"><p className="setup-kicker">Settings</p></div>
       <div className="figures">
         <label><b>{enabledAgents.length}/{agents.length}</b><span>enabled</span></label>
@@ -234,6 +256,16 @@ function SetupView({catalog,providers,projects,onToast,refreshCatalog,discoverPr
         </form>
       </section>
       <section>
+        <div className="bay-head">Appearance</div>
+        <AppearanceBoard
+          theme={{...DEFAULT_APPEARANCE,...(catalog.appearance||{})}}
+          onChange={(appearance)=>{
+            applyAppearance(appearance);
+            saveDisk(()=>post("/api/appearance",appearance),"Colors saved");
+          }}
+        />
+      </section>
+      <section>
         <div className="bay-head">Projects <button type="button" onClick={openProject}>Add</button></div>
         <div className="strips">{projects.length?projects.map(project=><article className="strip" key={project.path}><i className="tab idle"/><span className="strip-body"><b>{project.name}</b><small>{project.path}</small></span></article>):<p className="empty">Add a local project path agents may work in.</p>}</div>
       </section>
@@ -242,6 +274,32 @@ function SetupView({catalog,providers,projects,onToast,refreshCatalog,discoverPr
       <p>{enabledAgents.length?`${enabledAgents.length} agent${enabledAgents.length===1?"":"s"} enabled.`:"Scan CLIs, turn providers on, then add the manager you will talk to first."}</p>
       <button className="primary" onClick={finish} disabled={busy}>Open dashboard</button>
     </footer>
+  </div>;
+}
+
+function AppearanceBoard({theme,onChange}:{theme:AppearanceTheme;onChange:(theme:AppearanceTheme)=>void}){
+  const [draft,setDraft]=useState(theme);
+  const persistTimer=useRef<ReturnType<typeof setTimeout>|null>(null);
+  const incoming=APPEARANCE_KEYS.map(key=>theme[key]).join(" ");
+  useEffect(()=>{setDraft({...DEFAULT_APPEARANCE,...theme})},[incoming]);
+  useEffect(()=>()=>{if(persistTimer.current)clearTimeout(persistTimer.current)},[]);
+  function commit(next:AppearanceTheme,immediate=false){
+    setDraft(next);
+    applyAppearance(next);
+    if(persistTimer.current)clearTimeout(persistTimer.current);
+    if(immediate){onChange(next);return}
+    persistTimer.current=setTimeout(()=>onChange(next),180);
+  }
+  return <div className="appearance">
+    <p className="empty">Pick a preset or any color. Changes apply immediately and are saved to this machine.</p>
+    <div className="chips">{APPEARANCE_PRESETS.map(preset=><button type="button" className={`chip ${APPEARANCE_KEYS.every(key=>draft[key]===preset.theme[key])?"selected":""}`} key={preset.id} onClick={()=>commit(preset.theme,true)}>{preset.label}</button>)}</div>
+    <div className="color-grid">{APPEARANCE_KEYS.map(key=>
+      <label className="color-field" key={key}>
+        <span>{COLOR_LABELS[key]}</span>
+        <input type="color" value={draft[key]} onChange={e=>commit({...draft,[key]:e.target.value})} aria-label={COLOR_LABELS[key]}/>
+        <code>{draft[key]}</code>
+      </label>
+    )}</div>
   </div>;
 }
 
@@ -289,7 +347,7 @@ function TaskModal({task,close,review,onToast}:{task:Task;close:()=>void;review:
 function AgentModal({catalog,existing,close,onDone,onToast}:{catalog:Catalog;existing:any;close:()=>void;onDone:()=>void;onToast:(s:string)=>void}){const [id,setId]=useState(existing?.id||"");const [model,setModel]=useState(existing?.model||Object.keys(catalog.models)[0]||"");const [role,setRole]=useState(existing?.role||"implementation");const modelDef=catalog.models[model]||{};return <Modal title={existing?`Edit ${existing.id}`:"Create agent"} close={close}><form onSubmit={async e=>{e.preventDefault();const f=new FormData(e.currentTarget);try{await post("/api/agents",{id,model,role,description:f.get("description"),enabled:f.get("enabled")==="on",autoStart:f.get("autoStart")==="on",reasoning:f.get("reasoning"),effort:f.get("effort"),permissions:{filesystem:f.get("filesystem"),shell:f.get("shell")==="on",network:f.get("network")==="on",canReview:f.get("canReview")==="on",canDelegate:f.get("canDelegate")==="on",maxDelegationDepth:f.get("canDelegate")==="on"?4:0,allowedPaths:["."],allowedChildAgentIds:existing?.permissions?.allowedChildAgentIds}});onDone()}catch(err:any){onToast(err.message)}}}><div className="two"><label>Name<input value={id} onChange={e=>setId(e.target.value)} disabled={!!existing} required/></label><label>Role<select value={role} onChange={e=>setRole(e.target.value)}>{Object.keys(catalog.roles).map(x=><option key={x}>{x}</option>)}</select></label><label>Model<select data-agent-model-select="true" value={model} onChange={e=>setModel(e.target.value)}>{Object.values(catalog.models).map((m:any)=><option key={m.id} value={m.id}>{m.id} · {m.provider}</option>)}</select></label><label>Exact model<input data-agent-model-exact="true" value={modelDef.exactModel||""} readOnly/></label><label>Model family<input data-agent-model-family="true" value={modelDef.family||""} readOnly/></label><label>Description<input name="description" defaultValue={existing?.description||""}/></label><label>Reasoning<input name="reasoning" defaultValue={existing?.harnessOptions?.reasoning||""} placeholder="high"/></label><label>Effort<input name="effort" defaultValue={existing?.harnessOptions?.effort||""} placeholder="high"/></label><label>Filesystem<select name="filesystem" defaultValue={existing?.permissions?.filesystem||"read"}><option>none</option><option>read</option><option>write</option></select></label></div><div className="checks"><label><input type="checkbox" name="shell" defaultChecked={existing?.permissions?.shell}/>shell</label><label><input type="checkbox" name="network" defaultChecked={existing?.permissions?.network}/>network</label><label><input type="checkbox" name="canReview" defaultChecked={existing?.permissions?.canReview}/>review</label><label><input type="checkbox" name="canDelegate" defaultChecked={existing?.permissions?.canDelegate}/>delegate</label><label><input type="checkbox" name="enabled" defaultChecked={existing?.enabled??true}/>enabled</label><label><input type="checkbox" name="autoStart" defaultChecked={existing?.autoStart}/>auto-start</label></div><div className="modal-actions"><button type="button" onClick={close}>Cancel</button><button className="primary">Save agent</button></div></form></Modal>}
 
 const rootElement=document.getElementById("root");
-if(!rootElement)throw new Error("Agent Bus root element is missing");
+if(!rootElement)throw new Error("Qagent root element is missing");
 const reactRoot=createRoot(rootElement);
 checkpoint(5,"createRoot returned successfully");
 reactRoot.render(<AppErrorBoundary><App/></AppErrorBoundary>);

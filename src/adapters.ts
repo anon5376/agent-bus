@@ -149,7 +149,7 @@ function genericCommandResult(stdout: string, exitCode: number): NormalizedHarne
 }
 
 /**
- * Escape hatch for models/harnesses Agent Bus does not know about yet.
+ * Escape hatch for models/harnesses Qagent does not know about yet.
  *
  * Configure a harness with `adapter: "command"`, then set per-agent harnessOptions:
  *   args: ["run", "--model", "{model}", "--prompt", "{prompt}"]
@@ -160,7 +160,7 @@ function genericCommandResult(stdout: string, exitCode: number): NormalizedHarne
  * Supported placeholders: {prompt}, {model}, {modelId}, {family}, {provider},
  * {agentId}, {role}, {session}, {workdir}, {mcpServer}.
  *
- * If the custom CLI has its own Agent Bus MCP integration, set autoReport=false.
+ * If the custom CLI has its own Qagent MCP integration, set autoReport=false.
  * If it is a plain one-shot/model CLI, leave autoReport=true and the supervisor
  * submits its textual result for ordinary worker tasks.
  */
@@ -200,7 +200,7 @@ const claudeAdapter: HarnessAdapter = {
     const env = commonEnvironment(context);
     const mcp = JSON.stringify({
       mcpServers: {
-        "agent-bus": {
+        "qagent": {
           command: process.execPath,
           args: [context.mcpServerPath],
           env,
@@ -217,7 +217,7 @@ const claudeAdapter: HarnessAdapter = {
       "--permission-mode",
       "acceptEdits",
       "--allowedTools",
-      "mcp__agent-bus,Bash,Read,Write,Edit,Glob,Grep",
+      "mcp__qagent,Bash,Read,Write,Edit,Glob,Grep",
     ];
     if (context.sessionId) args.push("--resume", context.sessionId);
     if (context.agent.modelDefinition.exactModel) args.push("--model", context.agent.modelDefinition.exactModel);
@@ -226,7 +226,7 @@ const claudeAdapter: HarnessAdapter = {
     return {
       command: context.agent.harnessDefinition.command,
       args,
-      environment: { ...env, MCP_TOOL_TIMEOUT: "3600000", AGENT_BUS_BLOCK_SEC: "900" },
+      environment: { ...env, MCP_TOOL_TIMEOUT: "3600000", QAGENT_BLOCK_SEC: "900", AGENT_BUS_BLOCK_SEC: "900" },
       autoReport: false,
       timeoutMs: 60 * 60_000,
     };
@@ -277,7 +277,7 @@ const codexAdapter: HarnessAdapter = {
     return {
       command: context.agent.harnessDefinition.command,
       args,
-      environment: { ...env, AGENT_BUS_BLOCK_SEC: "240" },
+      environment: { ...env, QAGENT_BLOCK_SEC: "240", AGENT_BUS_BLOCK_SEC: "240" },
       autoReport: false,
       timeoutMs: 60 * 60_000,
     };
@@ -330,7 +330,7 @@ const cursorAdapter: HarnessAdapter = {
     let cfg: Record<string, unknown> = {};
     try { cfg = JSON.parse(readFileSync(cfgPath, "utf8")) as Record<string, unknown>; } catch { /* new project-local MCP config */ }
     const mcp = (cfg.mcpServers && typeof cfg.mcpServers === "object" ? cfg.mcpServers : {}) as Record<string, unknown>;
-    mcp["agent-bus"] = {
+    mcp["qagent"] = {
       command: process.execPath,
       args: [context.mcpServerPath],
       env: commonEnvironment(context),
@@ -346,7 +346,7 @@ const cursorAdapter: HarnessAdapter = {
     return {
       command: context.agent.harnessDefinition.command,
       args,
-      environment: { ...env, AGENT_BUS_BLOCK_SEC: "900" },
+      environment: { ...env, QAGENT_BLOCK_SEC: "900", AGENT_BUS_BLOCK_SEC: "900" },
       autoReport: false,
       timeoutMs: 60 * 60_000,
     };
@@ -410,7 +410,7 @@ const opencodeAdapter: HarnessAdapter = {
     let cfg: Record<string, unknown> = {};
     try { cfg = JSON.parse(readFileSync(cfgPath, "utf8")) as Record<string, unknown>; } catch { /* new project-local configuration */ }
     const mcp = (cfg.mcp && typeof cfg.mcp === "object" ? cfg.mcp : {}) as Record<string, unknown>;
-    mcp["agent-bus"] = {
+    mcp["qagent"] = {
       type: "local",
       command: [process.execPath, context.mcpServerPath],
       environment: commonEnvironment(context),

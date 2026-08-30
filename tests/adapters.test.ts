@@ -133,7 +133,7 @@ test("Cursor adapter uses print/json/force and writes MCP config", () => {
   assert.ok(invocation.args.includes("--force"));
   assert.ok(invocation.args.includes("--resume"));
   const mcp = JSON.parse(readFileSync(join(workdir, ".cursor", "mcp.json"), "utf8"));
-  assert.equal(mcp.mcpServers["agent-bus"].args[0], "/tmp/mcp.js");
+  assert.equal(mcp.mcpServers["qagent"].args[0], "/tmp/mcp.js");
 });
 
 test("supervisor retry backoff is bounded and exponential", () => {

@@ -60,8 +60,8 @@ export function knownAgentBusCommand(command: string, scope: AgentBusCommandScop
   if (scope.busHome) roots.push(`${escapeRegex(resolve(scope.busHome))}/app/(?:current|releases/[^/]+)/`);
   else if (scope.applicationRoot) roots.push(`${escapeRegex(resolve(scope.applicationRoot))}/`);
   else {
-    roots.push(String.raw`\S*/agent-bus/`);
-    roots.push(String.raw`\S*/\.agent-bus/app/(?:current|releases/[^/]+)/`);
+    roots.push(String.raw`\S*/(?:qagent|agent-bus)/`);
+    roots.push(String.raw`\S*/\.(?:qagent|agent-bus)/app/(?:current|releases/[^/]+)/`);
   }
   const root = `(?:${[...new Set(roots)].join("|")})`;
   return new RegExp(String.raw`(?:^|\s)(?:\S*node\S*\s+)?${root}(?:dist/(?:cli|broker|product-server)\.js|cli\.js)(?:\s+(?:broker|dashboard|supervise)(?:\s|$)|\s*$)`, "i").test(text)
@@ -101,7 +101,7 @@ export function classifyPortOwner(
   if (healthBelongsToPid && strongProductHealth(health)) {
     const hasScopedRuntimeIdentity = Boolean(String(health!.runtime?.busHome ?? "").trim() || String(health!.runtime?.applicationRoot ?? "").trim());
     if (hasScopedRuntimeIdentity && !runtimeBelongsToScope(health!, scope)) {
-      return { pid, command, kind: "unrelated", reason: "different Agent Bus instance/home" };
+      return { pid, command, kind: "unrelated", reason: "different Qagent instance/home" };
     }
     const scopeRequiresRuntimeIdentity = Boolean(scope.busHome || scope.applicationRoot);
     const current = (!scopeRequiresRuntimeIdentity || hasScopedRuntimeIdentity)
@@ -112,22 +112,22 @@ export function classifyPortOwner(
       command,
       kind: current ? "current" : "agent-bus",
       reason: current
-        ? "current Agent Bus product"
+        ? "current Qagent product"
         : hasScopedRuntimeIdentity
-          ? "Agent Bus product with a different build/protocol"
-          : "confirmed Agent Bus target listener without scoped runtime identity",
+          ? "Qagent product with a different build/protocol"
+          : "confirmed Qagent target listener without scoped runtime identity",
     };
   }
   if (healthBelongsToPid && legacyHealthShape(health) && legacyCatalogFingerprint) {
     if (scope.busHome && !knownAgentBusCommand(command, scope)) {
-      return { pid, command, kind: "unrelated", reason: "legacy Agent Bus listener cannot be tied to the requested instance" };
+      return { pid, command, kind: "unrelated", reason: "legacy Qagent listener cannot be tied to the requested instance" };
     }
-    return { pid, command, kind: "agent-bus", reason: "legacy Agent Bus broker fingerprint" };
+    return { pid, command, kind: "agent-bus", reason: "legacy Qagent broker fingerprint" };
   }
   if (knownAgentBusCommand(command, scope)) {
-    return { pid, command, kind: "agent-bus", reason: "known Agent Bus executable" };
+    return { pid, command, kind: "agent-bus", reason: "known Qagent executable" };
   }
-  return { pid, command, kind: "unrelated", reason: "listener does not identify as Agent Bus" };
+  return { pid, command, kind: "unrelated", reason: "listener does not identify as Qagent" };
 }
 
 export function listenerPids(port: number): number[] {

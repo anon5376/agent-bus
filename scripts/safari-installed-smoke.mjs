@@ -11,7 +11,7 @@ if (process.platform !== "darwin") {
 }
 
 const baseUrl = process.env.AGENT_BUS_BROWSER_URL ?? "http://127.0.0.1:11511";
-const busHome = process.env.AGENT_BUS_HOME ?? join(process.env.HOME ?? "", ".agent-bus");
+const busHome = process.env.QAGENT_HOME ?? process.env.AGENT_BUS_HOME ?? join(process.env.HOME ?? "", ".qagent");
 const safariDriver = process.env.SAFARIDRIVER_BIN ?? "/usr/bin/safaridriver";
 
 function freePort() {
@@ -80,8 +80,8 @@ async function state(driverUrl, sessionId) {
     title: document.title,
     text: document.body.innerText,
     rootChildren: document.getElementById('root')?.childElementCount ?? -1,
-    mounted: Boolean(document.querySelector('[data-agent-bus-mounted="true"]')),
-    boot: globalThis.__AGENT_BUS_BOOT__?.state ?? null,
+    mounted: Boolean(document.querySelector('[data-qagent-mounted="true"]')),
+    boot: globalThis.__QAGENT_BOOT__?.state ?? null,
     controlled: Boolean(navigator.serviceWorker?.controller),
     userAgent: navigator.userAgent,
     scripts: Array.from(document.scripts).map(script => script.src).filter(Boolean),
@@ -95,7 +95,7 @@ async function waitForMounted(driverUrl, sessionId, label, timeoutMs = 20_000) {
   let last = null;
   while (Date.now() < deadline) {
     last = await state(driverUrl, sessionId);
-    if (last?.mounted && last.rootChildren > 0 && last.text.includes("Agent Bus") && last.search === "" && last.boot?.highest === 10) return last;
+    if (last?.mounted && last.rootChildren > 0 && last.text.includes("Qagent") && last.search === "" && last.boot?.highest === 10) return last;
     if (last?.boot?.failed) throw new Error(`${label} failed at checkpoint ${last.boot.highest}: ${JSON.stringify(last.boot.failure)}\n${last.text}`);
     await new Promise((done) => setTimeout(done, 150));
   }
@@ -159,7 +159,7 @@ try {
   assert.ok(mounted.scripts.some((url) => new URL(url).pathname === applicationScript.url));
 
   const cookies = await request(driverUrl, `/session/${sessionId}/cookie`);
-  assert.ok(cookies.value.some((cookie) => cookie.name === "agent_bus_session" && cookie.httpOnly === true));
+  assert.ok(cookies.value.some((cookie) => cookie.name === "qagent_session" && cookie.httpOnly === true));
 
   const browserHash = await executeAsync(driverUrl, sessionId, `
     const done = arguments[arguments.length - 1];

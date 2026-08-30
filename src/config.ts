@@ -1,6 +1,15 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { AppearanceTheme, parseAppearance } from "./appearance.js";
+
+function envValue(...names: string[]): string | undefined {
+  for (const name of names) {
+    const value = process.env[name];
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return undefined;
+}
 
 export type CapabilityName =
   | "coding"
@@ -158,6 +167,7 @@ export interface BusConfig {
     minimumScore: number;
   };
   constraints: BusConstraints;
+  appearance?: AppearanceTheme;
 }
 
 export interface ResolvedAgent extends AgentDefinition {
@@ -238,12 +248,16 @@ export function validateConfig(value: unknown): BusConfig {
   if (config.constraints.maxDelegationDepth < 0) throw new Error("maxDelegationDepth must be >= 0");
   if (config.constraints.maxConcurrentTasks < 1) throw new Error("maxConcurrentTasks must be >= 1");
   if (config.constraints.maxRetries < 0) throw new Error("maxRetries must be >= 0");
+  if (value.appearance !== undefined) {
+    assertObject(value.appearance, "configuration.appearance");
+    config.appearance = parseAppearance(value.appearance);
+  }
   return config;
 }
 
-export function loadConfig(path = process.env.AGENT_BUS_CONFIG ?? DEFAULT_CONFIG_PATH): BusConfig {
+export function loadConfig(path = envValue("QAGENT_CONFIG", "AGENT_BUS_CONFIG") ?? DEFAULT_CONFIG_PATH): BusConfig {
   const absolute = resolve(path);
-  if (!existsSync(absolute)) throw new Error(`agent-bus configuration not found: ${absolute}`);
+  if (!existsSync(absolute)) throw new Error(`Qagent configuration not found: ${absolute}`);
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(absolute, "utf8"));
@@ -275,8 +289,10 @@ export function enabledAgents(config: BusConfig): ResolvedAgent[] {
 }
 
 export function configPathFromProject(projectRoot: string): string {
-  const explicit = process.env.AGENT_BUS_CONFIG?.trim();
+  const explicit = envValue("QAGENT_CONFIG", "AGENT_BUS_CONFIG");
   if (explicit) return explicit;
-  const local = join(projectRoot, ".agent-bus", "config.json");
-  return existsSync(local) ? local : DEFAULT_CONFIG_PATH;
+  const next = join(projectRoot, ".qagent", "config.json");
+  if (existsSync(next)) return next;
+  const previous = join(projectRoot, ".agent-bus", "config.json");
+  return existsSync(previous) ? previous : DEFAULT_CONFIG_PATH;
 }

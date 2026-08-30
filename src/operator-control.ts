@@ -13,6 +13,7 @@ import {
   Message,
   Run,
   Task,
+  envValue,
   parseBusState,
   parseStateWaitResponse,
 } from "./protocol.js";
@@ -113,8 +114,8 @@ export class OperatorControl {
     const occupied = Boolean(health) || listeners.length > 0 || ownedBrokerPids.size > 0;
     if (!occupied) return { running: false, occupied: false, health: null };
     const reason = ownedBrokerPids.size > 0
-      ? "registered Agent Bus process failed current-instance verification"
-      : "unrelated listener occupies the configured Agent Bus port";
+      ? "registered Qagent process failed current-instance verification"
+      : "unrelated listener occupies the configured Qagent port";
     return { running: false, occupied: true, health, reason };
   }
 
@@ -220,7 +221,7 @@ export class OperatorControl {
         return { ok: true, agentId, started: false, pid, projectRoot };
       }
     }
-    const configPath = String(state.configIdentity?.path ?? process.env.AGENT_BUS_CONFIG ?? "").trim();
+    const configPath = String(state.configIdentity?.path ?? envValue("QAGENT_CONFIG", "AGENT_BUS_CONFIG") ?? "").trim();
     if (!configPath) throw new OperatorControlError("CONFIG_UNAVAILABLE", "running broker does not expose a persistent configuration path");
     await this.ensureAgentToken(agentId);
     const launched = launchSupervisor({

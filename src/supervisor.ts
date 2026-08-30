@@ -10,6 +10,7 @@ import {
   Message,
   brokerAlive,
   brokerCall,
+  envValue,
   parseExecutionConfig,
   parseOkResponse,
   parsePresenceResponse,
@@ -104,7 +105,7 @@ export function buildSupervisorPrompt(messages: Message[], agent: ResolvedAgent)
 
 function sanitizedEnvironment(agent: ResolvedAgent, additions: Record<string, string>): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, ...additions, MCP_TOOL_TIMEOUT: "3600000" };
-  if (process.env.AGENT_BUS_ALLOW_API_KEY === "1" || !agent.providerDefinition.subscriptionBacked) return env;
+  if (envValue("QAGENT_ALLOW_API_KEY", "AGENT_BUS_ALLOW_API_KEY") === "1" || !agent.providerDefinition.subscriptionBacked) return env;
   const providerKeys: Record<string, string[]> = {
     anthropic: ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"],
     openai: ["OPENAI_API_KEY"],
@@ -226,7 +227,7 @@ export async function supervise(agentId: string, workdir: string): Promise<void>
   mkdirSync(LOG_DIR, { recursive: true });
   mkdirSync(TRANSCRIPT_DIR, { recursive: true });
   mkdirSync(SESSION_DIR, { recursive: true });
-  if (!(await brokerAlive())) throw new Error("broker is not running — start it with: agent-bus broker");
+  if (!(await brokerAlive())) throw new Error("broker is not running — start it with: qagent broker");
 
   const token = readTokenFile(agentTokenPath(agentId));
   if (!token) {
@@ -287,7 +288,7 @@ export async function supervise(agentId: string, workdir: string): Promise<void>
       workdir,
       mcpServerPath: MCP_SERVER,
       fakeHarnessPath: FAKE_HARNESS,
-      busEnvironment: { AGENT_TOKEN: token, AGENT_BUS_BLOCK_SEC: agent.harnessDefinition.id === "claude" ? "900" : "240" },
+      busEnvironment: { AGENT_TOKEN: token, QAGENT_BLOCK_SEC: agent.harnessDefinition.id === "claude" ? "900" : "240", AGENT_BUS_BLOCK_SEC: agent.harnessDefinition.id === "claude" ? "900" : "240" },
     };
     await adapter.prepare?.(context);
     const invocation = adapter.build(context);
