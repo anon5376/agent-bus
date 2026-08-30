@@ -183,7 +183,7 @@ function assertAllCheckpoints(state, label) {
 }
 
 async function verifyAgentModelFields(cdp) {
-  await cdp.send("Runtime.evaluate", { expression: "document.querySelector('.right .pane-head button')?.click()" });
+  await cdp.send("Runtime.evaluate", { expression: "document.querySelector('[data-agent-add=\"true\"]')?.click()" });
   await new Promise((resolve) => setTimeout(resolve, 100));
   async function selectModel(id) {
     const changed = await cdp.send("Runtime.evaluate", {
