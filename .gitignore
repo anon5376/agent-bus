@@ -1,5 +1,6 @@
 node_modules/
 dist/*.tsbuildinfo
+dist-test/
 gui/AgentBus.app/
 .agent-bus/
 .claude/
