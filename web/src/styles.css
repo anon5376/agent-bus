@@ -182,7 +182,7 @@ button.danger.subtle, button.alert.subtle { background: transparent; color: #f0b
 }
 .strip:hover { background: #f1eadc; }
 .strip.selected { outline: 2px solid var(--mark); outline-offset: 1px; }
-.strip.offline { opacity: 0.55; }
+.strip.offline { opacity: 0.78; }
 .tab {
   width: 10px;
   height: 10px;
@@ -302,8 +302,19 @@ button.danger.subtle, button.alert.subtle { background: transparent; color: #f0b
   .log b { grid-column: 2; }
 }
 @media (max-width: 720px) {
-  .app { height: auto; overflow: auto; }
+  .app, .app[data-agent-bus-mounted="true"] { height: auto; min-height: 100vh; overflow: auto; }
   .sector, .mission { display: flex; flex-direction: column; align-items: stretch; }
-  .mission h1 { font-size: 28px; }
-  .figures { justify-content: space-between; }
+  .mission h1 { font-size: 28px; max-width: none; }
+  .figures { justify-content: space-between; flex-wrap: wrap; gap: 12px 16px; }
+  .figures label { flex: 1 1 22%; min-width: 4.5rem; }
+  .figures b { font-size: 18px; }
+  .sector-actions {
+    width: 100%;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    justify-content: stretch;
+  }
+  .sector-actions .providers-pop { min-width: 0; }
+  .sector-actions .alert { grid-column: 1 / -1; }
+  .log li { grid-template-columns: 64px minmax(0, 1fr); }
 }
