@@ -62,7 +62,7 @@ export function createOperatorMcpServer(control = new OperatorControl()) {
         },
     }, handler(async (input) => await control.execute(input)));
     server.registerTool("agent_bus_delegate", {
-        description: "Create and route a durable child task inside an existing run, then start the selected assignee supervisor. This uses the same task DAG and routing engine as the dashboard.",
+        description: "Delegate work to a specific Agent Bus agent. Pass agent/exactAgent for a roster id, or exactModel + provider/harness (example: exactModel=claude-opus-4-6, provider=anthropic; or exactModel=grok-4.6, harness=cursor). Then start that assignee's supervisor.",
         inputSchema: {
             runId: z.string(),
             parentTaskId: z.string().optional(),
@@ -74,8 +74,11 @@ export function createOperatorMcpServer(control = new OperatorControl()) {
             writeAccess: z.boolean().optional(),
             shell: z.boolean().optional(),
             network: z.boolean().optional(),
-            exactAgent: z.string().optional(),
-            exactModel: z.string().optional(),
+            agent: z.string().optional().describe("Roster agent id; alias of exactAgent"),
+            exactAgent: z.string().optional().describe("Roster agent id to assign"),
+            exactModel: z.string().optional().describe("Model id or provider model slug, e.g. claude-opus-4-6"),
+            provider: z.string().optional().describe("Provider id such as anthropic, openai, cursor, xai, moonshot"),
+            harness: z.string().optional().describe("Harness id such as claude, codex, cursor, grok"),
             families: z.array(z.string()).optional(),
             providers: z.array(z.string()).optional(),
             implementationFamily: z.string().optional(),

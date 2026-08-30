@@ -3,9 +3,10 @@ import { createServer } from "node:http";
 import { existsSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { discoverHarnessModels, probeHarness } from "./adapters.js";
+import { discoverHarnessModels, probeCommand } from "./adapters.js";
 import { DEFAULT_CONFIG_PATH, loadConfig, resolveAgent, } from "./config.js";
-import { stageAgentUpdate, stageConstraintsPatch, stageProviderEnabled, supervisedExecutionConflicts } from "./config-transitions.js";
+import { stageAgentUpdate, stageConstraintsPatch, stageModelUpsert, stageProviderEnabled, supervisedExecutionConflicts } from "./config-transitions.js";
+import { applyFoundProviders, scanProviders } from "./discover.js";
 import { verifiedSupervisorProcess } from "./instance-processes.js";
 import { addOrUpdateIntegration } from "./integrations.js";
 import { BUS_HOME, BUS_HOST, BUS_PORT, MAX_WAIT_MS } from "./protocol.js";
@@ -344,53 +345,40 @@ async function stopRun(service, token, runId, reason) {
 }
 async function providerStatus(service, discover) {
     const config = service.config;
-    const harnessRows = new Map();
-    for (const harness of Object.values(config.harnesses)) {
-        const agentDefinition = Object.values(config.agents).find((agent) => config.models[agent.model]?.harness === harness.id);
-        let cliFound = false;
-        let version = null;
-        let error = harness.enabled ? "no configured agent uses this harness" : "disabled";
-        let discoveredModels = [];
-        if (harness.enabled && agentDefinition) {
-            const resolved = resolveAgent(config, agentDefinition.id);
-            const probe = await probeHarness(resolved);
-            cliFound = probe.available;
-            version = probe.version;
-            error = probe.error;
-            if (discover && probe.available && harness.modelDiscovery) {
-                const discovery = await discoverHarnessModels(resolved);
-                discoveredModels = discovery.models;
-                if (discovery.error)
-                    error = discovery.error;
+    const scans = await scanProviders(config);
+    if (discover) {
+        for (const scan of scans) {
+            const harness = config.harnesses[scan.harnessId];
+            if (!harness?.modelDiscovery || !scan.cliFound)
+                continue;
+            const agentDefinition = Object.values(config.agents).find((agent) => config.models[agent.model]?.harness === harness.id);
+            if (!agentDefinition) {
+                const result = await probeCommand(scan.resolvedPath ?? scan.command, harness.modelDiscovery.args);
+                scan.discoveredModels = result.available
+                    ? result.version ? [result.version] : []
+                    : [];
+                continue;
             }
+            const discovery = await discoverHarnessModels(resolveAgent(config, agentDefinition.id));
+            scan.discoveredModels = discovery.models;
+            if (discovery.error)
+                scan.error = discovery.error;
         }
-        harnessRows.set(harness.id, {
-            id: harness.id,
-            configured: harness.enabled,
-            command: harness.command,
-            cliFound,
-            version,
-            error,
-            liveVerification: harness.id === "fake" ? "not-required" : "unknown",
-            discoveredModels,
-        });
     }
-    return Object.values(config.providers).map((provider) => {
-        const harnesses = Object.values(config.harnesses)
-            .filter((harness) => harness.providers.includes(provider.id))
-            .map((harness) => harnessRows.get(harness.id));
-        return {
-            id: provider.id,
-            displayName: provider.displayName,
-            configured: provider.enabled && harnesses.some((harness) => Boolean(harness?.configured)),
-            cliFound: harnesses.some((harness) => Boolean(harness?.cliFound)),
-            authKind: provider.authKind,
-            authSource: provider.authSource,
-            subscriptionBacked: provider.subscriptionBacked,
-            liveVerification: provider.id === "fake" ? "not-required" : "unknown",
-            harnesses,
-        };
-    });
+    return scans.map((scan) => ({
+        ...scan,
+        liveVerification: "unknown",
+        harnesses: scan.harnessId ? [{
+                id: scan.harnessId,
+                configured: scan.configured,
+                command: scan.command,
+                cliFound: scan.cliFound,
+                version: scan.version,
+                error: scan.error,
+                liveVerification: "unknown",
+                discoveredModels: scan.discoveredModels,
+            }] : [],
+    }));
 }
 async function handleApi(req, res, pathname, params, service, sessions, operatorTokenPath, configPath, sessionTtlMs, eventStreams) {
     if (pathname === "/api/session" && req.method === "POST") {
@@ -486,6 +474,22 @@ async function handleApi(req, res, pathname, params, service, sessions, operator
     }
     if (pathname === "/api/providers/status" && req.method === "GET") {
         return sendJson(res, 200, { providers: await providerStatus(service, params.get("discover") === "1") });
+    }
+    if (pathname === "/api/discover" && req.method === "POST") {
+        const body = await readJson(req);
+        const current = loadConfig(configPath || undefined);
+        const scans = await scanProviders(current, body.commands && typeof body.commands === "object" ? Object.fromEntries(Object.entries(body.commands).map(([key, value]) => [key, String(value)])) : {});
+        if (body.apply === false)
+            return sendJson(res, 200, { providers: scans, added: [], applied: false });
+        const result = applyFoundProviders(current, scans);
+        persistLiveConfig(service, configPath, result.config);
+        return sendJson(res, 200, { providers: await scanProviders(result.config), added: result.added, applied: true });
+    }
+    if (pathname === "/api/models" && req.method === "POST") {
+        const body = await readJson(req);
+        const result = stageModelUpsert(loadConfig(configPath || undefined), body);
+        persistLiveConfig(service, configPath, result.config);
+        return sendJson(res, 200, { model: result.model, applied: true });
     }
     if (pathname === "/api/runs" && req.method === "GET")
         return sendJson(res, 200, await service.handle("/run/list", {}));

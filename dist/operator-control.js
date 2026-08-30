@@ -5,6 +5,7 @@ import { APPLICATION_ROOT, EXPECTED_BUILD_ID, ensureAgentBusRunning, stopAgentBu
 import { fetchHealth, listenerPids } from "./process-management.js";
 import { PRODUCT_NAME, PRODUCT_PROTOCOL_VERSION } from "./product-runtime.js";
 import { BUS_HOME, BUS_PORT, BUS_URL, MAX_WAIT_MS, parseBusState, parseStateWaitResponse, } from "./protocol.js";
+import { resolveDelegateTarget } from "./resolve-target.js";
 import { OPERATOR_TOKEN_PATH, agentTokenPath, readTokenFile, writePrivateToken, } from "./security.js";
 import { launchSupervisor } from "./supervisor-launch.js";
 export class OperatorControlError extends Error {
@@ -251,21 +252,32 @@ export class OperatorControl {
     }
     async delegate(input) {
         await this.ensureRunning();
+        const catalog = await this.call("/catalog");
+        const target = resolveDelegateTarget(catalog, {
+            agent: input.agent,
+            exactAgent: input.exactAgent,
+            exactModel: input.exactModel,
+            provider: input.provider,
+            harness: input.harness,
+            providers: input.providers,
+            role: input.role,
+        });
         const created = await this.call("/task/create", {
             runId: input.runId,
             parentTaskId: input.parentTaskId,
             title: input.title,
             brief: input.description,
-            role: input.role ?? "implementation",
+            role: input.role ?? target.role ?? "implementation",
             complexity: input.complexity ?? 3,
             estimatedContextTokens: input.contextTokens ?? 8_000,
             readOnly: !Boolean(input.writeAccess),
             shell: Boolean(input.shell ?? input.writeAccess),
             network: Boolean(input.network),
-            assignee: input.exactAgent,
-            exactModel: input.exactModel,
+            assignee: target.exactAgent,
+            exactModel: target.exactModel,
             families: input.families ?? [],
-            providers: input.providers ?? [],
+            providers: target.providers ?? [],
+            harness: target.harness,
             implementationFamily: input.implementationFamily,
             dependencies: input.dependencies ?? [],
             pathScopes: input.pathScopes ?? [],

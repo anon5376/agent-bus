@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { discoverHarnessModels, probeHarness } from "./adapters.js";
 import { DEFAULT_CONFIG_PATH, enabledAgents, loadConfig } from "./config.js";
+import { scanProviders } from "./discover.js";
 import { recordCurrentAgentBusProcess } from "./instance-processes.js";
 import { renderBusState, renderUsage } from "./cli-view.js";
 import { BUS_HOME, BUS_PORT, BUS_URL, brokerAlive, brokerCall, parseBusState, parseProvisionResponse, parseRoutePreview, parseRunCreateResponse, parseSendResponse, } from "./protocol.js";
@@ -306,8 +307,17 @@ async function main() {
         }
         case "doctor": {
             const config = loadConfig();
-            const seen = new Set();
+            const scans = await scanProviders(config);
             let failures = 0;
+            for (const scan of scans) {
+                const mark = scan.cliFound ? "✓" : scan.enabled ? "×" : "·";
+                if (scan.enabled && !scan.cliFound)
+                    failures += 1;
+                console.log(`${mark} ${scan.displayName.padEnd(16)} ${scan.cliFound ? (scan.version ?? scan.resolvedPath) : scan.error}`);
+                if (!scan.cliFound)
+                    console.log(`    login: ${scan.loginCommand || scan.installHint}`);
+            }
+            const seen = new Set();
             for (const agent of enabledAgents(config)) {
                 if (seen.has(agent.harnessDefinition.id))
                     continue;
@@ -315,7 +325,6 @@ async function main() {
                 const probe = await probeHarness(agent);
                 if (!probe.available)
                     failures += 1;
-                console.log(`${probe.available ? "✓" : "×"} ${probe.harness.padEnd(10)} ${probe.version ?? probe.error}`);
             }
             console.log("CLI discovery proves executable availability only. Authentication, subscription entitlement, quota, and exact model access remain live-unverified until a real provider call succeeds.");
             process.exitCode = failures ? 1 : 0;

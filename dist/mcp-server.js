@@ -187,8 +187,9 @@ server.tool("bus_route_task", "Preview the deterministic routing decision and al
         ...decision.candidates.map((candidate) => `${candidate.eligible ? "ELIGIBLE" : "REJECTED"} ${candidate.agentId} score=${candidate.score.toFixed(3)}${candidate.rejectedBy.length ? ` — ${candidate.rejectedBy.join("; ")}` : ""}`),
     ].join("\n");
 }));
-server.tool("bus_assign_task", "Create a dependency-aware child task. Omit `to` to let the router choose. The current task is used as parent unless explicitly overridden.", {
+server.tool("bus_assign_task", "Create a dependency-aware child task. Use `to` or `exact_agent` for a roster id, or `exact_model` plus `provider`/`harness` (for example Claude Opus via Anthropic, or Grok via Cursor). Omit those to let the router choose. The current task is used as parent unless explicitly overridden.", {
     to: z.string().optional(),
+    exact_agent: z.string().optional(),
     title: z.string(),
     brief: z.string().describe("Scoped objective and definition of done; assume the worker has no other context"),
     role: z.string().default("implementation"),
@@ -204,11 +205,13 @@ server.tool("bus_assign_task", "Create a dependency-aware child task. Omit `to` 
     review_required: z.boolean().optional(),
     families: z.array(z.string()).optional(),
     providers: z.array(z.string()).optional(),
+    provider: z.string().optional(),
+    harness: z.string().optional(),
     exact_model: z.string().optional(),
 }, async (input) => guarded(async () => {
     const parentTaskId = input.parent_task_id ?? await inferredParentTaskId();
     const { task } = await authCall("/task/create", {
-        assignee: input.to,
+        assignee: input.to ?? input.exact_agent,
         title: input.title,
         brief: input.brief,
         role: input.role,
@@ -223,7 +226,8 @@ server.tool("bus_assign_task", "Create a dependency-aware child task. Omit `to` 
         validationRequirements: input.validation_requirements ?? [],
         reviewRequired: input.review_required,
         families: input.families ?? [],
-        providers: input.providers ?? [],
+        providers: input.providers ?? (input.provider ? [input.provider] : []),
+        harness: input.harness,
         exactModel: input.exact_model,
     }, parseTaskEnvelope);
     return `${renderTask(task)}\nRouting: ${task.routing?.reason ?? "not available"}.`;

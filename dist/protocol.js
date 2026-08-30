@@ -107,6 +107,7 @@ function parsePermissions(value, field) {
         network: bool(row.network, `${field}.network`),
         maxDelegationDepth: num(row.maxDelegationDepth, `${field}.maxDelegationDepth`),
         allowedPaths: row.allowedPaths === undefined ? undefined : arr(row.allowedPaths, `${field}.allowedPaths`, str),
+        allowedChildAgentIds: row.allowedChildAgentIds === undefined ? undefined : arr(row.allowedChildAgentIds, `${field}.allowedChildAgentIds`, str),
     };
 }
 export function parseRosterEntry(value, field = "roster[]") {
