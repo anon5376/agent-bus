@@ -99,3 +99,23 @@ test("malformed JSON is rejected without crashing the product server",async t=>{
   const f=await fixture();t.after(()=>f.handle.close());const cookie=await login(f);
   const response=await fetch(`${f.handle.url}/api/messages`,{method:"POST",headers:{cookie,origin:f.handle.url,"content-type":"application/json"},body:"{"});assert.equal(response.status,400);assert.equal((await fetch(`${f.handle.url}/health`)).status,200);
 });
+
+test("first-run setup is required until the operator completes configuration",async t=>{
+  const f=await fixture();t.after(()=>f.handle.close());
+  assert.equal((await fetch(`${f.handle.url}/api/setup`)).status,401);
+  const cookie=await login(f);
+  const fresh=await fetch(`${f.handle.url}/api/setup`,{headers:{cookie}});
+  const freshBody=await fresh.json() as any;
+  assert.equal(fresh.status,200);assert.equal(freshBody.completed,false);assert.equal(freshBody.required,true);
+  const constraints=await fetch(`${f.handle.url}/api/constraints`,{method:"POST",headers:{cookie,origin:f.handle.url,"content-type":"application/json"},body:JSON.stringify({maxDelegationDepth:2,independentReviewComplexity:4,maxRetries:1})});
+  assert.equal(constraints.status,200,await constraints.clone().text());
+  const provider=await fetch(`${f.handle.url}/api/providers`,{method:"POST",headers:{cookie,origin:f.handle.url,"content-type":"application/json"},body:JSON.stringify({id:"fake",enabled:true})});
+  assert.equal(provider.status,200,await provider.clone().text());
+  const done=await fetch(`${f.handle.url}/api/setup`,{method:"POST",headers:{cookie,origin:f.handle.url,"content-type":"application/json"},body:JSON.stringify({completed:true})});
+  const doneBody=await done.json() as any;
+  assert.equal(done.status,200);assert.equal(doneBody.completed,true);assert.equal(doneBody.required,false);
+  const disk=JSON.parse(readFileSync(f.configPath,"utf8"));
+  assert.equal(disk.constraints.maxDelegationDepth,2);
+  assert.equal(disk.constraints.maxRetries,1);
+  assert.equal(disk.providers.fake.enabled,true);
+});

@@ -3,6 +3,8 @@ import { isDeepStrictEqual } from "node:util";
 import {
   AgentDefinition,
   BusConfig,
+  BusConstraints,
+  ProviderDefinition,
   ResolvedAgent,
   resolveAgent,
   validateConfig,
@@ -140,4 +142,39 @@ export function stageAgentUpdate(baseConfig: BusConfig, body: Record<string, unk
   config.agents[id] = agent;
   validateConfig(config);
   return { agent, config };
+}
+
+export function stageProviderEnabled(baseConfig: BusConfig, body: Record<string, unknown>): {
+  provider: ProviderDefinition;
+  config: BusConfig;
+} {
+  const config = structuredClone(baseConfig);
+  const id = String(body.id ?? "").trim();
+  const provider = config.providers[id];
+  if (!provider) throw new Error(`unknown provider: ${id}`);
+  if (body.enabled === undefined) throw new Error("enabled is required");
+  provider.enabled = Boolean(body.enabled);
+  validateConfig(config);
+  return { provider, config };
+}
+
+export function stageConstraintsPatch(baseConfig: BusConfig, body: Record<string, unknown>): {
+  constraints: BusConstraints;
+  config: BusConfig;
+} {
+  const config = structuredClone(baseConfig);
+  const constraints = config.constraints;
+  function assign(key: "maxDelegationDepth" | "maxConcurrentTasks" | "maxRetries" | "independentReviewComplexity", min: number): void {
+    if (body[key] === undefined) return;
+    const value = Number(body[key]);
+    if (!Number.isFinite(value) || value < min) throw new Error(`${key} must be a number >= ${min}`);
+    constraints[key] = value;
+  }
+  assign("maxDelegationDepth", 0);
+  assign("maxConcurrentTasks", 1);
+  assign("maxRetries", 0);
+  assign("independentReviewComplexity", 1);
+  if (body.preferSubscription !== undefined) constraints.preferSubscription = Boolean(body.preferSubscription);
+  validateConfig(config);
+  return { constraints, config };
 }

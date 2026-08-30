@@ -49,6 +49,8 @@ The runtime report includes the resolved launcher, immutable application release
 
 Directly visiting the dashboard URL does not grant operator privileges. `agent-bus start` and `agent-bus open` issue a short-lived one-time browser ticket derived from the private local operator credential.
 
+The first authenticated visit opens `/setup` so a new operator can configure providers, named agents, roles, delegation depth, and a project before the console. After **Enter console**, later visits go straight to the strip bay. **Configure** in the header returns to that page. Existing buses that already have runs are not forced through setup again.
+
 Each real provider CLI must still be installed and authenticated through its own normal login flow. Finding a binary proves only executable availability. It does not prove login state, subscription entitlement, quota, or access to a particular model.
 
 ## Product surface
