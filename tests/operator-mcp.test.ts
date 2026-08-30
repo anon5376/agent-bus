@@ -92,9 +92,15 @@ test("mcp-config uses the stable installed launcher and never exposes the operat
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
     assert.equal(result.stdout.includes(secret), false, "operator token must never appear in MCP configuration");
     const parsed = JSON.parse(result.stdout);
-    const server = parsed.mcpServers?.["agent-bus"];
+    assert.equal(parsed.mcpServers?.qagent.command, launcher);
+    assert.deepEqual(parsed.mcpServers?.qagent.args, ["operator-mcp"]);
+    const server = parsed.mcpServers?.qagent ?? parsed.mcpServers?.["agent-bus"];
     assert.equal(server.command, launcher);
     assert.deepEqual(server.args, ["operator-mcp"]);
+    assert.equal(server.env.QAGENT_HOME, home);
+    assert.equal(server.env.QAGENT_CONFIG, configPath);
+    assert.equal(server.env.QAGENT_PORT, "17717");
+    assert.equal(server.env.QAGENT_URL, "http://127.0.0.1:17717");
     assert.equal(server.env.AGENT_BUS_HOME, home);
     assert.equal(server.env.AGENT_BUS_CONFIG, configPath);
     assert.equal(server.env.AGENT_BUS_PORT, "17717");
@@ -106,7 +112,7 @@ test("mcp-config uses the stable installed launcher and never exposes the operat
 });
 
 test("operator MCP drives the same broker state as the dashboard and remains separate from worker MCP", { timeout: 90_000 }, async () => {
-  const root = temporaryDirectory("agent-bus-operator-mcp-");
+  const root = temporaryDirectory("qagent-operator-mcp-");
   const home = join(root, "home");
   const project = join(root, "project");
   const configPath = join(root, "config.json");
@@ -155,18 +161,18 @@ test("operator MCP drives the same broker state as the dashboard and remains sep
     const listed = await client.listTools();
     const names = new Set(listed.tools.map((tool) => tool.name));
     for (const expected of [
-      "agent_bus_status", "agent_bus_catalog", "agent_bus_start", "agent_bus_create_run", "agent_bus_execute",
-      "agent_bus_delegate", "agent_bus_message", "agent_bus_task", "agent_bus_run", "agent_bus_wait", "agent_bus_review",
-      "agent_bus_cancel", "agent_bus_artifacts", "agent_bus_agent_start", "agent_bus_agent_stop",
+      "qagent_status", "qagent_catalog", "qagent_start", "qagent_create_run", "qagent_execute",
+      "qagent_delegate", "qagent_message", "qagent_task", "qagent_run", "qagent_wait", "qagent_review",
+      "qagent_cancel", "qagent_artifacts", "qagent_agent_start", "qagent_agent_stop",
     ]) assert.equal(names.has(expected), true, `missing ${expected}`);
 
-    const before = await call(client, "agent_bus_status");
+    const before = await call(client, "qagent_status");
     assert.equal(before.running, false, "status must not start the broker as a side effect");
-    await call(client, "agent_bus_start");
-    const running = await call(client, "agent_bus_status");
+    await call(client, "qagent_start");
+    const running = await call(client, "qagent_status");
     assert.equal(running.running, true);
 
-    const created = await call(client, "agent_bus_create_run", {
+    const created = await call(client, "qagent_create_run", {
       projectRoot: project,
       goal: "Coordinate a deterministic fake project run",
       startSupervisor: false,
@@ -174,7 +180,7 @@ test("operator MCP drives the same broker state as the dashboard and remains sep
     assert.ok(created.runId);
     assert.ok(created.rootTaskId);
 
-    const delegated = await call(client, "agent_bus_delegate", {
+    const delegated = await call(client, "qagent_delegate", {
       runId: created.runId,
       parentTaskId: created.rootTaskId,
       title: "Implement deterministic child",
@@ -185,22 +191,22 @@ test("operator MCP drives the same broker state as the dashboard and remains sep
       reviewRequired: false,
     });
     assert.equal(delegated.assignee, "fake-small", "delegation without exact agent must use the real router");
-    const childWait = await call(client, "agent_bus_wait", { taskId: delegated.taskId, timeoutMs: 20_000 });
+    const childWait = await call(client, "qagent_wait", { taskId: delegated.taskId, timeoutMs: 20_000 });
     assert.equal(childWait.task.state, "submitted");
-    await call(client, "agent_bus_review", { taskId: delegated.taskId, decision: "accept", feedback: "Child accepted." });
-    await call(client, "agent_bus_cancel", { runId: created.runId, reason: "First run only exercised delegation." });
+    await call(client, "qagent_review", { taskId: delegated.taskId, decision: "accept", feedback: "Child accepted." });
+    await call(client, "qagent_cancel", { runId: created.runId, reason: "First run only exercised delegation." });
 
-    const execution = await call(client, "agent_bus_execute", {
+    const execution = await call(client, "qagent_execute", {
       projectRoot: project,
       goal: "Complete a second deterministic objective through the manager",
       timeoutMs: 20_000,
     });
     assert.ok(execution.runId);
     assert.equal(execution.execution.task.state, "submitted");
-    await call(client, "agent_bus_review", { taskId: execution.rootTaskId, decision: "accept", feedback: "Objective accepted." });
-    const finalRun = await call(client, "agent_bus_run", { runId: execution.runId });
+    await call(client, "qagent_review", { taskId: execution.rootTaskId, decision: "accept", feedback: "Objective accepted." });
+    const finalRun = await call(client, "qagent_run", { runId: execution.runId });
     assert.equal(finalRun.run.status, "completed");
-    const artifacts = await call(client, "agent_bus_artifacts", { runId: execution.runId });
+    const artifacts = await call(client, "qagent_artifacts", { runId: execution.runId });
     assert.equal(artifacts.runId, execution.runId);
 
     const operatorToken = readFileSync(join(home, "operator.token"), "utf8").trim();
@@ -219,7 +225,7 @@ test("operator MCP drives the same broker state as the dashboard and remains sep
     await workerClient.connect(workerTransport);
     try {
       const workerTools = await workerClient.listTools();
-      assert.equal(workerTools.tools.some((tool) => tool.name.startsWith("agent_bus_")), false, "worker MCP must never expose operator tools");
+      assert.equal(workerTools.tools.some((tool) => tool.name.startsWith("qagent_")), false, "worker MCP must never expose operator tools");
       assert.equal(workerTools.tools.some((tool) => tool.name.startsWith("bus_")), true);
     } finally {
       await workerClient.close();
@@ -229,10 +235,10 @@ test("operator MCP drives the same broker state as the dashboard and remains sep
     assert.equal(stop.status, 0, `${stop.stdout}\n${stop.stderr}`);
     const peerAfterStop = await waitForHealth(peerUrl);
     assert.equal(peerAfterStop.pid, peerHealth.pid, "MCP/CLI operations for instance A must not stop instance B");
-    const stopped = await call(client, "agent_bus_status");
+    const stopped = await call(client, "qagent_status");
     assert.equal(stopped.running, false, "existing MCP client must observe broker stop");
-    await call(client, "agent_bus_start");
-    assert.equal((await call(client, "agent_bus_status")).running, true, "existing MCP client must reconnect after broker restart");
+    await call(client, "qagent_start");
+    assert.equal((await call(client, "qagent_status")).running, true, "existing MCP client must reconnect after broker restart");
   } finally {
     runCli(env, "stop");
     runCli(peerEnv, "stop");

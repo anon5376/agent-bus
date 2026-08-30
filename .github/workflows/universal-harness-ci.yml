@@ -58,20 +58,14 @@ jobs:
           mkdir -p "$AGENT_BUS_INSTALL_DIR" "$AGENT_BUS_HOME" "$STALE_BIN" "$OLD_APP/dist" "$PR5_APP/dist"
           printf 'preserve-me\n' > "$AGENT_BUS_HOME/install-sentinel"
 
-          node --input-type=module <<'NODE'
-          import { readFileSync, writeFileSync } from 'node:fs';
-          import { join } from 'node:path';
-          const config = JSON.parse(readFileSync('agent-bus.config.json', 'utf8'));
-          for (const [id, value] of Object.entries(config.providers)) if (id !== 'fake') value.enabled = false;
-          for (const [id, value] of Object.entries(config.harnesses)) if (id !== 'fake') value.enabled = false;
-          for (const [id, value] of Object.entries(config.models)) if (!id.startsWith('fake-')) value.enabled = false;
-          for (const [id, value] of Object.entries(config.agents)) if (!id.startsWith('fake-')) value.enabled = false;
-          writeFileSync(join(process.env.AGENT_BUS_HOME, 'config.json'), `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
-          NODE
+          # Production config starts empty. Installed MCP smoke starts a fake
+          # supervisor, so seed the test fixture into this isolated CI home.
+          # install.sh copies production config only when config.json is missing.
+          node "$GITHUB_WORKSPACE/scripts/fake-only-test-config.mjs"
 
           cat > "$OLD_APP/dist/cli.js" <<'OLDCLI'
           #!/usr/bin/env node
-          process.stderr.write('stale Agent Bus launcher executed\n');
+          process.stderr.write('stale Qagent launcher executed\n');
           process.exit(86);
           OLDCLI
           chmod +x "$OLD_APP/dist/cli.js"
@@ -102,7 +96,7 @@ jobs:
           fi
           grep "Node.js 22.5+" "$RUNNER_TEMP/old-node-install.out"
 
-          # Reproduce the merged PR5 checkout runtime: positive Agent Bus product
+          # Reproduce the merged PR5 checkout runtime: positive Qagent product
           # identity on the target port, but no PR6 runtime/home metadata.
           cat > "$PR5_APP/dist/cli.js" <<'PR5CLI'
           const http = require('node:http');
@@ -136,7 +130,7 @@ jobs:
           pr5_pid=""
 
           test "$(command -v agent-bus)" = "$STALE_BIN/agent-bus"
-          grep '# Agent Bus canonical launcher' "$STALE_BIN/agent-bus"
+          grep '# Qagent canonical launcher' "$STALE_BIN/agent-bus"
           agent-bus __launcher-info | grep "application=$AGENT_BUS_HOME/app/current"
           test -L "$AGENT_BUS_HOME/app/current"
           if AGENT_BUS_NODE_BIN="$OLD_NODE_DIR/node" agent-bus models >"$RUNNER_TEMP/old-node-launch.out" 2>&1; then
@@ -157,7 +151,7 @@ jobs:
           cd "$RUNNER_TEMP"
           agent-bus start --no-open
           health="$(curl -fsS http://127.0.0.1:11511/health)"
-          printf '%s\n' "$health" | grep '"product":"agent-bus"'
+          printf '%s\n' "$health" | grep '"product":"qagent"'
           printf '%s\n' "$health" | grep '"dashboard":true'
           printf '%s\n' "$health" | grep '"runtime"'
           printf '%s\n' "$health" | grep "\"busHome\":\"$AGENT_BUS_HOME\""
@@ -207,7 +201,7 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           bash install.sh
           test "$(cat "$AGENT_BUS_HOME/install-sentinel")" = "preserve-me"
-          grep '# Agent Bus canonical launcher' "$STALE_BIN/agent-bus"
+          grep '# Qagent canonical launcher' "$STALE_BIN/agent-bus"
           if kill -0 "$first_pid" 2>/dev/null; then
             echo "unhealthy previous custom-home broker survived reinstall" >&2
             exit 1
@@ -218,7 +212,7 @@ jobs:
 
           cd "$RUNNER_TEMP"
           agent-bus start --no-open
-          curl -fsS http://127.0.0.1:11511/health | grep '"product":"agent-bus"'
+          curl -fsS http://127.0.0.1:11511/health | grep '"product":"qagent"'
           agent-bus runtime --json | tee "$RUNNER_TEMP/runtime-after-reinstall.json"
           node "$GITHUB_WORKSPACE/scripts/installed-operator-mcp-smoke.mjs"
           node "$GITHUB_WORKSPACE/scripts/installed-browser-smoke.mjs"

@@ -4,13 +4,13 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { BrokerHandle, startBroker } from "../src/broker.js";
-import { BusConfig, loadConfig } from "../src/config.js";
-import { post, temporaryDirectory } from "./helpers.js";
+import { BusConfig } from "../src/config.js";
+import { post, temporaryDirectory, testConfig } from "./helpers.js";
 
 const STOCK_IDS = new Set(["fake-small", "fake-strong", "opus", "gpt", "kimi", "gem"]);
 
 function namedRoster(): BusConfig {
-  const config = structuredClone(loadConfig(join(process.cwd(), "agent-bus.config.json")));
+  const config = structuredClone(testConfig());
   for (const model of Object.values(config.models)) model.enabled = model.provider === "fake";
   for (const provider of Object.values(config.providers)) provider.enabled = provider.id === "fake";
   for (const harness of Object.values(config.harnesses)) harness.enabled = harness.id === "fake";

@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { loadFakeOnlyTestConfig } from "./fake-only-test-config.mjs";
 
 function freePort() {
   return new Promise((resolve, reject) => {
@@ -68,12 +69,7 @@ function runCli(env, ...args) {
 }
 
 function fakeConfig(path) {
-  const config = JSON.parse(readFileSync("agent-bus.config.json", "utf8"));
-  for (const [id, provider] of Object.entries(config.providers)) if (id !== "fake") provider.enabled = false;
-  for (const [id, harness] of Object.entries(config.harnesses)) if (id !== "fake") harness.enabled = false;
-  for (const [id, model] of Object.entries(config.models)) if (!id.startsWith("fake-")) model.enabled = false;
-  for (const [id, agent] of Object.entries(config.agents)) if (!id.startsWith("fake-")) agent.enabled = false;
-  writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`);
+  writeFileSync(path, `${JSON.stringify(loadFakeOnlyTestConfig(), null, 2)}\n`);
 }
 
 function startFixtureServer(port, kind, scriptPath = null) {
@@ -91,7 +87,7 @@ function startFixtureServer(port, kind, scriptPath = null) {
         res.end(JSON.stringify(body)); return;
       }
       if(req.url==='/catalog'&&req.method==='POST'&&kind==='legacy'){
-        res.end(JSON.stringify({capabilityNotice:'legacy Agent Bus',providers:{},harnesses:{},models:{},roles:{},agents:{},constraints:{}}));return;
+        res.end(JSON.stringify({capabilityNotice:'legacy Qagent',providers:{},harnesses:{},models:{},roles:{},agents:{},constraints:{}}));return;
       }
       if(req.url==='/state'&&req.method==='POST'){res.end(JSON.stringify({roster:[]}));return;}
       res.statusCode=404;res.end('{}');
@@ -124,11 +120,11 @@ const env = {
 try {
   const first = runCli(env, "start", "--no-open");
   assert.equal(first.status, 0, `first start failed:\n${first.stdout}\n${first.stderr}`);
-  const firstHealth = await waitForHealth(url, (body) => body.product === "agent-bus" && body.dashboard === true);
+  const firstHealth = await waitForHealth(url, (body) => body.product === "qagent" && body.dashboard === true);
 
   const second = runCli(env, "start", "--no-open");
   assert.equal(second.status, 0, `second start failed:\n${second.stdout}\n${second.stderr}`);
-  const secondHealth = await waitForHealth(url, (body) => body.product === "agent-bus" && body.dashboard === true);
+  const secondHealth = await waitForHealth(url, (body) => body.product === "qagent" && body.dashboard === true);
   assert.equal(secondHealth.pid, firstHealth.pid, "repeated start should reuse the current matching product");
 
   const secondPort = await freePort();
@@ -136,30 +132,30 @@ try {
   const sameHomeEnv = { ...env, AGENT_BUS_PORT: String(secondPort), AGENT_BUS_URL: secondUrl };
   const secondInstanceStart = runCli(sameHomeEnv, "start", "--no-open");
   assert.equal(secondInstanceStart.status, 0, `same-home second instance failed:\n${secondInstanceStart.stdout}\n${secondInstanceStart.stderr}`);
-  const secondInstanceHealth = await waitForHealth(secondUrl, (body) => body.product === "agent-bus");
+  const secondInstanceHealth = await waitForHealth(secondUrl, (body) => body.product === "qagent");
 
   const stop = runCli(env, "stop");
   assert.equal(stop.status, 0, `stop failed:\n${stop.stdout}\n${stop.stderr}`);
   await waitForDown(url);
-  const secondAfterStop = await waitForHealth(secondUrl, (body) => body.product === "agent-bus");
+  const secondAfterStop = await waitForHealth(secondUrl, (body) => body.product === "qagent");
   assert.equal(secondAfterStop.pid, secondInstanceHealth.pid, "same-home different-port instance must remain alive");
   assert.equal(runCli(sameHomeEnv, "stop").status, 0);
   await waitForDown(secondUrl);
 
   const unhealthyPairStart = runCli(env, "start", "--no-open");
   assert.equal(unhealthyPairStart.status, 0, `unhealthy pair setup failed:\n${unhealthyPairStart.stdout}\n${unhealthyPairStart.stderr}`);
-  const unhealthyPairHealth = await waitForHealth(url, (body) => body.product === "agent-bus");
+  const unhealthyPairHealth = await waitForHealth(url, (body) => body.product === "qagent");
   const otherPort = await freePort();
   const otherUrl = `http://127.0.0.1:${otherPort}`;
   const otherEnv = { ...env, AGENT_BUS_HOME: join(temp, "home-b"), AGENT_BUS_PORT: String(otherPort), AGENT_BUS_URL: otherUrl };
   const otherStart = runCli(otherEnv, "start", "--no-open");
   assert.equal(otherStart.status, 0, `different-home peer failed:\n${otherStart.stdout}\n${otherStart.stderr}`);
-  const otherHealth = await waitForHealth(otherUrl, (body) => body.product === "agent-bus");
+  const otherHealth = await waitForHealth(otherUrl, (body) => body.product === "qagent");
   process.kill(unhealthyPairHealth.pid, "SIGSTOP");
   const unhealthyPairStop = runCli(env, "stop");
   assert.equal(unhealthyPairStop.status, 0, `unhealthy scoped stop failed:\n${unhealthyPairStop.stdout}\n${unhealthyPairStop.stderr}`);
   await waitForProcessDown(unhealthyPairHealth.pid);
-  const otherAfter = await waitForHealth(otherUrl, (body) => body.product === "agent-bus");
+  const otherAfter = await waitForHealth(otherUrl, (body) => body.product === "qagent");
   assert.equal(otherAfter.pid, otherHealth.pid, "different-home peer from same checkout must remain alive");
   assert.equal(runCli(otherEnv, "stop").status, 0);
   await waitForDown(otherUrl);
@@ -168,7 +164,7 @@ try {
   await waitForHealth(url, (body) => body.durable === true && !body.product);
   const replace = runCli(env, "start", "--no-open");
   assert.equal(replace.status, 0, `legacy replacement failed:\n${replace.stdout}\n${replace.stderr}`);
-  const replacedHealth = await waitForHealth(url, (body) => body.product === "agent-bus" && body.dashboard === true);
+  const replacedHealth = await waitForHealth(url, (body) => body.product === "qagent" && body.dashboard === true);
   assert.notEqual(replacedHealth.pid, legacy.pid, "legacy listener should be replaced");
   await waitForProcessDown(legacy.pid);
   assert.equal(runCli(env, "stop").status, 0);
@@ -179,7 +175,7 @@ try {
   assert.equal(pr5Health.pid, pr5.pid);
   const upgrade = runCli(env, "start", "--no-open");
   assert.equal(upgrade.status, 0, `PR5 to PR6 replacement failed:\n${upgrade.stdout}\n${upgrade.stderr}`);
-  const upgradedHealth = await waitForHealth(url, (body) => body.product === "agent-bus" && body.dashboard === true && body.buildId !== "merged-pr5-checkout");
+  const upgradedHealth = await waitForHealth(url, (body) => body.product === "qagent" && body.dashboard === true && body.buildId !== "merged-pr5-checkout");
   assert.notEqual(upgradedHealth.pid, pr5.pid, "merged PR5 target listener must be replaced by the current product");
   await waitForProcessDown(pr5.pid);
   assert.equal(runCli(env, "stop").status, 0);
@@ -187,7 +183,7 @@ try {
 
   const unhealthyStart = runCli(env, "start", "--no-open");
   assert.equal(unhealthyStart.status, 0, `unhealthy recovery setup failed:\n${unhealthyStart.stdout}\n${unhealthyStart.stderr}`);
-  const unhealthyHealth = await waitForHealth(url, (body) => body.product === "agent-bus");
+  const unhealthyHealth = await waitForHealth(url, (body) => body.product === "qagent");
   process.kill(unhealthyHealth.pid, "SIGSTOP");
   const unhealthyStop = runCli(env, "stop");
   assert.equal(unhealthyStop.status, 0, `unhealthy instance stop failed:\n${unhealthyStop.stdout}\n${unhealthyStop.stderr}`);
@@ -198,7 +194,7 @@ try {
   const unrelated = startFixtureServer(port, "unrelated");
   await waitForHealth(url, (body) => body.service === "not-agent-bus");
   const protectedStart = runCli(env, "start", "--no-open");
-  assert.notEqual(protectedStart.status, 0, "Agent Bus must refuse to kill an unrelated port owner");
+  assert.notEqual(protectedStart.status, 0, "Qagent must refuse to kill an unrelated port owner");
   assert.match(`${protectedStart.stderr}${protectedStart.stdout}`, /unrelated process/i);
   assert.equal(processAlive(unrelated.pid), true, "unrelated listener must remain alive");
   unrelated.kill("SIGTERM");

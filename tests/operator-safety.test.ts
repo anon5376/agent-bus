@@ -32,7 +32,7 @@ async function connectOperator(env: NodeJS.ProcessEnv): Promise<Client> {
     env: stringEnv(env),
     stderr: "pipe",
   });
-  const client = new Client({ name: "agent-bus-operator-safety-test", version: "1.0.0" });
+  const client = new Client({ name: "qagent-operator-safety-test", version: "1.0.0" });
   await client.connect(transport);
   return client;
 }
@@ -96,7 +96,7 @@ async function dashboardSession(url: string, operatorToken: string): Promise<str
 async function waitForRosterPid(client: Client, agentId: string, pid: number, timeoutMs = 5_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const status = await call(client, "agent_bus_status");
+    const status = await call(client, "qagent_status");
     const row = (status.roster ?? []).find((entry: any) => entry.id === agentId);
     if (Number(row?.supervisorPid) === pid) return;
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 80));
@@ -104,7 +104,7 @@ async function waitForRosterPid(client: Client, agentId: string, pid: number, ti
   throw new Error(`${agentId} did not register supervisor PID ${pid}`);
 }
 
-test("agent_bus_status never sends the operator credential to an unrelated listener", {
+test("qagent_status never sends the operator credential to an unrelated listener", {
   skip: process.platform === "win32",
   timeout: 20_000,
 }, async () => {
@@ -140,7 +140,7 @@ test("agent_bus_status never sends the operator credential to an unrelated liste
   };
   const client = await connectOperator(env);
   try {
-    const status = await call(client, "agent_bus_status");
+    const status = await call(client, "qagent_status");
     assert.equal(status.running, false);
     assert.equal(status.occupied, true);
     assert.match(String(status.reason), /unrelated listener/i);
@@ -153,11 +153,11 @@ test("agent_bus_status never sends the operator credential to an unrelated liste
   }
 });
 
-test("stale supervisors self-heal and agent_bus_wait wakes for operator questions", {
+test("stale supervisors self-heal and qagent_wait wakes for operator questions", {
   skip: process.platform === "win32",
   timeout: 70_000,
 }, async () => {
-  const root = temporaryDirectory("agent-bus-operator-recovery-");
+  const root = temporaryDirectory("qagent-operator-recovery-");
   const home = join(root, "home");
   const project = join(root, "project");
   const configPath = join(root, "config.json");
@@ -182,16 +182,16 @@ test("stale supervisors self-heal and agent_bus_wait wakes for operator question
   try {
     await waitForHealth(url);
     client = await connectOperator(env);
-    assert.equal((await call(client, "agent_bus_start")).reused, true);
+    assert.equal((await call(client, "qagent_start")).reused, true);
 
-    const first = await call(client, "agent_bus_agent_start", { agentId: "fake-small", projectRoot: project });
+    const first = await call(client, "qagent_agent_start", { agentId: "fake-small", projectRoot: project });
     assert.equal(first.started, true);
     const firstPid = Number(first.pid);
     assert.ok(firstPid > 0);
     try { process.kill(-firstPid, "SIGKILL"); } catch { process.kill(firstPid, "SIGKILL"); }
     await waitForExit(firstPid);
 
-    const staleStatus = await call(client, "agent_bus_status");
+    const staleStatus = await call(client, "qagent_status");
     const staleRow = (staleStatus.roster ?? []).find((entry: any) => entry.id === "fake-small");
     assert.equal(staleRow?.supervisorPid ?? null, null, "status must prune a dead supervisor immediately");
     assert.equal(staleRow?.status, "offline", "status must report the agent offline immediately after supervisor death");
@@ -213,19 +213,19 @@ test("stale supervisors self-heal and agent_bus_wait wakes for operator question
     try { process.kill(-secondPid, "SIGKILL"); } catch { process.kill(secondPid, "SIGKILL"); }
     await waitForExit(secondPid);
 
-    const recovered = await call(client, "agent_bus_agent_start", { agentId: "fake-small", projectRoot: project });
+    const recovered = await call(client, "qagent_agent_start", { agentId: "fake-small", projectRoot: project });
     assert.equal(recovered.started, true, "operator MCP must discard stale supervisor metadata and relaunch");
     const thirdPid = Number(recovered.pid);
     assert.ok(thirdPid > 0 && thirdPid !== secondPid);
-    await call(client, "agent_bus_agent_stop", { agentId: "fake-small" });
+    await call(client, "qagent_agent_stop", { agentId: "fake-small" });
 
-    const created = await call(client, "agent_bus_create_run", {
+    const created = await call(client, "qagent_create_run", {
       projectRoot: project,
       goal: "Wait for explicit operator input",
       startSupervisor: false,
     });
     const workerToken = readFileSync(join(home, "tokens", "fake-small.token"), "utf8").trim();
-    const waiting = call(client, "agent_bus_wait", { taskId: created.rootTaskId, timeoutMs: 10_000 });
+    const waiting = call(client, "qagent_wait", { taskId: created.rootTaskId, timeoutMs: 10_000 });
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 250));
     await postJson(url, "/send", {
       token: workerToken,
@@ -239,7 +239,7 @@ test("stale supervisors self-heal and agent_bus_wait wakes for operator question
     assert.equal(attention.attentionRequired, true);
     assert.equal(attention.terminal, false);
     assert.equal(attention.messages?.some((message: any) => message.type === "question" && message.subject === "Need operator input"), true);
-    await call(client, "agent_bus_cancel", { runId: created.runId, reason: "attention wakeup regression complete" });
+    await call(client, "qagent_cancel", { runId: created.runId, reason: "attention wakeup regression complete" });
   } finally {
     if (client) await client.close().catch(() => {});
     runCli(env, "stop");

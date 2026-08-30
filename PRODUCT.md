@@ -2,43 +2,34 @@
 
 <!-- impeccable:product-schema 1 -->
 
-<!-- Inferred (unattended session; no interview round was answered). Facts below are labeled. -->
-
 ## Platform
 
 web
 
 ## Users
 
-**Inferred.** Primary user is the human operator of a local multi-agent coding/research setup, sitting at their own Mac, watching and steering independent model CLIs through one broker. Job: start a run, see what each agent is doing, review submissions, stop misbehaving supervisors.
+Primary user is a human operator of a local multi-agent coding setup. Other people may install the same product. Job: configure providers and a roster from scratch, then run work from the dashboard, CLI, or chat (`@qagent`).
 
 ## Product Purpose
 
-Agent Bus is a local-first control plane for heterogeneous autonomous coding and research agents. Success is: the operator can see true broker state, assign work, review results, and stop agents without the dashboard lying about a foreign listener.
+Qagent is a local-first control plane for heterogeneous autonomous agents. Success is: a fresh install has no demo roster; the operator can autodetect installed CLIs, name agents, set who a manager may create, and delegate exact model+provider targets from chat.
 
 ## Positioning
 
-Independent model CLIs stay behind one durable local broker (SQLite, task DAG, supervisors, MCP). The browser dashboard, CLI, and operator MCP are interfaces over that same state. It binds to localhost; visiting the URL does not grant operator privileges.
+Independent model CLIs (Anthropic, OpenAI, Cursor, xAI, Moonshot, and others) stay behind one durable local broker. Cursor is one provider among equals. The browser dashboard, CLI, and operator MCP are interfaces over the same SQLite state.
 
 ## Operating Context
 
-Night/desk use on the operator's machine. Commands: `agent-bus start`, `agent-bus open`, `agent-bus status`. Dashboard requires a one-time CLI ticket. Default listen address is `127.0.0.1:11511`.
-
-## Capabilities and Constraints
-
-Confirmed in this repo: dashboard SPA over `/api/*` + SSE; runs, tasks, agents, providers, projects; CSP `default-src 'self'` including `font-src 'self'` (no Google Fonts). Must preserve all existing operator actions (new run, stop all, start/stop agent, review task, message team, add project/agent).
+Desk use on the operator's machine. Commands: `qagent start`, `qagent open`, `qagent status` (`agent-bus` is an alias). Dashboard requires a one-time CLI ticket. Default listen address is `127.0.0.1:11511`. Attach operator MCP with `qagent mcp-config` so a chat model can call `qagent_delegate`.
 
 ## Brand Commitments
 
-Name: Agent Bus. Mark: "AB". Voice in product copy is plain and operational, not marketing.
-
-## Evidence on Hand
-
-Live dashboard screenshots of the incumbent three-column admin shell. No customer quotes, pricing, or third-party testimonials exist; do not invent them.
+Name: Qagent. Mark: "Q". Visual language follows Cursor-style dashboard chrome (dark panels, rounded rows, blue accent) without Cursor trademarks. Operators can change the dashboard colors in Settings.
 
 ## Product Principles
 
-1. The dashboard is an instrument for a running broker, not a marketing site.
-2. State on screen must match the broker contract.
-3. Operator actions stay reachable without hunting.
-4. Unrelated local processes on other ports are not this product.
+1. Start empty. No fake agents and no stock opus/gpt roster in production config.
+2. Autodetect installed CLIs; if a CLI is missing, show a login command and allow a manual binary path.
+3. The operator configures hierarchy; managers get an explicit spawn list via drag-and-drop.
+4. State on screen must match the broker contract.
+5. Unrelated local processes on other ports are not this product.

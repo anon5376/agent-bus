@@ -89,7 +89,7 @@ function genericCommandResult(stdout, exitCode) {
     return defaultResult(stdout, exitCode);
 }
 /**
- * Escape hatch for models/harnesses Agent Bus does not know about yet.
+ * Escape hatch for models/harnesses Qagent does not know about yet.
  *
  * Configure a harness with `adapter: "command"`, then set per-agent harnessOptions:
  *   args: ["run", "--model", "{model}", "--prompt", "{prompt}"]
@@ -100,7 +100,7 @@ function genericCommandResult(stdout, exitCode) {
  * Supported placeholders: {prompt}, {model}, {modelId}, {family}, {provider},
  * {agentId}, {role}, {session}, {workdir}, {mcpServer}.
  *
- * If the custom CLI has its own Agent Bus MCP integration, set autoReport=false.
+ * If the custom CLI has its own Qagent MCP integration, set autoReport=false.
  * If it is a plain one-shot/model CLI, leave autoReport=true and the supervisor
  * submits its textual result for ordinary worker tasks.
  */
@@ -139,7 +139,7 @@ const claudeAdapter = {
         const env = commonEnvironment(context);
         const mcp = JSON.stringify({
             mcpServers: {
-                "agent-bus": {
+                "qagent": {
                     command: process.execPath,
                     args: [context.mcpServerPath],
                     env,
@@ -156,7 +156,7 @@ const claudeAdapter = {
             "--permission-mode",
             "acceptEdits",
             "--allowedTools",
-            "mcp__agent-bus,Bash,Read,Write,Edit,Glob,Grep",
+            "mcp__qagent,Bash,Read,Write,Edit,Glob,Grep",
         ];
         if (context.sessionId)
             args.push("--resume", context.sessionId);
@@ -168,7 +168,7 @@ const claudeAdapter = {
         return {
             command: context.agent.harnessDefinition.command,
             args,
-            environment: { ...env, MCP_TOOL_TIMEOUT: "3600000", AGENT_BUS_BLOCK_SEC: "900" },
+            environment: { ...env, MCP_TOOL_TIMEOUT: "3600000", QAGENT_BLOCK_SEC: "900", AGENT_BUS_BLOCK_SEC: "900" },
             autoReport: false,
             timeoutMs: 60 * 60_000,
         };
@@ -222,7 +222,7 @@ const codexAdapter = {
         return {
             command: context.agent.harnessDefinition.command,
             args,
-            environment: { ...env, AGENT_BUS_BLOCK_SEC: "240" },
+            environment: { ...env, QAGENT_BLOCK_SEC: "240", AGENT_BUS_BLOCK_SEC: "240" },
             autoReport: false,
             timeoutMs: 60 * 60_000,
         };
@@ -268,6 +268,64 @@ const geminiAdapter = {
     },
     parse: defaultResult,
 };
+const cursorAdapter = {
+    id: "cursor",
+    prepare(context) {
+        mkdirSync(join(context.workdir, ".cursor"), { recursive: true });
+        const cfgPath = join(context.workdir, ".cursor", "mcp.json");
+        let cfg = {};
+        try {
+            cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
+        }
+        catch { /* new project-local MCP config */ }
+        const mcp = (cfg.mcpServers && typeof cfg.mcpServers === "object" ? cfg.mcpServers : {});
+        mcp["qagent"] = {
+            command: process.execPath,
+            args: [context.mcpServerPath],
+            env: commonEnvironment(context),
+        };
+        cfg.mcpServers = mcp;
+        writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
+    },
+    build(context) {
+        const env = commonEnvironment(context);
+        const args = ["-p", context.prompt, "--output-format", "json", "--force", "--trust", "--approve-mcps"];
+        if (context.sessionId)
+            args.push("--resume", context.sessionId);
+        if (context.agent.modelDefinition.exactModel)
+            args.push("--model", context.agent.modelDefinition.exactModel);
+        return {
+            command: context.agent.harnessDefinition.command,
+            args,
+            environment: { ...env, QAGENT_BLOCK_SEC: "900", AGENT_BUS_BLOCK_SEC: "900" },
+            autoReport: false,
+            timeoutMs: 60 * 60_000,
+        };
+    },
+    parse(stdout, exitCode) {
+        for (const row of jsonLines(stdout).reverse()) {
+            const text = row.result ?? row.text ?? row.content ?? row.message;
+            if (typeof text !== "string")
+                continue;
+            const usage = (row.usage ?? {});
+            const input = asNumber(usage.input_tokens ?? usage.inputTokens);
+            const output = asNumber(usage.output_tokens ?? usage.outputTokens);
+            return {
+                text,
+                sessionId: typeof row.session_id === "string" ? row.session_id : typeof row.sessionId === "string" ? row.sessionId : typeof row.chatId === "string" ? row.chatId : null,
+                usage: {
+                    inputTokens: input,
+                    outputTokens: output,
+                    totalTokens: asNumber(usage.total_tokens ?? usage.totalTokens) || input + output,
+                    costUSD: asNumber(usage.cost_usd ?? usage.costUSD),
+                },
+                structured: row,
+                malformed: false,
+            };
+        }
+        return defaultResult(stdout, exitCode);
+    },
+};
 const grokAdapter = {
     id: "grok",
     build(context) {
@@ -308,7 +366,7 @@ const opencodeAdapter = {
         }
         catch { /* new project-local configuration */ }
         const mcp = (cfg.mcp && typeof cfg.mcp === "object" ? cfg.mcp : {});
-        mcp["agent-bus"] = {
+        mcp["qagent"] = {
             type: "local",
             command: [process.execPath, context.mcpServerPath],
             environment: commonEnvironment(context),
@@ -420,6 +478,7 @@ const ADAPTERS = {
     codex: codexAdapter,
     kimi: kimiAdapter,
     gemini: geminiAdapter,
+    cursor: cursorAdapter,
     grok: grokAdapter,
     opencode: opencodeAdapter,
     hermes: hermesAdapter,
@@ -449,15 +508,23 @@ function runCommand(command, args, timeoutMs = 10_000) {
         });
     });
 }
-export async function probeHarness(agent) {
-    const harness = agent.harnessDefinition;
-    const result = await runCommand(harness.command, harness.probeArgs ?? ["--version"]);
+export async function probeCommand(command, probeArgs = ["--version"]) {
+    const result = await runCommand(command, probeArgs);
     return {
-        harness: harness.id,
-        command: harness.command,
         available: result.code === 0,
         version: result.code === 0 ? result.output.split("\n")[0] || null : null,
         error: result.code === 0 ? null : result.output || `exit ${result.code}`,
+    };
+}
+export async function probeHarness(agent) {
+    const harness = agent.harnessDefinition;
+    const probe = await probeCommand(harness.command, harness.probeArgs ?? ["--version"]);
+    return {
+        harness: harness.id,
+        command: harness.command,
+        available: probe.available,
+        version: probe.version,
+        error: probe.error,
     };
 }
 export async function discoverHarnessModels(agent) {

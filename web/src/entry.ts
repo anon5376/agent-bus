@@ -6,10 +6,10 @@ type BootMonitor = {
 
 declare global {
   interface Window {
-    __AGENT_BUS_BOOT__?: BootMonitor;
+    __QAGENT_BOOT__?: BootMonitor;
   }
 }
 
-window.__AGENT_BUS_BOOT__?.checkpoint(2, "production ES module evaluated");
+window.__QAGENT_BOOT__?.checkpoint(2, "production ES module evaluated");
 
 export {};

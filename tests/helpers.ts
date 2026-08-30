@@ -7,8 +7,12 @@ export function temporaryDirectory(prefix = "agent-bus-test-"): string {
   return mkdtempSync(join(tmpdir(), prefix));
 }
 
+export function fixtureConfigPath(): string {
+  return join(process.cwd(), "tests", "fixtures", "test-bus.config.json");
+}
+
 export function testConfig(): BusConfig {
-  const config = structuredClone(loadConfig());
+  const config = structuredClone(loadConfig(fixtureConfigPath()));
   for (const model of Object.values(config.models)) model.enabled = model.provider === "fake";
   for (const agent of Object.values(config.agents)) agent.enabled = agent.id.startsWith("fake-");
   for (const provider of Object.values(config.providers)) provider.enabled = provider.id === "fake";

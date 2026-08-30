@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { mkdirSync, openSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { BUS_HOME, BUS_HOST, BUS_PORT, BUS_URL } from "./protocol.js";
+import { BUS_HOME, BUS_HOST, BUS_PORT, BUS_URL, productEnvBindings } from "./protocol.js";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const CLI_PATH = join(ROOT, "cli.js");
@@ -42,12 +42,14 @@ export function launchSupervisor(options: SupervisorLaunchOptions): SupervisorLa
     stdio: ["ignore", log, log],
     env: {
       ...process.env,
-      AGENT_BUS_HOME: busHome,
-      AGENT_BUS_HOST: host,
-      AGENT_BUS_PORT: String(port),
-      AGENT_BUS_URL: url,
-      AGENT_BUS_CONFIG: configPath,
-      AGENT_BUS_APPLICATION_ROOT: applicationRoot,
+      ...productEnvBindings({
+        home: busHome,
+        host,
+        port,
+        url,
+        config: configPath,
+        applicationRoot,
+      }),
     },
   });
   child.unref();

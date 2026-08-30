@@ -79,7 +79,7 @@
       if (detailNode && detail) detailNode.textContent = text(detail);
     }
     if (number === 10) {
-      document.documentElement.setAttribute("data-agent-bus-boot-complete", "true");
+      document.documentElement.setAttribute("data-qagent-boot-complete", "true");
     }
   }
 
@@ -96,7 +96,7 @@
     progress.textContent = "Last completed checkpoint: " + state.highest + "/10" + (state.highest ? " · " + labels[state.highest - 1] : "");
     var hint = document.createElement("p");
     hint.className = "boot-hint";
-    hint.textContent = "Run `agent-bus runtime --json` to inspect the exact launcher, application root, PID, Node binary, static root, and served asset hashes.";
+    hint.textContent = "Run `qagent runtime --json` to inspect the exact launcher, application root, PID, Node binary, static root, and served asset hashes.";
     var runtime = document.createElement("pre");
     runtime.className = "boot-runtime";
     runtime.textContent = state.runtime ? JSON.stringify(state.runtime, null, 2) : "Runtime metadata request did not complete.";
@@ -114,7 +114,7 @@
     state.failed = true;
     state.failure = { title: title, detail: text(detail), at: Date.now() };
     record("failure", title + ": " + text(detail));
-    document.documentElement.setAttribute("data-agent-bus-failed", "true");
+    document.documentElement.setAttribute("data-qagent-failed", "true");
     failureCard(title, detail);
   }
 
@@ -124,10 +124,10 @@
     state.diagnostic = true;
     state.failure = { title: title, detail: text(detail), at: Date.now() };
     record("diagnostic", title + ": " + text(detail));
-    document.documentElement.setAttribute("data-agent-bus-diagnostic", "true");
+    document.documentElement.setAttribute("data-qagent-diagnostic", "true");
   }
 
-  window.__AGENT_BUS_BOOT__ = {
+  window.__QAGENT_BOOT__ = {
     state: state,
     checkpoint: checkpoint,
     fail: fail,
@@ -141,18 +141,18 @@
     var target = event.target;
     if (target && target !== window && target.tagName) {
       var url = target.src || target.href || target.tagName;
-      fail("Agent Bus resource failed to load", url);
+      fail("Qagent resource failed to load", url);
       return;
     }
-    fail("Agent Bus JavaScript error", event.error || event.message || "unknown script error");
+    fail("Qagent JavaScript error", event.error || event.message || "unknown script error");
   }, true);
 
   window.addEventListener("unhandledrejection", function (event) {
-    fail("Agent Bus promise rejected", event.reason || "unknown rejection");
+    fail("Qagent promise rejected", event.reason || "unknown rejection");
   });
 
   window.addEventListener("securitypolicyviolation", function (event) {
-    fail("Agent Bus Content Security Policy violation", [
+    fail("Qagent Content Security Policy violation", [
       event.violatedDirective,
       event.blockedURI,
       event.sourceFile,
@@ -185,12 +185,12 @@
       return Promise.all(registrations.map(function (registration) { return registration.unregister(); })).then(function () {
         if (!controlled) return;
         var url = new URL(location.href);
-        if (!url.searchParams.has("agent_bus_sw_reset")) {
-          url.searchParams.set("agent_bus_sw_reset", String(Date.now()));
+        if (!url.searchParams.has("qagent_sw_reset")) {
+          url.searchParams.set("qagent_sw_reset", String(Date.now()));
           location.replace(url.href);
           return;
         }
-        fail("A stale service worker still controls Agent Bus", "Registrations were removed but this page remains controlled. Close the tab and run `agent-bus open` again.");
+        fail("A stale service worker still controls Qagent", "Registrations were removed but this page remains controlled. Close the tab and run `qagent open` again.");
       });
     }).catch(function (error) { record("service-worker-error", error); });
   }
@@ -218,7 +218,7 @@
           return entry.name + " (" + Math.round(entry.duration) + "ms)";
         });
       } catch (_) {}
-      fail("Agent Bus boot timed out", "Completed " + state.highest + "/10 checkpoints. Resources:\n" + resources.join("\n"));
+      fail("Qagent boot timed out", "Completed " + state.highest + "/10 checkpoints. Resources:\n" + resources.join("\n"));
     }
   }, 12000);
 })();

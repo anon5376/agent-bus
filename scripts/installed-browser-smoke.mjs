@@ -9,7 +9,7 @@ import { join, resolve } from "node:path";
 
 const baseUrl = process.env.AGENT_BUS_BROWSER_URL ?? "http://127.0.0.1:11511";
 const listenPort = new URL(baseUrl).port || "11511";
-const busHome = process.env.AGENT_BUS_HOME ?? join(process.env.HOME ?? "", ".agent-bus");
+const busHome = process.env.QAGENT_HOME ?? process.env.AGENT_BUS_HOME ?? join(process.env.HOME ?? "", ".qagent");
 
 function chromeBinary() {
   if (process.env.CHROME_BIN) return process.env.CHROME_BIN;
@@ -90,8 +90,8 @@ async function browserState(cdp) {
       title: document.title,
       text: document.body.innerText,
       rootChildren: document.getElementById('root')?.childElementCount ?? -1,
-      mounted: Boolean(document.querySelector('[data-agent-bus-mounted="true"]')),
-      boot: globalThis.__AGENT_BUS_BOOT__?.state ?? null,
+      mounted: Boolean(document.querySelector('[data-qagent-mounted="true"]')),
+      boot: globalThis.__QAGENT_BOOT__?.state ?? null,
       controlled: Boolean(navigator.serviceWorker?.controller),
       scripts: Array.from(document.scripts).map(script => script.src).filter(Boolean),
       styles: Array.from(document.querySelectorAll('link[rel="stylesheet"]')).map(link => link.href)
@@ -106,7 +106,7 @@ async function waitForMounted(cdp, label, timeoutMs = 15_000) {
   let last = null;
   while (Date.now() < deadline) {
     last = await browserState(cdp);
-    if (last?.mounted && last.rootChildren > 0 && last.text.includes("Agent Bus") && last.search === "" && last.boot?.highest === 10) return last;
+    if (last?.mounted && last.rootChildren > 0 && last.text.includes("Qagent") && last.search === "" && last.boot?.highest === 10) return last;
     await new Promise((done) => setTimeout(done, 120));
   }
   const exceptions = cdp.events.filter((event) => event.method === "Runtime.exceptionThrown");
@@ -153,7 +153,7 @@ assert.equal(diagnosticResponse.status, 200, diagnosticText);
 const diagnostic = JSON.parse(diagnosticText);
 const runtime = diagnostic.runtime;
 
-assert.equal(diagnostic.product, "agent-bus");
+assert.equal(diagnostic.product, "qagent");
 assert.equal(diagnostic.buildId, runtimeCli.local.buildId);
 assert.equal(runtimeCli.running.buildId, diagnostic.buildId);
 assert.equal(resolve(runtime.applicationRoot), resolve(releaseRoot));
@@ -241,7 +241,7 @@ try {
   for (let number = 1; number <= 10; number += 1) assert.ok(mounted.boot.stages[number - 1], `missing installed checkpoint ${number}`);
 
   const cookies = await cdp.send("Network.getCookies", { urls: [baseUrl] });
-  assert.ok(cookies.cookies.some((cookie) => cookie.name === "agent_bus_session" && cookie.httpOnly === true));
+  assert.ok(cookies.cookies.some((cookie) => cookie.name === "qagent_session" && cookie.httpOnly === true));
 
   const scriptResponse = cdp.events.find((event) => event.method === "Network.responseReceived" && new URL(event.params.response.url).pathname === applicationScript.url);
   assert.ok(scriptResponse, `Chromium did not receive ${applicationScript.url}`);

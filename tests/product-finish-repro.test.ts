@@ -208,7 +208,7 @@ test("upgrading the merged PR5 checkout broker replaces only the requested targe
     const upgraded = runCli(envA, "start", "--no-open");
     assert.equal(upgraded.status, 0, `${upgraded.stdout}\n${upgraded.stderr}`);
     const current = await waitForHealth(urlA);
-    assert.equal(current.product, "agent-bus");
+    assert.equal(current.product, "qagent");
     assert.ok(current.runtime?.busHome, "replacement must be the PR6 runtime with scoped identity");
     assert.notEqual(current.pid, pr5.pid, "PR5 target listener must be replaced");
     const deadline = Date.now() + 5_000;

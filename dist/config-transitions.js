@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { parseAppearance } from "./appearance.js";
 import { resolveAgent, validateConfig, } from "./config.js";
+import { mergeCatalogProvider } from "./discover.js";
 export function configDigest(config) {
     return createHash("sha256").update(JSON.stringify(config)).digest("hex");
 }
@@ -85,6 +87,9 @@ function normalizedPermissions(value, fallback) {
         allowedPaths: Array.isArray(row.allowedPaths)
             ? row.allowedPaths.map(String).filter(Boolean)
             : fallback?.allowedPaths ?? ["."],
+        allowedChildAgentIds: Array.isArray(row.allowedChildAgentIds)
+            ? [...new Set(row.allowedChildAgentIds.map(String).filter(Boolean))]
+            : fallback?.allowedChildAgentIds,
     };
 }
 export function stageAgentUpdate(baseConfig, body) {
@@ -128,16 +133,72 @@ export function stageAgentUpdate(baseConfig, body) {
     return { agent, config };
 }
 export function stageProviderEnabled(baseConfig, body) {
+    const id = String(body.id ?? "").trim();
+    if (!id)
+        throw new Error("provider id is required");
+    const enabled = body.enabled === undefined ? true : Boolean(body.enabled);
+    const command = body.command === undefined ? undefined : String(body.command ?? "").trim();
+    let config = structuredClone(baseConfig);
+    if (!config.providers[id]) {
+        config = mergeCatalogProvider(config, id, { command, enabled });
+    }
+    else {
+        config.providers[id].enabled = enabled;
+        if (command) {
+            const harness = Object.values(config.harnesses).find((item) => item.providers.includes(id));
+            if (harness) {
+                harness.command = command;
+                if (enabled)
+                    harness.enabled = true;
+            }
+        }
+        else if (enabled) {
+            for (const harness of Object.values(config.harnesses)) {
+                if (harness.providers.includes(id))
+                    harness.enabled = true;
+            }
+        }
+    }
+    if (enabled) {
+        for (const model of Object.values(config.models)) {
+            if (model.provider === id)
+                model.enabled = true;
+        }
+    }
+    validateConfig(config);
+    return { provider: config.providers[id], config };
+}
+export function stageModelUpsert(baseConfig, body) {
     const config = structuredClone(baseConfig);
     const id = String(body.id ?? "").trim();
-    const provider = config.providers[id];
-    if (!provider)
-        throw new Error(`unknown provider: ${id}`);
-    if (body.enabled === undefined)
-        throw new Error("enabled is required");
-    provider.enabled = Boolean(body.enabled);
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(id))
+        throw new Error("model id must be 1-64 safe characters");
+    const existing = config.models[id];
+    const provider = String(body.provider ?? existing?.provider ?? "");
+    const harness = String(body.harness ?? existing?.harness ?? "");
+    if (!config.providers[provider])
+        throw new Error(`unknown provider: ${provider}`);
+    if (!config.harnesses[harness])
+        throw new Error(`unknown harness: ${harness}`);
+    const capabilities = existing?.capabilities ?? {
+        coding: 0.65, reasoning: 0.65, planning: 0.60, debugging: 0.60, research: 0.60,
+        toolUse: 0.60, speed: 0.60, tokenEfficiency: 0.60, reliability: 0.60, autonomy: 0.60,
+        contextTokens: 128000, costClass: "subscription", source: "user-configured",
+        notes: "User-added model. Capability values are configuration, not measured truth.",
+    };
+    const model = {
+        id,
+        provider,
+        harness,
+        family: String(body.family ?? existing?.family ?? provider),
+        exactModel: body.exactModel === undefined ? existing?.exactModel : String(body.exactModel || "") || undefined,
+        enabled: body.enabled === undefined ? existing?.enabled ?? true : Boolean(body.enabled),
+        capabilities,
+        notes: existing?.notes ?? "User-added model.",
+    };
+    config.models[id] = model;
     validateConfig(config);
-    return { provider, config };
+    return { model, config };
 }
 export function stageConstraintsPatch(baseConfig, body) {
     const config = structuredClone(baseConfig);
@@ -158,5 +219,12 @@ export function stageConstraintsPatch(baseConfig, body) {
         constraints.preferSubscription = Boolean(body.preferSubscription);
     validateConfig(config);
     return { constraints, config };
+}
+export function stageAppearancePatch(baseConfig, body) {
+    const config = structuredClone(baseConfig);
+    const appearance = parseAppearance({ ...(config.appearance ?? {}), ...body });
+    config.appearance = appearance;
+    validateConfig(config);
+    return { appearance, config };
 }
 //# sourceMappingURL=config-transitions.js.map

@@ -1,6 +1,15 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseAppearance } from "./appearance.js";
+function envValue(...names) {
+    for (const name of names) {
+        const value = process.env[name];
+        if (typeof value === "string" && value.trim())
+            return value;
+    }
+    return undefined;
+}
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 export const PROJECT_ROOT = ROOT;
 export const DEFAULT_CONFIG_PATH = join(ROOT, "agent-bus.config.json");
@@ -84,12 +93,16 @@ export function validateConfig(value) {
         throw new Error("maxConcurrentTasks must be >= 1");
     if (config.constraints.maxRetries < 0)
         throw new Error("maxRetries must be >= 0");
+    if (value.appearance !== undefined) {
+        assertObject(value.appearance, "configuration.appearance");
+        config.appearance = parseAppearance(value.appearance);
+    }
     return config;
 }
-export function loadConfig(path = process.env.AGENT_BUS_CONFIG ?? DEFAULT_CONFIG_PATH) {
+export function loadConfig(path = envValue("QAGENT_CONFIG", "AGENT_BUS_CONFIG") ?? DEFAULT_CONFIG_PATH) {
     const absolute = resolve(path);
     if (!existsSync(absolute))
-        throw new Error(`agent-bus configuration not found: ${absolute}`);
+        throw new Error(`Qagent configuration not found: ${absolute}`);
     let parsed;
     try {
         parsed = JSON.parse(readFileSync(absolute, "utf8"));
@@ -118,10 +131,13 @@ export function enabledAgents(config) {
         agent.harnessDefinition.enabled);
 }
 export function configPathFromProject(projectRoot) {
-    const explicit = process.env.AGENT_BUS_CONFIG?.trim();
+    const explicit = envValue("QAGENT_CONFIG", "AGENT_BUS_CONFIG");
     if (explicit)
         return explicit;
-    const local = join(projectRoot, ".agent-bus", "config.json");
-    return existsSync(local) ? local : DEFAULT_CONFIG_PATH;
+    const next = join(projectRoot, ".qagent", "config.json");
+    if (existsSync(next))
+        return next;
+    const previous = join(projectRoot, ".agent-bus", "config.json");
+    return existsSync(previous) ? previous : DEFAULT_CONFIG_PATH;
 }
 //# sourceMappingURL=config.js.map

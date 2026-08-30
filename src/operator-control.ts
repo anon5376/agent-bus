@@ -13,9 +13,11 @@ import {
   Message,
   Run,
   Task,
+  envValue,
   parseBusState,
   parseStateWaitResponse,
 } from "./protocol.js";
+import { resolveDelegateTarget } from "./resolve-target.js";
 import {
   OPERATOR_TOKEN_PATH,
   agentTokenPath,
@@ -112,8 +114,8 @@ export class OperatorControl {
     const occupied = Boolean(health) || listeners.length > 0 || ownedBrokerPids.size > 0;
     if (!occupied) return { running: false, occupied: false, health: null };
     const reason = ownedBrokerPids.size > 0
-      ? "registered Agent Bus process failed current-instance verification"
-      : "unrelated listener occupies the configured Agent Bus port";
+      ? "registered Qagent process failed current-instance verification"
+      : "unrelated listener occupies the configured Qagent port";
     return { running: false, occupied: true, health, reason };
   }
 
@@ -219,7 +221,7 @@ export class OperatorControl {
         return { ok: true, agentId, started: false, pid, projectRoot };
       }
     }
-    const configPath = String(state.configIdentity?.path ?? process.env.AGENT_BUS_CONFIG ?? "").trim();
+    const configPath = String(state.configIdentity?.path ?? envValue("QAGENT_CONFIG", "AGENT_BUS_CONFIG") ?? "").trim();
     if (!configPath) throw new OperatorControlError("CONFIG_UNAVAILABLE", "running broker does not expose a persistent configuration path");
     await this.ensureAgentToken(agentId);
     const launched = launchSupervisor({
@@ -303,7 +305,10 @@ export class OperatorControl {
     shell?: boolean;
     network?: boolean;
     exactAgent?: string;
+    agent?: string;
     exactModel?: string;
+    provider?: string;
+    harness?: string;
     families?: string[];
     providers?: string[];
     implementationFamily?: string;
@@ -313,21 +318,32 @@ export class OperatorControl {
     reviewRequired?: boolean;
   }): Promise<Record<string, unknown>> {
     await this.ensureRunning();
+    const catalog = await this.call<BusConfig>("/catalog");
+    const target = resolveDelegateTarget(catalog, {
+      agent: input.agent,
+      exactAgent: input.exactAgent,
+      exactModel: input.exactModel,
+      provider: input.provider,
+      harness: input.harness,
+      providers: input.providers,
+      role: input.role,
+    });
     const created = await this.call<{ task: Task }>("/task/create", {
       runId: input.runId,
       parentTaskId: input.parentTaskId,
       title: input.title,
       brief: input.description,
-      role: input.role ?? "implementation",
+      role: input.role ?? target.role ?? "implementation",
       complexity: input.complexity ?? 3,
       estimatedContextTokens: input.contextTokens ?? 8_000,
       readOnly: !Boolean(input.writeAccess),
       shell: Boolean(input.shell ?? input.writeAccess),
       network: Boolean(input.network),
-      assignee: input.exactAgent,
-      exactModel: input.exactModel,
+      assignee: target.exactAgent,
+      exactModel: target.exactModel,
       families: input.families ?? [],
-      providers: input.providers ?? [],
+      providers: target.providers ?? [],
+      harness: target.harness,
       implementationFamily: input.implementationFamily,
       dependencies: input.dependencies ?? [],
       pathScopes: input.pathScopes ?? [],

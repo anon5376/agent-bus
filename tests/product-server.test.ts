@@ -11,7 +11,7 @@ async function fixture(){
   const configPath=join(root,"config.json");
   const staticRoot=join(root,"web");
   mkdirSync(staticRoot);
-  writeFileSync(join(staticRoot,"index.html"),"<!doctype html><title>Agent Bus React</title><div id=root></div>");
+  writeFileSync(join(staticRoot,"index.html"),"<!doctype html><title>Qagent React</title><div id=root></div>");
   writeFileSync(configPath,JSON.stringify(testConfig(),null,2));
   const handle=await startProductServer({port:0,configPath,statePath:join(root,"state.sqlite"),logPath:join(root,"bus.jsonl"),operatorTokenPath,staticRoot});
   const token=readFileSync(operatorTokenPath,"utf8").trim();
@@ -29,7 +29,7 @@ async function login(f:Awaited<ReturnType<typeof fixture>>){
 
 test("single localhost server serves SPA but does not authenticate direct visitors",async t=>{
   const f=await fixture();t.after(()=>f.handle.close());
-  const page=await fetch(`${f.handle.url}/`);assert.equal(page.status,200);assert.match(await page.text(),/Agent Bus React/);assert.equal(page.headers.get("set-cookie"),null);
+  const page=await fetch(`${f.handle.url}/`);assert.equal(page.status,200);assert.match(await page.text(),/Qagent React/);assert.equal(page.headers.get("set-cookie"),null);
   assert.equal((await fetch(`${f.handle.url}/api/state`)).status,401);
   const bad=await fetch(`${f.handle.url}/dashboard/login`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({token:"wrong"})});assert.equal(bad.status,401);
 });
@@ -118,4 +118,23 @@ test("first-run setup is required until the operator completes configuration",as
   assert.equal(disk.constraints.maxDelegationDepth,2);
   assert.equal(disk.constraints.maxRetries,1);
   assert.equal(disk.providers.fake.enabled,true);
+});
+
+test("appearance colors persist through catalog and reject invalid hex",async t=>{
+  const f=await fixture();t.after(()=>f.handle.close());const cookie=await login(f);
+  const bad=await fetch(`${f.handle.url}/api/appearance`,{method:"POST",headers:{cookie,origin:f.handle.url,"content-type":"application/json"},body:JSON.stringify({accent:"blue"})});
+  assert.equal(bad.status,400);assert.match(await bad.text(),/appearance\.accent must be a #RRGGBB color/);
+  const ok=await fetch(`${f.handle.url}/api/appearance`,{method:"POST",headers:{cookie,origin:f.handle.url,"content-type":"application/json"},body:JSON.stringify({accent:"#FF5500",bg:"#111111"})});
+  const okText=await ok.text();assert.equal(ok.status,200,okText);
+  const saved=JSON.parse(okText);
+  assert.equal(saved.appearance.accent,"#ff5500");
+  assert.equal(saved.appearance.bg,"#111111");
+  assert.equal(saved.appearance.text,"#e4e4e4");
+  const catalog=await fetch(`${f.handle.url}/api/catalog`,{headers:{cookie}});
+  const body=await catalog.json() as any;
+  assert.equal(body.appearance.accent,"#ff5500");
+  assert.equal(body.appearance.bg,"#111111");
+  const disk=JSON.parse(readFileSync(f.configPath,"utf8"));
+  assert.equal(disk.appearance.accent,"#ff5500");
+  assert.equal(disk.appearance.bg,"#111111");
 });

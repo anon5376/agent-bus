@@ -3,7 +3,7 @@ import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getHarnessAdapter } from "./adapters.js";
-import { BUS_HOME, MAX_WAIT_MS, brokerAlive, brokerCall, parseExecutionConfig, parseOkResponse, parsePresenceResponse, parseRegisterResponse, parseStatusResponse, parseTaskEnvelope, parseWaitResponse, } from "./protocol.js";
+import { BUS_HOME, MAX_WAIT_MS, brokerAlive, brokerCall, envValue, parseExecutionConfig, parseOkResponse, parsePresenceResponse, parseRegisterResponse, parseStatusResponse, parseTaskEnvelope, parseWaitResponse, } from "./protocol.js";
 import { agentTokenPath, readTokenFile } from "./security.js";
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const MCP_SERVER = join(ROOT, "dist", "mcp-server.js");
@@ -69,7 +69,7 @@ export function buildSupervisorPrompt(messages, agent) {
 }
 function sanitizedEnvironment(agent, additions) {
     const env = { ...process.env, ...additions, MCP_TOOL_TIMEOUT: "3600000" };
-    if (process.env.AGENT_BUS_ALLOW_API_KEY === "1" || !agent.providerDefinition.subscriptionBacked)
+    if (envValue("QAGENT_ALLOW_API_KEY", "AGENT_BUS_ALLOW_API_KEY") === "1" || !agent.providerDefinition.subscriptionBacked)
         return env;
     const providerKeys = {
         anthropic: ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"],
@@ -188,7 +188,7 @@ export async function supervise(agentId, workdir) {
     mkdirSync(TRANSCRIPT_DIR, { recursive: true });
     mkdirSync(SESSION_DIR, { recursive: true });
     if (!(await brokerAlive()))
-        throw new Error("broker is not running — start it with: agent-bus broker");
+        throw new Error("broker is not running — start it with: qagent broker");
     const token = readTokenFile(agentTokenPath(agentId));
     if (!token) {
         throw new Error(`no token for ${agentId}; provision it explicitly with: agent-bus provision ${agentId}`);
@@ -240,7 +240,7 @@ export async function supervise(agentId, workdir) {
             workdir,
             mcpServerPath: MCP_SERVER,
             fakeHarnessPath: FAKE_HARNESS,
-            busEnvironment: { AGENT_TOKEN: token, AGENT_BUS_BLOCK_SEC: agent.harnessDefinition.id === "claude" ? "900" : "240" },
+            busEnvironment: { AGENT_TOKEN: token, QAGENT_BLOCK_SEC: agent.harnessDefinition.id === "claude" ? "900" : "240", AGENT_BUS_BLOCK_SEC: agent.harnessDefinition.id === "claude" ? "900" : "240" },
         };
         await adapter.prepare?.(context);
         const invocation = adapter.build(context);

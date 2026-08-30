@@ -30,7 +30,7 @@ import {
 const AGENT_ID = process.env.AGENT_ID;
 const AGENT_TOKEN = process.env.AGENT_TOKEN;
 if (!AGENT_ID || !AGENT_TOKEN) {
-  process.stderr.write("agent-bus: AGENT_ID and AGENT_TOKEN are required. Provision through `agent-bus provision <id>`.\n");
+  process.stderr.write("qagent: AGENT_ID and AGENT_TOKEN are required. Provision through `qagent provision <id>`.\n");
   process.exit(1);
 }
 const AGENT_ROLE = process.env.AGENT_ROLE ?? "worker";
@@ -72,7 +72,7 @@ async function guarded(fn: () => Promise<string>) {
     return text(await fn());
   } catch (error) {
     return {
-      content: [{ type: "text" as const, text: `agent-bus error: ${(error as Error).message}` }],
+      content: [{ type: "text" as const, text: `qagent error: ${(error as Error).message}` }],
       isError: true,
     };
   }
@@ -133,7 +133,7 @@ const validationObservationSchema = z.object({
   artifact: z.string().optional(),
 });
 
-const server = new McpServer({ name: "agent-bus", version: "0.2.0" });
+const server = new McpServer({ name: "qagent", version: "0.2.0" });
 
 server.tool(
   "bus_whoami",
@@ -254,9 +254,10 @@ server.tool(
 
 server.tool(
   "bus_assign_task",
-  "Create a dependency-aware child task. Omit `to` to let the router choose. The current task is used as parent unless explicitly overridden.",
+  "Create a dependency-aware child task. Use `to` or `exact_agent` for a roster id, or `exact_model` plus `provider`/`harness` (for example Claude Opus via Anthropic, or Grok via Cursor). Omit those to let the router choose. The current task is used as parent unless explicitly overridden.",
   {
     to: z.string().optional(),
+    exact_agent: z.string().optional(),
     title: z.string(),
     brief: z.string().describe("Scoped objective and definition of done; assume the worker has no other context"),
     role: z.string().default("implementation"),
@@ -272,12 +273,14 @@ server.tool(
     review_required: z.boolean().optional(),
     families: z.array(z.string()).optional(),
     providers: z.array(z.string()).optional(),
+    provider: z.string().optional(),
+    harness: z.string().optional(),
     exact_model: z.string().optional(),
   },
   async (input) => guarded(async () => {
     const parentTaskId = input.parent_task_id ?? await inferredParentTaskId();
     const { task } = await authCall("/task/create", {
-      assignee: input.to,
+      assignee: input.to ?? input.exact_agent,
       title: input.title,
       brief: input.brief,
       role: input.role,
@@ -292,7 +295,8 @@ server.tool(
       validationRequirements: input.validation_requirements ?? [],
       reviewRequired: input.review_required,
       families: input.families ?? [],
-      providers: input.providers ?? [],
+      providers: input.providers ?? (input.provider ? [input.provider] : []),
+      harness: input.harness,
       exactModel: input.exact_model,
     }, parseTaskEnvelope);
     return `${renderTask(task)}\nRouting: ${task.routing?.reason ?? "not available"}.`;
@@ -379,11 +383,11 @@ server.tool(
 );
 
 async function main(): Promise<void> {
-  await ensureRegistered().catch((error) => process.stderr.write(`agent-bus: ${error.message}\n`));
+  await ensureRegistered().catch((error) => process.stderr.write(`qagent: ${error.message}\n`));
   await server.connect(new StdioServerTransport());
 }
 
 main().catch((error) => {
-  process.stderr.write(`agent-bus fatal: ${error?.stack ?? error}\n`);
+  process.stderr.write(`qagent fatal: ${error?.stack ?? error}\n`);
   process.exit(1);
 });

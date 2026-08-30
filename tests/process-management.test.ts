@@ -5,7 +5,7 @@ import { PRODUCT_NAME, PRODUCT_PROTOCOL_VERSION } from "../src/product-runtime.j
 
 const buildId = "abc123build";
 
-test("process classification reuses only the exact current Agent Bus build", () => {
+test("process classification reuses only the exact current Qagent build", () => {
   const owner = classifyPortOwner(42, "node /tmp/agent-bus/dist/cli.js broker", {
     ok: true,
     pid: 42,
@@ -22,7 +22,7 @@ test("process classification reuses only the exact current Agent Bus build", () 
   assert.equal(owner.kind, "current");
 });
 
-test("process classification recognizes legacy Agent Bus only with a broker fingerprint", () => {
+test("process classification recognizes legacy Qagent only with a broker fingerprint", () => {
   const health = {
     ok: true,
     pid: 77,
@@ -63,7 +63,7 @@ test("product label alone is not a strong enough target-listener fingerprint", (
   assert.equal(owner.kind, "unrelated");
 });
 
-test("different Agent Bus build is replaceable rather than reused", () => {
+test("different Qagent build is replaceable rather than reused", () => {
   const owner = classifyPortOwner(100, "node /tmp/agent-bus/dist/cli.js broker", {
     ok: true,
     pid: 100,
@@ -77,10 +77,12 @@ test("different Agent Bus build is replaceable rather than reused", () => {
   assert.equal(owner.kind, "agent-bus");
 });
 
-test("known Agent Bus command matcher is narrow", () => {
+test("known Qagent command matcher is narrow", () => {
   assert.equal(knownAgentBusCommand("/opt/homebrew/bin/node /Users/me/agent-bus/dist/cli.js broker"), true);
+  assert.equal(knownAgentBusCommand("/opt/homebrew/bin/node /Users/me/qagent/dist/cli.js broker"), true);
   assert.equal(knownAgentBusCommand("/opt/homebrew/bin/node /Users/me/agent-bus/dist/broker.js"), true);
   assert.equal(knownAgentBusCommand("/opt/homebrew/bin/node /Users/me/.agent-bus/app/current/cli.js broker"), true);
+  assert.equal(knownAgentBusCommand("/opt/homebrew/bin/node /Users/me/.qagent/app/current/cli.js broker"), true);
   assert.equal(knownAgentBusCommand("/opt/homebrew/bin/node /Users/me/.agent-bus/app/releases/abc123/dist/cli.js broker"), true);
   assert.equal(knownAgentBusCommand("/opt/homebrew/bin/node /tmp/custom-bus/app/releases/abc123/dist/cli.js broker", { busHome: "/tmp/custom-bus" }), true);
   assert.equal(knownAgentBusCommand("/opt/homebrew/bin/node /tmp/other-bus/app/releases/abc123/dist/cli.js broker", { busHome: "/tmp/custom-bus" }), false);
@@ -88,7 +90,7 @@ test("known Agent Bus command matcher is narrow", () => {
   assert.equal(knownAgentBusCommand("node /Users/me/other-agent-bus-project/server.js"), false);
 });
 
-test("product health from another Agent Bus home is not owned by this instance", () => {
+test("product health from another Qagent home is not owned by this instance", () => {
   const owner = classifyPortOwner(123, "node /tmp/other/app/current/dist/cli.js broker", {
     ok: true,
     pid: 123,
@@ -101,5 +103,5 @@ test("product health from another Agent Bus home is not owned by this instance",
     runtime: { busHome: "/tmp/other", applicationRoot: "/tmp/other/app/releases/abc" },
   }, buildId, false, { busHome: "/tmp/mine", applicationRoot: "/tmp/mine/app/current" });
   assert.equal(owner.kind, "unrelated");
-  assert.match(owner.reason, /different Agent Bus instance/i);
+  assert.match(owner.reason, /different Qagent instance/i);
 });

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { configPathFromProject, loadConfig, resolveAgent } from "../src/config.js";
 import { knownAgentBusCommand } from "../src/process-management.js";
+import { testConfig } from "./helpers.js";
 
 test("explicit AGENT_BUS_CONFIG wins over project-local config for supervisor resolution", () => {
   const root = mkdtempSync(join(tmpdir(), "agent-bus-config-precedence-"));
@@ -13,7 +14,7 @@ test("explicit AGENT_BUS_CONFIG wins over project-local config for supervisor re
   mkdirSync(localDir, { recursive: true });
   const explicitPath = join(root, "explicit.json");
   const localPath = join(localDir, "config.json");
-  const base = structuredClone(loadConfig());
+  const base = structuredClone(testConfig());
   const explicit = structuredClone(base);
   const local = structuredClone(base);
   explicit.agents["fake-small"].model = "fake-strong";
@@ -33,14 +34,16 @@ test("explicit AGENT_BUS_CONFIG wins over project-local config for supervisor re
 });
 
 test("CLI autostart supervisors are pinned to the broker config source", () => {
-  const source = readFileSync(join(process.cwd(), "src", "cli.ts"), "utf8");
-  assert.match(source, /function startSupervisor\(agentId:string,workdir:string,configPath:string\)/);
-  assert.match(source, /AGENT_BUS_CONFIG:configPath/);
-  assert.match(source, /const configPath=process\.env\.AGENT_BUS_CONFIG\?\?DEFAULT_CONFIG_PATH/);
-  assert.match(source, /startSupervisor\(agent\.id,workdir,configPath\)/);
+  const cli = readFileSync(join(process.cwd(), "src", "cli.ts"), "utf8");
+  const launch = readFileSync(join(process.cwd(), "src", "supervisor-launch.ts"), "utf8");
+  assert.match(cli, /function startSupervisor\(agentId:string,workdir:string,configPath:string\)/);
+  assert.match(cli, /envValue\("QAGENT_CONFIG","AGENT_BUS_CONFIG"\)\?\?DEFAULT_CONFIG_PATH/);
+  assert.match(cli, /startSupervisor\(agent\.id,workdir,configPath\)/);
+  assert.match(launch, /config: configPath/);
+  assert.match(launch, /productEnvBindings/);
 });
 
-test("scoped Agent Bus command matching does not claim a generic checkout", () => {
+test("scoped Qagent command matching does not claim a generic checkout", () => {
   const command = "/opt/homebrew/bin/node /Users/me/code/agent-bus/dist/cli.js broker";
   assert.equal(knownAgentBusCommand(command, { busHome: "/tmp/instance-a", applicationRoot: "/tmp/instance-a/app/current" }), false);
 });

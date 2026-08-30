@@ -113,12 +113,12 @@ async function runChrome(url, profileDir, verify, label, options = {}) {
       iteration += 1;
       const result = await cdp.send("Runtime.evaluate", {
         expression: `(() => {
-          const boot = globalThis.__AGENT_BUS_BOOT__?.state ?? null;
+          const boot = globalThis.__QAGENT_BOOT__?.state ?? null;
           return {
             href: location.href,
             search: location.search,
             rootChildren: document.getElementById('root')?.childElementCount ?? -1,
-            mounted: Boolean(document.querySelector('[data-agent-bus-mounted="true"]')),
+            mounted: Boolean(document.querySelector('[data-qagent-mounted="true"]')),
             text: document.body.innerText,
             boot,
             serviceWorkerControlled: Boolean(navigator.serviceWorker?.controller),
@@ -216,7 +216,7 @@ async function verifyRuntimeAssets(baseUrl) {
   assert.equal(response.status, 200, diagnosticText);
   const diagnostic = JSON.parse(diagnosticText);
   const runtime = diagnostic.runtime;
-  assert.equal(diagnostic.product, "agent-bus");
+  assert.equal(diagnostic.product, "qagent");
   assert.equal(typeof diagnostic.buildId, "string");
   assert.equal(runtime.pid, process.pid);
   assert.equal(runtime.nodePath, process.execPath);
@@ -248,7 +248,7 @@ async function verifyRuntimeAssets(baseUrl) {
 }
 
 function fakeConfig() {
-  const config = JSON.parse(readFileSync(new URL("../agent-bus.config.json", import.meta.url), "utf8"));
+  const config = JSON.parse(readFileSync(new URL("../tests/fixtures/test-bus.config.json", import.meta.url), "utf8"));
   for (const [id, provider] of Object.entries(config.providers)) if (id !== "fake") provider.enabled = false;
   for (const [id, harness] of Object.entries(config.harnesses)) if (id !== "fake") harness.enabled = false;
   for (const [id, model] of Object.entries(config.models)) if (!id.startsWith("fake-")) model.enabled = false;
@@ -301,10 +301,10 @@ try {
   let agentModelFieldsChecked = false;
   let sessionCookie = null;
   const first = await runChrome(`${handle.url}/?ticket=${encodeURIComponent(ticket)}&build=${encodeURIComponent(runtime.buildId)}&launch=chrome-smoke`, profile, async (state, cdp) => {
-    if (!(state.mounted && state.rootChildren > 0 && state.text.includes("Agent Bus") && state.search === "" && state.boot?.highest === 10)) return false;
+    if (!(state.mounted && state.rootChildren > 0 && state.text.includes("Qagent") && state.search === "" && state.boot?.highest === 10)) return false;
     if (!agentModelFieldsChecked) { await verifyAgentModelFields(cdp); agentModelFieldsChecked = true; }
     const cookies = await cdp.send("Network.getCookies", { urls: [handle.url] });
-    sessionCookie = cookies.cookies.find((cookie) => cookie.name === "agent_bus_session" && cookie.httpOnly === true) ?? null;
+    sessionCookie = cookies.cookies.find((cookie) => cookie.name === "qagent_session" && cookie.httpOnly === true) ?? null;
     return Boolean(sessionCookie);
   }, "ticket login");
   assertAllCheckpoints(first.state, "ticket login");
@@ -318,9 +318,9 @@ try {
   }
 
   assert.ok(sessionCookie?.value, "ticket login did not expose the HttpOnly session cookie to CDP");
-  const reload = await runChrome(handle.url, reloadProfile, async (state) => state.mounted && state.rootChildren > 0 && state.text.includes("Agent Bus") && state.search === "" && state.boot?.highest === 10, "session reload", {
+  const reload = await runChrome(handle.url, reloadProfile, async (state) => state.mounted && state.rootChildren > 0 && state.text.includes("Qagent") && state.search === "" && state.boot?.highest === 10, "session reload", {
     beforeNavigate: (cdp) => cdp.send("Network.setCookie", {
-      name: "agent_bus_session",
+      name: "qagent_session",
       value: sessionCookie.value,
       url: handle.url,
       httpOnly: true,
@@ -359,10 +359,10 @@ try {
   assert.equal(blocked.state.boot.highest, 1);
   assert.ok(blocked.events.some((event) => event.method === "Network.loadingFailed"));
 
-  const noJavascript = await runChrome(handle.url, noJavascriptProfile, async (state, _cdp, iteration) => iteration > 8 && state.rootChildren > 0 && state.text.includes("Starting Agent Bus") && state.boot === null, "all dashboard JavaScript blocked", {
+  const noJavascript = await runChrome(handle.url, noJavascriptProfile, async (state, _cdp, iteration) => iteration > 8 && state.rootChildren > 0 && state.text.includes("Starting Qagent") && state.boot === null, "all dashboard JavaScript blocked", {
     beforeNavigate: (cdp) => cdp.send("Network.setBlockedURLs", { urls: ["*/boot.js*", `*${applicationScript.url}*`] }),
   });
-  assert.match(noJavascript.state.text, /Starting Agent Bus/);
+  assert.match(noJavascript.state.text, /Starting Qagent/);
   assert.ok(noJavascript.state.rootChildren > 0);
 
   let rejectionInjected = false;
@@ -372,7 +372,7 @@ try {
       await cdp.send("Runtime.evaluate", { expression: 'Promise.reject(new Error("SMOKE_UNHANDLED_REJECTION"))' });
       return false;
     }
-    return rejectionInjected && state.boot?.failed === true && state.text.includes("Agent Bus promise rejected") && state.text.includes("SMOKE_UNHANDLED_REJECTION");
+    return rejectionInjected && state.boot?.failed === true && state.text.includes("Qagent promise rejected") && state.text.includes("SMOKE_UNHANDLED_REJECTION");
   }, "unhandled rejection diagnostic");
   assert.match(rejection.state.text, /SMOKE_UNHANDLED_REJECTION/);
 

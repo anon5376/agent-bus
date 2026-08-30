@@ -28,7 +28,7 @@ cat > "$APP/Contents/Info.plist" <<'EOF'
 <plist version="1.0">
 <dict>
   <key>CFBundleName</key><string>AgentBus</string>
-  <key>CFBundleDisplayName</key><string>Agent Bus</string>
+  <key>CFBundleDisplayName</key><string>Qagent</string>
   <key>CFBundleIdentifier</key><string>local.agentbus.controlpanel</string>
   <key>CFBundleVersion</key><string>1.0</string>
   <key>CFBundleShortVersionString</key><string>1.0</string>

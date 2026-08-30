@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 import { getHarnessAdapter } from "../src/adapters.js";
 import { resolveAgent } from "../src/config.js";
+import { mergeCatalogProvider } from "../src/discover.js";
 import { retryDelayMs, runHarnessProcess } from "../src/supervisor.js";
 import { temporaryDirectory, testConfig } from "./helpers.js";
 
@@ -86,6 +88,52 @@ test("fake adapter runs a normalized successful process", async () => {
 test("malformed provider output is detected", () => {
   const parsed = getHarnessAdapter("fake").parse("not-json", 0);
   assert.equal(parsed.malformed, true);
+});
+
+test("Cursor adapter uses print/json/force and writes MCP config", () => {
+  const config = mergeCatalogProvider(testConfig(), "cursor", { command: "cursor-agent", enabled: true });
+  config.providers.cursor.enabled = true;
+  config.harnesses.cursor.enabled = true;
+  config.models["cursor-default"].enabled = true;
+  config.agents["cursor-worker"] = {
+    id: "cursor-worker",
+    model: "cursor-default",
+    role: "implementation",
+    authority: "worker",
+    description: "Cursor CLI worker",
+    enabled: true,
+    autoStart: false,
+    permissions: { canDelegate: false, canReview: false, filesystem: "write", shell: true, network: true, maxDelegationDepth: 0, allowedPaths: ["."] },
+  };
+  const agent = resolveAgent(config, "cursor-worker");
+  const workdir = temporaryDirectory();
+  const adapter = getHarnessAdapter("cursor");
+  adapter.prepare?.({
+    agent,
+    prompt: "test",
+    sessionId: null,
+    workdir,
+    mcpServerPath: "/tmp/mcp.js",
+    fakeHarnessPath: "/tmp/fake.js",
+    busEnvironment: { AGENT_TOKEN: "token" },
+  });
+  const invocation = adapter.build({
+    agent,
+    prompt: "test",
+    sessionId: "chat-1",
+    workdir,
+    mcpServerPath: "/tmp/mcp.js",
+    fakeHarnessPath: "/tmp/fake.js",
+    busEnvironment: { AGENT_TOKEN: "token" },
+  });
+  assert.equal(invocation.command, "cursor-agent");
+  assert.ok(invocation.args.includes("-p"));
+  assert.ok(invocation.args.includes("--output-format"));
+  assert.ok(invocation.args.includes("json"));
+  assert.ok(invocation.args.includes("--force"));
+  assert.ok(invocation.args.includes("--resume"));
+  const mcp = JSON.parse(readFileSync(join(workdir, ".cursor", "mcp.json"), "utf8"));
+  assert.equal(mcp.mcpServers["qagent"].args[0], "/tmp/mcp.js");
 });
 
 test("supervisor retry backoff is bounded and exponential", () => {

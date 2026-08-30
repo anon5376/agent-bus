@@ -6,9 +6,10 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { discoverHarnessModels, probeHarness } from "./adapters.js";
 import { DEFAULT_CONFIG_PATH, enabledAgents, loadConfig } from "./config.js";
+import { scanProviders } from "./discover.js";
 import { recordCurrentAgentBusProcess } from "./instance-processes.js";
 import { renderBusState, renderUsage } from "./cli-view.js";
-import { BUS_HOME, BUS_PORT, BUS_URL, brokerAlive, brokerCall, parseBusState, parseProvisionResponse, parseRoutePreview, parseRunCreateResponse, parseSendResponse, } from "./protocol.js";
+import { BUS_HOME, BUS_PORT, BUS_URL, brokerAlive, brokerCall, envValue, parseBusState, parseProvisionResponse, parseRoutePreview, parseRunCreateResponse, parseSendResponse, productEnvBindings, } from "./protocol.js";
 import { productArtifactManifest, PRODUCT_NAME, PRODUCT_PROTOCOL_VERSION } from "./product-runtime.js";
 import { OPERATOR_TOKEN_PATH, agentTokenPath, readTokenFile, writePrivateToken } from "./security.js";
 import { DASHBOARD_URL, startProductServer } from "./product-server.js";
@@ -25,7 +26,7 @@ const PROCESS_SCOPE = { applicationRoot: ROOT, busHome: BUS_HOME };
 function flag(name) { const i = process.argv.indexOf(name); return i >= 0 ? String(process.argv[i + 1] ?? "") : null; }
 function hasFlag(name) { return process.argv.includes(name); }
 function operatorToken() { const token = readTokenFile(OPERATOR_TOKEN_PATH); if (!token)
-    throw new Error(`operator token missing at ${OPERATOR_TOKEN_PATH}; start Agent Bus first`); return token; }
+    throw new Error(`operator token missing at ${OPERATOR_TOKEN_PATH}; start Qagent first`); return token; }
 function isCurrentHealth(health) {
     if (!health)
         return false;
@@ -68,7 +69,7 @@ function unrelatedDiagnostic(owners) {
     const owner = owners.find((item) => item.kind === "unrelated");
     if (!owner)
         return null;
-    return `Port ${BUS_PORT} is already owned by an unrelated process (PID ${owner.pid}${owner.command ? `: ${owner.command}` : ""}). Agent Bus will not terminate it.`;
+    return `Port ${BUS_PORT} is already owned by an unrelated process (PID ${owner.pid}${owner.command ? `: ${owner.command}` : ""}). Qagent will not terminate it.`;
 }
 function sha256(value) {
     return createHash("sha256").update(Buffer.from(value)).digest("hex");
@@ -95,7 +96,7 @@ async function verifyServedDashboard() {
         if (!pathname)
             throw new Error(`production manifest has no browser URL for ${asset.path}`);
         const separator = pathname.includes("?") ? "&" : "?";
-        const response = await fetch(`${BUS_URL}${pathname}${separator}agent_bus_verify=${nonce}`, {
+        const response = await fetch(`${BUS_URL}${pathname}${separator}qagent_verify=${nonce}`, {
             headers: { "cache-control": "no-cache" },
             signal: AbortSignal.timeout(3500),
         });
@@ -164,7 +165,7 @@ async function main() {
             const url = await browserUrl();
             if (!hasFlag("--no-open"))
                 openUrl(url);
-            console.log("Agent Bus is running.");
+            console.log("Qagent is running.");
             console.log(`Dashboard: ${DASHBOARD_URL}`);
             return;
         }
@@ -178,7 +179,7 @@ async function main() {
             const result = await stopAgentBusInstance(true);
             if (result.unrelated.length)
                 console.log(`Preserved unrelated listener on port ${BUS_PORT}: PID ${result.unrelated[0].pid}${result.unrelated[0].command ? ` · ${result.unrelated[0].command}` : ""}`);
-            console.log(result.stoppedPids.length ? `Stopped ${result.stoppedPids.length} Agent Bus process(es)${result.forcedPids.length ? ` (${result.forcedPids.length} forced)` : ""}.` : "Agent Bus is not running.");
+            console.log(result.stoppedPids.length ? `Stopped ${result.stoppedPids.length} Qagent process(es)${result.forcedPids.length ? ` (${result.forcedPids.length} forced)` : ""}.` : "Qagent is not running.");
             return;
         }
         case "broker": {
@@ -200,7 +201,7 @@ async function main() {
         case "provision": {
             const id = process.argv[3];
             if (!id)
-                throw new Error("usage: agent-bus provision <agent-id> [--rotate]");
+                throw new Error("usage: qagent provision <agent-id> [--rotate]");
             await provisionAgent(id, hasFlag("--rotate"));
             console.log(`${id} token stored at ${agentTokenPath(id)} (mode 0600)`);
             return;
@@ -209,7 +210,7 @@ async function main() {
             const id = process.argv[3];
             const workdir = resolve(process.argv[4] ?? process.cwd());
             if (!id)
-                throw new Error("usage: agent-bus supervise <agent-id> [workdir]");
+                throw new Error("usage: qagent supervise <agent-id> [workdir]");
             const removeProcessRecord = recordCurrentAgentBusProcess({ busHome: BUS_HOME, port: BUS_PORT, applicationRoot: ROOT, kind: "supervisor", agentId: id });
             try {
                 const { supervise } = await import("./supervisor.js");
@@ -226,23 +227,23 @@ async function main() {
             return;
         }
         case "mcp-config": {
-            const launcher = String(process.env.AGENT_BUS_LAUNCHER_PATH ?? "").trim();
-            const configPath = resolve(process.env.AGENT_BUS_CONFIG ?? DEFAULT_CONFIG_PATH);
+            const launcher = String(envValue("QAGENT_LAUNCHER_PATH", "AGENT_BUS_LAUNCHER_PATH") ?? "").trim();
+            const configPath = resolve(envValue("QAGENT_CONFIG", "AGENT_BUS_CONFIG") ?? DEFAULT_CONFIG_PATH);
             const entry = resolve(process.argv[1] ?? CLI_PATH);
             const server = {
                 command: launcher || process.execPath,
                 args: launcher ? ["operator-mcp"] : [entry, "operator-mcp"],
-                env: { AGENT_BUS_HOME: resolve(BUS_HOME), AGENT_BUS_CONFIG: configPath, AGENT_BUS_PORT: String(BUS_PORT), AGENT_BUS_URL: BUS_URL },
+                env: productEnvBindings({ home: resolve(BUS_HOME), config: configPath, port: BUS_PORT, url: BUS_URL }),
             };
-            console.log(JSON.stringify({ mcpServers: { "agent-bus": server } }, null, 2));
+            console.log(JSON.stringify({ mcpServers: { qagent: server, "agent-bus": server } }, null, 2));
             return;
         }
         case "run": {
             const workdir = resolve(process.argv[3] ?? "");
             const goal = flag("--goal");
             if (!process.argv[3] || !goal)
-                throw new Error("usage: agent-bus run <project-dir> --goal \"Implement X\" [--role manager] [--no-autostart]");
-            const configPath = process.env.AGENT_BUS_CONFIG ?? DEFAULT_CONFIG_PATH;
+                throw new Error("usage: qagent run <project-dir> --goal \"Implement X\" [--role manager] [--no-autostart]");
+            const configPath = envValue("QAGENT_CONFIG", "AGENT_BUS_CONFIG") ?? DEFAULT_CONFIG_PATH;
             await ensureBrokerStarted();
             const config = loadConfig(configPath);
             const started = [];
@@ -275,7 +276,7 @@ async function main() {
         }
         case "runtime": {
             const running = await runtimeDiagnostic();
-            const payload = { local: { buildId: EXPECTED_BUILD_ID, applicationRoot: resolve(ROOT), staticRoot: resolve(join(ROOT, "dist", "web")), entrypoint: resolve(process.argv[1] ?? CLI_PATH), launcherPath: process.env.AGENT_BUS_LAUNCHER_PATH ?? null, installRoot: process.env.AGENT_BUS_INSTALL_ROOT ?? null, nodePath: process.execPath, nodeVersion: process.version, cwd: process.cwd(), ui: { index: EXPECTED_MANIFEST.index, scripts: EXPECTED_MANIFEST.scripts, styles: EXPECTED_MANIFEST.styles } }, running };
+            const payload = { local: { buildId: EXPECTED_BUILD_ID, applicationRoot: resolve(ROOT), staticRoot: resolve(join(ROOT, "dist", "web")), entrypoint: resolve(process.argv[1] ?? CLI_PATH), launcherPath: envValue("QAGENT_LAUNCHER_PATH", "AGENT_BUS_LAUNCHER_PATH") ?? null, installRoot: envValue("QAGENT_INSTALL_ROOT", "AGENT_BUS_INSTALL_ROOT") ?? null, nodePath: process.execPath, nodeVersion: process.version, cwd: process.cwd(), ui: { index: EXPECTED_MANIFEST.index, scripts: EXPECTED_MANIFEST.scripts, styles: EXPECTED_MANIFEST.styles } }, running };
             if (hasFlag("--json")) {
                 console.log(JSON.stringify(payload, null, 2));
             }
@@ -306,8 +307,17 @@ async function main() {
         }
         case "doctor": {
             const config = loadConfig();
-            const seen = new Set();
+            const scans = await scanProviders(config);
             let failures = 0;
+            for (const scan of scans) {
+                const mark = scan.cliFound ? "✓" : scan.enabled ? "×" : "·";
+                if (scan.enabled && !scan.cliFound)
+                    failures += 1;
+                console.log(`${mark} ${scan.displayName.padEnd(16)} ${scan.cliFound ? (scan.version ?? scan.resolvedPath) : scan.error}`);
+                if (!scan.cliFound)
+                    console.log(`    login: ${scan.loginCommand || scan.installHint}`);
+            }
+            const seen = new Set();
             for (const agent of enabledAgents(config)) {
                 if (seen.has(agent.harnessDefinition.id))
                     continue;
@@ -315,7 +325,6 @@ async function main() {
                 const probe = await probeHarness(agent);
                 if (!probe.available)
                     failures += 1;
-                console.log(`${probe.available ? "✓" : "×"} ${probe.harness.padEnd(10)} ${probe.version ?? probe.error}`);
             }
             console.log("CLI discovery proves executable availability only. Authentication, subscription entitlement, quota, and exact model access remain live-unverified until a real provider call succeeds.");
             process.exitCode = failures ? 1 : 0;
@@ -330,7 +339,7 @@ async function main() {
         case "watch": {
             if (!(await brokerAlive()))
                 throw new Error(`broker not running at ${BUS_URL}`);
-            const tick = async () => { const content = await renderState().catch(e => `broker unreachable: ${e.message}`); process.stdout.write(`\x1b[2J\x1b[H\x1b[1magent-bus\x1b[0m ${new Date().toLocaleTimeString()}\n\n${content}\n`); };
+            const tick = async () => { const content = await renderState().catch(e => `broker unreachable: ${e.message}`); process.stdout.write(`\x1b[2J\x1b[H\x1b[1mqagent\x1b[0m ${new Date().toLocaleTimeString()}\n\n${content}\n`); };
             await tick();
             setInterval(tick, 1500);
             return;
@@ -349,11 +358,11 @@ async function main() {
             const subject = process.argv[4];
             const body = process.argv.slice(5).join(" ") || subject;
             if (!to || !subject)
-                throw new Error("usage: agent-bus send <to> <subject> [body]");
+                throw new Error("usage: qagent send <to> <subject> [body]");
             console.log(JSON.stringify(await brokerCall("/send", { token: operatorToken(), to, subject, body, type: "info" }, parseSendResponse), null, 2));
             return;
         }
-        default: console.log(["agent-bus — local multi-model agent control plane", "", "  agent-bus start [--no-open]", "  agent-bus open", "  agent-bus stop", "  agent-bus run <project> --goal \"...\"", "  agent-bus broker", "  agent-bus provision <agent-id> [--rotate]", "  agent-bus supervise <agent-id> [workdir]", "  agent-bus operator-mcp", "  agent-bus mcp-config", "  agent-bus route <role> [--complexity 1..5] [--write]", "  agent-bus models [--discover]", "  agent-bus doctor", "  agent-bus status | watch | usage", "  agent-bus send <to> <subject> [body]", "", `  dashboard + broker: ${DASHBOARD_URL} · state: ${BUS_HOME}`].join("\n"));
+        default: console.log(["qagent — local multi-model agent control plane", "", "  qagent start [--no-open]", "  qagent open", "  qagent stop", "  qagent run <project> --goal \"...\"", "  qagent broker", "  qagent provision <agent-id> [--rotate]", "  qagent supervise <agent-id> [workdir]", "  qagent operator-mcp", "  qagent mcp-config", "  qagent route <role> [--complexity 1..5] [--write]", "  qagent models [--discover]", "  qagent doctor", "  qagent status | watch | usage", "  qagent send <to> <subject> [body]", "", `  dashboard + broker: ${DASHBOARD_URL} · state: ${BUS_HOME}`].join("\n"));
     }
 }
 main().catch(error => { console.error(error?.stack ?? error?.message ?? error); process.exit(1); });
