@@ -145,6 +145,18 @@ function scoreCandidate(
   if (task.exactModel && task.exactModel !== agent.modelDefinition.id && task.exactModel !== agent.modelDefinition.exactModel) {
     rejectedBy.push(`exact model ${task.exactModel} required`);
   }
+  // Role identity is enforced on the requested role only. Fallback roles still
+  // score any agent against the fallback policy so reroute/exhaustion can move
+  // work across the configured graph instead of a hardcoded pair.
+  if (!task.exactAgent && role === task.role) {
+    if (role === "reviewer") {
+      if (agent.role !== "reviewer" && !agent.permissions.canReview) {
+        rejectedBy.push(`agent role ${agent.role} is not a reviewer`);
+      }
+    } else if (agent.role !== role) {
+      rejectedBy.push(`configured role ${agent.role} does not match ${role}`);
+    }
+  }
   const allowedFamilies = task.families?.length ? task.families : policy.families;
   if (allowedFamilies?.length && !allowedFamilies.includes(agent.modelDefinition.family)) {
     rejectedBy.push(`family ${agent.modelDefinition.family} is outside [${allowedFamilies.join(", ")}]`);
@@ -235,6 +247,12 @@ function scoreCandidate(
   score = total ? score / total : score;
   score -= Math.max(0, largestGap) * 0.35;
   score -= Math.min(0.25, live.openTasks * 0.04);
+  if (agent.role === role) {
+    score += 0.12;
+    reasons.push(`configured as ${role}`);
+  } else if (role === "reviewer" && agent.permissions.canReview) {
+    reasons.push("review permission allows filling reviewer");
+  }
   score = clamp(score, -1, 1);
 
   if (policy.independentFamilyReview && task.implementationFamily) {

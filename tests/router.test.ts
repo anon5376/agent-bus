@@ -22,6 +22,8 @@ test("routing sends low-complexity cheap work to the efficient small model", () 
 
 test("routing rejects the small model for difficult implementation and selects strong", () => {
   const config = testConfig();
+  config.agents["fake-small"].role = "implementation";
+  config.agents["fake-strong"].role = "implementation";
   const decision = routeTask(config, {
     role: "implementation",
     complexity: 5,
@@ -39,6 +41,8 @@ test("routing rejects the small model for difficult implementation and selects s
 
 test("independent review excludes the implementation family", () => {
   const config = testConfig();
+  config.agents["fake-small"].role = "reviewer";
+  config.agents["fake-small"].permissions.canReview = true;
   const decision = routeTask(config, {
     role: "reviewer",
     complexity: 4,
@@ -86,4 +90,48 @@ test("observed failures influence deterministic routing without mutating profile
   ]);
   assert.equal(decision.selectedAgentId, "fake-small");
   assert.deepEqual(config.models["fake-strong"].capabilities, before);
+});
+
+test("named roster routes by configured role rather than stock ids", () => {
+  const config = testConfig();
+  for (const agent of Object.values(config.agents)) agent.enabled = false;
+  config.roles.implementation.minimumCapability = 0.20;
+  config.agents["lead-alpha"] = {
+    ...config.agents["fake-strong"],
+    id: "lead-alpha",
+    role: "manager",
+    enabled: true,
+    permissions: { ...config.agents["fake-strong"].permissions, canReview: true },
+  };
+  config.agents["hands-bravo"] = { ...config.agents["fake-small"], id: "hands-bravo", role: "implementation", enabled: true };
+  config.agents["crit-charlie"] = {
+    ...config.agents["fake-strong"],
+    id: "crit-charlie",
+    role: "reviewer",
+    enabled: true,
+    permissions: { ...config.agents["fake-strong"].permissions, canReview: true, canDelegate: false, maxDelegationDepth: 0 },
+  };
+  const implementation = routeTask(config, { role: "implementation", complexity: 3, contextTokens: 8_000, writeAccess: true, shell: true, network: false });
+  assert.equal(implementation.selectedAgentId, "hands-bravo");
+  const manager = routeTask(config, { role: "manager", complexity: 5, contextTokens: 8_000, writeAccess: false, shell: true, network: false });
+  assert.equal(manager.selectedAgentId, "lead-alpha");
+  const review = routeTask(config, { role: "reviewer", complexity: 4, contextTokens: 8_000, writeAccess: false, shell: true, network: false, implementationFamily: "fake-small-family" });
+  assert.equal(review.selectedAgentId, "crit-charlie");
+  const implRejects = implementation.candidates.find((candidate) => candidate.agentId === "crit-charlie");
+  assert.ok(implRejects?.rejectedBy.some((reason) => reason.includes("does not match implementation")));
+});
+
+test("fallback roles still apply after same-role candidates are exhausted", () => {
+  const config = testConfig();
+  const decision = routeTask(config, {
+    role: "cheap-worker",
+    complexity: 1,
+    contextTokens: 1_000,
+    writeAccess: false,
+    shell: false,
+    network: false,
+    excludedFamilies: ["fake-small-family"],
+  });
+  assert.equal(decision.selectedAgentId, "fake-strong");
+  assert.equal(decision.usedFallbackRole, "implementation");
 });
