@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { loadFakeOnlyTestConfig } from "./fake-only-test-config.mjs";
 
 function freePort() {
   return new Promise((resolve, reject) => {
@@ -68,12 +69,7 @@ function runCli(env, ...args) {
 }
 
 function fakeConfig(path) {
-  const config = JSON.parse(readFileSync("agent-bus.config.json", "utf8"));
-  for (const [id, provider] of Object.entries(config.providers)) if (id !== "fake") provider.enabled = false;
-  for (const [id, harness] of Object.entries(config.harnesses)) if (id !== "fake") harness.enabled = false;
-  for (const [id, model] of Object.entries(config.models)) if (!id.startsWith("fake-")) model.enabled = false;
-  for (const [id, agent] of Object.entries(config.agents)) if (!id.startsWith("fake-")) agent.enabled = false;
-  writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`);
+  writeFileSync(path, `${JSON.stringify(loadFakeOnlyTestConfig(), null, 2)}\n`);
 }
 
 function startFixtureServer(port, kind, scriptPath = null) {
