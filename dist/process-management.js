@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
 import { join, resolve, sep } from "node:path";
 import { ownedAgentBusPids, processCommand } from "./instance-processes.js";
-import { PRODUCT_NAME, PRODUCT_PROTOCOL_VERSION } from "./product-runtime.js";
+import { LEGACY_PRODUCT_NAME, PRODUCT_NAME, PRODUCT_PROTOCOL_VERSION } from "./product-runtime.js";
 function escapeRegex(value) {
     return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -45,10 +45,13 @@ function legacyHealthShape(health) {
         && Number.isFinite(Number(health.tasks))
         && Number.isFinite(Number(health.runs));
 }
+function recognizedProductHealth(health) {
+    return health?.product === PRODUCT_NAME || health?.product === LEGACY_PRODUCT_NAME;
+}
 function strongProductHealth(health) {
     return Boolean(health
         && health.ok === true
-        && health.product === PRODUCT_NAME
+        && recognizedProductHealth(health)
         && Number.isFinite(Number(health.pid))
         && Number.isFinite(Number(health.productProtocol))
         && typeof health.buildId === "string"
@@ -65,7 +68,8 @@ export function classifyPortOwner(pid, command, health, expectedBuildId, legacyC
             return { pid, command, kind: "unrelated", reason: "different Qagent instance/home" };
         }
         const scopeRequiresRuntimeIdentity = Boolean(scope.busHome || scope.applicationRoot);
-        const current = (!scopeRequiresRuntimeIdentity || hasScopedRuntimeIdentity)
+        const current = health.product === PRODUCT_NAME
+            && (!scopeRequiresRuntimeIdentity || hasScopedRuntimeIdentity)
             && health.productProtocol === PRODUCT_PROTOCOL_VERSION
             && health.buildId === expectedBuildId;
         return {

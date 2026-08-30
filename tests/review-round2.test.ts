@@ -34,11 +34,13 @@ test("explicit AGENT_BUS_CONFIG wins over project-local config for supervisor re
 });
 
 test("CLI autostart supervisors are pinned to the broker config source", () => {
-  const source = readFileSync(join(process.cwd(), "src", "cli.ts"), "utf8");
-  assert.match(source, /function startSupervisor\(agentId:string,workdir:string,configPath:string\)/);
-  assert.match(source, /AGENT_BUS_CONFIG:configPath/);
-  assert.match(source, /const configPath=process\.env\.AGENT_BUS_CONFIG\?\?DEFAULT_CONFIG_PATH/);
-  assert.match(source, /startSupervisor\(agent\.id,workdir,configPath\)/);
+  const cli = readFileSync(join(process.cwd(), "src", "cli.ts"), "utf8");
+  const launch = readFileSync(join(process.cwd(), "src", "supervisor-launch.ts"), "utf8");
+  assert.match(cli, /function startSupervisor\(agentId:string,workdir:string,configPath:string\)/);
+  assert.match(cli, /envValue\("QAGENT_CONFIG","AGENT_BUS_CONFIG"\)\?\?DEFAULT_CONFIG_PATH/);
+  assert.match(cli, /startSupervisor\(agent\.id,workdir,configPath\)/);
+  assert.match(launch, /config: configPath/);
+  assert.match(launch, /productEnvBindings/);
 });
 
 test("scoped Qagent command matching does not claim a generic checkout", () => {
