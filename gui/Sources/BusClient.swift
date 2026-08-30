@@ -28,7 +28,7 @@ final class BusClient: ObservableObject {
 
     private var cursor = 0
     private var pollTask: Task<Void, Never>?
-    private let base = URL(string: "http://127.0.0.1:7717")!
+    private let base = URL(string: "http://127.0.0.1:11511")!
     private let session: URLSession = {
         let c = URLSessionConfiguration.ephemeral
         c.timeoutIntervalForRequest = 8

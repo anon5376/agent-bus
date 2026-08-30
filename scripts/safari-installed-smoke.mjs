@@ -10,7 +10,7 @@ if (process.platform !== "darwin") {
   throw new Error("The Safari installed-product smoke test requires macOS");
 }
 
-const baseUrl = process.env.AGENT_BUS_BROWSER_URL ?? "http://127.0.0.1:7717";
+const baseUrl = process.env.AGENT_BUS_BROWSER_URL ?? "http://127.0.0.1:11511";
 const busHome = process.env.AGENT_BUS_HOME ?? join(process.env.HOME ?? "", ".agent-bus");
 const safariDriver = process.env.SAFARIDRIVER_BIN ?? "/usr/bin/safaridriver";
 

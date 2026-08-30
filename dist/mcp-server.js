@@ -6,7 +6,7 @@ import { mkdirSync, openSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
-import { BUS_HOME, DEFAULT_BLOCK_MS, MAX_BLOCK_MS, MAX_WAIT_MS, brokerAlive, brokerCall, } from "./protocol.js";
+import { BUS_HOME, DEFAULT_BLOCK_MS, MAX_BLOCK_MS, MAX_WAIT_MS, brokerAlive, brokerCall, parsePeekResponse, parseRegisterResponse, parseRosterResponse, parseRoutePreview, parseSendResponse, parseStatusResponse, parseTaskEnvelope, parseTaskGetResponse, parseTaskListResponse, parseWaitResponse, } from "./protocol.js";
 const AGENT_ID = process.env.AGENT_ID;
 const AGENT_TOKEN = process.env.AGENT_TOKEN;
 if (!AGENT_ID || !AGENT_TOKEN) {
@@ -35,11 +35,11 @@ async function ensureRegistered() {
     if (registered)
         return;
     await ensureBroker();
-    await brokerCall("/register", { token: AGENT_TOKEN, id: AGENT_ID });
+    await brokerCall("/register", { token: AGENT_TOKEN, id: AGENT_ID }, parseRegisterResponse);
     registered = true;
 }
-function authCall(path, payload, timeoutMs) {
-    return brokerCall(path, { ...payload, token: AGENT_TOKEN }, timeoutMs);
+function authCall(path, payload, parse, timeoutMs) {
+    return brokerCall(path, { ...payload, token: AGENT_TOKEN }, parse, timeoutMs);
 }
 function text(value) {
     return { content: [{ type: "text", text: value }] };
@@ -86,7 +86,7 @@ function renderTask(task) {
     return `${task.id} [${task.state}] ${task.assigner} → ${task.assignee || "unassigned"} · ${task.role} · c${task.complexity} · r${task.round}${deps}${route} · ${task.title}`;
 }
 async function inferredParentTaskId() {
-    const { roster } = await brokerCall("/roster", {});
+    const { roster } = await brokerCall("/roster", {}, parseRosterResponse);
     return roster.find((agent) => agent.id === AGENT_ID)?.currentTaskId ?? null;
 }
 const contextRefSchema = z.object({
@@ -110,7 +110,7 @@ const validationObservationSchema = z.object({
 });
 const server = new McpServer({ name: "agent-bus", version: "0.2.0" });
 server.tool("bus_whoami", "Show your broker-enforced identity, authority, permissions, model/provider/harness and the live roster.", {}, async () => guarded(async () => {
-    const { roster } = await brokerCall("/roster", {});
+    const { roster } = await brokerCall("/roster", {}, parseRosterResponse);
     const me = roster.find((agent) => agent.id === AGENT_ID);
     const lines = roster.map((agent) => `  ${agent.id === AGENT_ID ? "*" : " "} ${agent.id} (${agent.role}; ${agent.family}/${agent.model} via ${agent.harness}) — ${agent.status}` +
         `${agent.currentTaskId ? ` on ${agent.currentTaskId}` : ""}${agent.pendingMessages ? ` · ${agent.pendingMessages} unread` : ""}`);
@@ -130,8 +130,8 @@ server.tool("bus_send", "Send a concise question, answer, or status note. Use co
     task_id: z.string().optional(),
     refs: z.array(contextRefSchema).optional(),
 }, async ({ to, subject, body, type, task_id, refs }) => guarded(async () => {
-    const response = await authCall("/send", { to, subject, body, type, taskId: task_id, refs: refs ?? [] });
-    const delivered = response.delivered?.map((item) => item.to).join(", ") || "nobody";
+    const response = await authCall("/send", { to, subject, body, type, taskId: task_id, refs: refs ?? [] }, parseSendResponse);
+    const delivered = response.delivered.map((item) => item.to).join(", ") || "nobody";
     const unknown = response.unknownRecipients?.length ? `; unknown: ${response.unknownRecipients.join(", ")}` : "";
     return `Delivered to ${delivered}${unknown}.`;
 }));
@@ -143,16 +143,16 @@ server.tool("bus_wait", "Block without consuming model tokens until mail arrives
     const deadline = Date.now() + totalMs;
     while (Date.now() < deadline) {
         const chunk = Math.min(MAX_WAIT_MS, deadline - Date.now());
-        const response = await authCall("/wait", { timeoutMs: chunk, reason: reason ?? "" }, chunk + 15_000);
+        const response = await authCall("/wait", { timeoutMs: chunk, reason: reason ?? "" }, parseWaitResponse, chunk + 15_000);
         if (response.messages.length) {
-            await authCall("/status", { status: "idle" });
+            await authCall("/status", { status: "idle" }, parseStatusResponse);
             return renderMessages(response.messages, false);
         }
     }
     return renderMessages([], true);
 }));
 server.tool("bus_peek", "Read and drain your inbox without blocking.", {}, async () => guarded(async () => {
-    const response = await authCall("/peek", {});
+    const response = await authCall("/peek", {}, parsePeekResponse);
     return renderMessages(response.messages, false);
 }));
 server.tool("bus_route_task", "Preview the deterministic routing decision and all candidate rejection reasons before creating a task.", {
@@ -180,7 +180,7 @@ server.tool("bus_route_task", "Preview the deterministic routing decision and al
         exactModel: input.exact_model,
         exactAgent: input.exact_agent,
         implementationFamily: input.implementation_family,
-    });
+    }, parseRoutePreview);
     return [
         decision.reason,
         "",
@@ -225,7 +225,7 @@ server.tool("bus_assign_task", "Create a dependency-aware child task. Omit `to` 
         families: input.families ?? [],
         providers: input.providers ?? [],
         exactModel: input.exact_model,
-    });
+    }, parseTaskEnvelope);
     return `${renderTask(task)}\nRouting: ${task.routing?.reason ?? "not available"}.`;
 }));
 server.tool("bus_submit_work", "Submit structured work: concise summary, changed files/artifacts and reproducible validation observations.", {
@@ -243,7 +243,7 @@ server.tool("bus_submit_work", "Submit structured work: concise summary, changed
         changedFiles: changed_files ?? [],
         artifacts: artifacts ?? [],
         validation: validation ?? [],
-    });
+    }, parseTaskEnvelope);
     return `Submitted ${task.id} round ${task.round}. Reviewer: ${task.reviewerId ?? task.assigner}.`;
 }));
 server.tool("bus_review_work", "Accept submitted work or request a bounded revision. Broker authorization and independent-family rules are enforced.", {
@@ -251,7 +251,7 @@ server.tool("bus_review_work", "Accept submitted work or request a bounded revis
     accepted: z.boolean(),
     feedback: z.string(),
 }, async ({ task_id, accepted, feedback }) => guarded(async () => {
-    const { task } = await authCall("/task/review", { taskId: task_id, accepted, feedback });
+    const { task } = await authCall("/task/review", { taskId: task_id, accepted, feedback }, parseTaskEnvelope);
     return accepted ? `Accepted ${task.id}.` : `Requested changes on ${task.id}; round ${task.round}.`;
 }));
 server.tool("bus_task_board", "List the durable task graph, including blocked dependencies and routing assignments.", {
@@ -263,11 +263,11 @@ server.tool("bus_task_board", "List the durable task graph, including blocked de
         agent: mine_only ? AGENT_ID : null,
         openOnly: !include_closed,
         runId: run_id,
-    });
+    }, parseTaskListResponse);
     return tasks.length ? tasks.map(renderTask).join("\n") : "No matching tasks.";
 }));
 server.tool("bus_task_detail", "Show one task's graph links, scoped context, routing rationale, result, review and complete retry history.", { task_id: z.string() }, async ({ task_id }) => guarded(async () => {
-    const { task, routingHistory } = await brokerCall("/task/get", { taskId: task_id });
+    const { task, routingHistory } = await brokerCall("/task/get", { taskId: task_id }, parseTaskGetResponse);
     const history = task.history.map((event) => `  ${new Date(event.ts).toISOString()} ${event.actor} ${event.kind} → ${event.state}\n    ${event.note.replace(/\n/g, "\n    ")}`).join("\n");
     return [
         renderTask(task),

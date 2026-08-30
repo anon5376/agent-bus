@@ -84,7 +84,7 @@ test("known Agent Bus command matcher is narrow", () => {
   assert.equal(knownAgentBusCommand("/opt/homebrew/bin/node /Users/me/.agent-bus/app/releases/abc123/dist/cli.js broker"), true);
   assert.equal(knownAgentBusCommand("/opt/homebrew/bin/node /tmp/custom-bus/app/releases/abc123/dist/cli.js broker", { busHome: "/tmp/custom-bus" }), true);
   assert.equal(knownAgentBusCommand("/opt/homebrew/bin/node /tmp/other-bus/app/releases/abc123/dist/cli.js broker", { busHome: "/tmp/custom-bus" }), false);
-  assert.equal(knownAgentBusCommand("python server.py --name agent-bus --port 7717"), false);
+  assert.equal(knownAgentBusCommand("python server.py --name agent-bus --port 11511"), false);
   assert.equal(knownAgentBusCommand("node /Users/me/other-agent-bus-project/server.js"), false);
 });
 

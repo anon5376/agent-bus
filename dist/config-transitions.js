@@ -127,4 +127,36 @@ export function stageAgentUpdate(baseConfig, body) {
     validateConfig(config);
     return { agent, config };
 }
+export function stageProviderEnabled(baseConfig, body) {
+    const config = structuredClone(baseConfig);
+    const id = String(body.id ?? "").trim();
+    const provider = config.providers[id];
+    if (!provider)
+        throw new Error(`unknown provider: ${id}`);
+    if (body.enabled === undefined)
+        throw new Error("enabled is required");
+    provider.enabled = Boolean(body.enabled);
+    validateConfig(config);
+    return { provider, config };
+}
+export function stageConstraintsPatch(baseConfig, body) {
+    const config = structuredClone(baseConfig);
+    const constraints = config.constraints;
+    function assign(key, min) {
+        if (body[key] === undefined)
+            return;
+        const value = Number(body[key]);
+        if (!Number.isFinite(value) || value < min)
+            throw new Error(`${key} must be a number >= ${min}`);
+        constraints[key] = value;
+    }
+    assign("maxDelegationDepth", 0);
+    assign("maxConcurrentTasks", 1);
+    assign("maxRetries", 0);
+    assign("independentReviewComplexity", 1);
+    if (body.preferSubscription !== undefined)
+        constraints.preferSubscription = Boolean(body.preferSubscription);
+    validateConfig(config);
+    return { constraints, config };
+}
 //# sourceMappingURL=config-transitions.js.map

@@ -24,8 +24,12 @@ import {
   TaskState,
   UsageMetrics,
   ValidationRequirement,
+  BusSnapshot,
+  BusState,
+  RosterEntry,
   emptyUsage,
   newId,
+  normalizeUsageMetrics,
 } from "./protocol.js";
 import {
   CandidateAvailability,
@@ -198,7 +202,7 @@ export class BrokerService {
     for (const agent of this.store.loadAgents()) this.agents.set(agent.id, agent);
     for (const task of this.store.loadTasks()) this.tasks.set(task.id, task);
     for (const run of this.store.loadRuns()) this.runs.set(run.id, run);
-    for (const [id, usage] of Object.entries(this.store.allUsage())) this.usageByAgent.set(id, usage);
+    for (const [id, usage] of Object.entries(this.store.allUsage())) this.usageByAgent.set(id, normalizeUsageMetrics(usage));
     this.ensureConfiguredRoster();
     this.ensureOperator();
   }
@@ -335,22 +339,53 @@ export class BrokerService {
     return agent.status;
   }
 
-  roster(): Record<string, unknown>[] {
+  private rosterViewFields(agent: Agent): Pick<RosterEntry, "family" | "provider" | "harness" | "model" | "auth"> {
+    if (agent.id === OPERATOR_ID) {
+      return {
+        family: agent.family || "human",
+        provider: agent.provider || "local",
+        harness: agent.harness || "control-panel",
+        model: agent.model || "control-panel",
+        auth: agent.auth || "local operator token",
+      };
+    }
+    try {
+      const definition = resolveAgent(this.config, agent.id);
+      return {
+        family: definition.modelDefinition.family,
+        provider: definition.modelDefinition.provider,
+        harness: definition.harnessDefinition.id,
+        model: definition.modelDefinition.id,
+        auth: agent.auth || definition.providerDefinition.authSource,
+      };
+    } catch {
+      return {
+        family: agent.family || "",
+        provider: agent.provider || "",
+        harness: agent.harness || "",
+        model: agent.model,
+        auth: agent.auth || "",
+      };
+    }
+  }
+
+  roster(): RosterEntry[] {
     return [...this.agents.values()]
       .map((agent) => {
         const pending = this.store.pendingMessages(agent.id).length;
         const blocked = this.waiters.some((waiter) => waiter.agentId === agent.id);
         const supervisor = this.supervisorMeta.get(agent.id);
         const status = this.effectiveStatus(agent);
+        const view = this.rosterViewFields(agent);
         return {
           id: agent.id,
           role: agent.role,
-          model: agent.model,
-          family: agent.family,
-          provider: agent.provider,
+          model: view.model,
+          family: view.family,
+          provider: view.provider,
           description: agent.description,
-          harness: agent.harness,
-          auth: agent.auth,
+          harness: view.harness,
+          auth: view.auth,
           authority: agent.authority,
           permissions: agent.permissions,
           status,
@@ -361,11 +396,34 @@ export class BrokerService {
           stalled: pending > 0 && !blocked && status !== "working",
           supervisorPid: supervisor?.pid ?? null,
           workdir: supervisor?.workdir ?? null,
-          cli: supervisor?.cli ?? agent.harness,
-          usage: this.usageByAgent.get(agent.id) ?? emptyUsage(),
+          cli: supervisor?.cli ?? null,
+          usage: normalizeUsageMetrics(this.usageByAgent.get(agent.id) ?? emptyUsage()),
         };
       })
-      .sort((a, b) => String(a.id).localeCompare(String(b.id)));
+      .sort((a, b) => a.id.localeCompare(b.id));
+  }
+
+  busState(): BusState {
+    return {
+      roster: this.roster(),
+      tasks: [...this.tasks.values()].sort((a, b) => b.updatedAt - a.updatedAt),
+      runs: [...this.runs.values()].sort((a, b) => b.updatedAt - a.updatedAt),
+      waiting: this.waiters.map((waiter) => waiter.agentId),
+      telemetry: this.store.telemetry(),
+      pathLeases: this.store.pathLeases(),
+      revision: this.stateRevision,
+      configIdentity: this.configIdentity(),
+    };
+  }
+
+  snapshot(sinceSeq = 0): BusSnapshot {
+    const since = Math.max(0, Number(sinceSeq) || 0);
+    return {
+      ...this.busState(),
+      messages: this.store.historySince(since),
+      seq: this.store.latestSequence(),
+      brokerPid: process.pid,
+    };
   }
 
   private availability(): CandidateAvailability[] {
@@ -797,6 +855,7 @@ export class BrokerService {
         return { agent, pendingMessages: this.store.pendingMessages(id).length, roster: this.roster() };
       }
 
+      // Agent heartbeat: mutates presence. Requires a bearer token.
       case "/status": {
         const identity = this.caller(body);
         const agent = this.touch(identity.id, body.status as AgentStatus | undefined);
@@ -847,6 +906,7 @@ export class BrokerService {
         return { ok: true };
       }
 
+      case "/agents":
       case "/roster":
         return { roster: this.roster() };
 
@@ -1297,18 +1357,7 @@ export class BrokerService {
 
       case "/snapshot": {
         const since = Math.max(0, Number(body.sinceSeq ?? 0) || 0);
-        return {
-          roster: this.roster(),
-          tasks: [...this.tasks.values()].sort((a, b) => b.updatedAt - a.updatedAt),
-          runs: [...this.runs.values()].sort((a, b) => b.updatedAt - a.updatedAt),
-          messages: this.store.historySince(since),
-          seq: this.store.latestSequence(),
-          waiting: this.waiters.map((waiter) => waiter.agentId),
-          brokerPid: process.pid,
-          pathLeases: this.store.pathLeases(),
-          revision: this.stateRevision,
-          configIdentity: this.configIdentity(),
-        };
+        return this.snapshot(since);
       }
 
       case "/state/wait": {
@@ -1329,17 +1378,11 @@ export class BrokerService {
         });
       }
 
+      // Localhost snapshot for CLI status/watch/usage. Unauthenticated on
+      // purpose: agent-bus status must not send the operator token to an
+      // unverified listener. /status above is the authenticated write path.
       case "/state":
-        return {
-          roster: this.roster(),
-          tasks: [...this.tasks.values()].sort((a, b) => b.updatedAt - a.updatedAt),
-          runs: [...this.runs.values()].sort((a, b) => b.updatedAt - a.updatedAt),
-          waiting: this.waiters.map((waiter) => waiter.agentId),
-          telemetry: this.store.telemetry(),
-          pathLeases: this.store.pathLeases(),
-          revision: this.stateRevision,
-          configIdentity: this.configIdentity(),
-        };
+        return this.busState();
 
       default:
         throw new Error(`no route ${path}`);

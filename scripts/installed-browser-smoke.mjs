@@ -7,7 +7,8 @@ import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-const baseUrl = process.env.AGENT_BUS_BROWSER_URL ?? "http://127.0.0.1:7717";
+const baseUrl = process.env.AGENT_BUS_BROWSER_URL ?? "http://127.0.0.1:11511";
+const listenPort = new URL(baseUrl).port || "11511";
 const busHome = process.env.AGENT_BUS_HOME ?? join(process.env.HOME ?? "", ".agent-bus");
 
 function chromeBinary() {
@@ -163,7 +164,7 @@ assert.equal(resolve(runtime.launcherPath), resolve(launcherPath));
 assert.equal(resolve(runtime.nodePath), resolve(process.execPath));
 assert.equal(runtime.nodeVersion, process.version);
 assert.equal(resolve(runtime.cwd), resolve(process.cwd()));
-assert.equal(Number(runtime.pid), Number(command("lsof", "-nP", "-t", "-iTCP:7717", "-sTCP:LISTEN")));
+assert.equal(Number(runtime.pid), Number(command("lsof", "-nP", "-t", `-iTCP:${listenPort}`, "-sTCP:LISTEN")));
 const processCommand = command("ps", "-p", String(runtime.pid), "-o", "command=");
 assert.ok(processCommand.includes(`${releaseRoot}/cli.js broker`), `running PID command mismatch: ${processCommand}`);
 const cwdOutput = command("lsof", "-a", "-p", String(runtime.pid), "-d", "cwd", "-Fn");

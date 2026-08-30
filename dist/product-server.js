@@ -5,7 +5,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { discoverHarnessModels, probeHarness } from "./adapters.js";
 import { DEFAULT_CONFIG_PATH, loadConfig, resolveAgent, } from "./config.js";
-import { stageAgentUpdate, supervisedExecutionConflicts } from "./config-transitions.js";
+import { stageAgentUpdate, stageConstraintsPatch, stageProviderEnabled, supervisedExecutionConflicts } from "./config-transitions.js";
 import { verifiedSupervisorProcess } from "./instance-processes.js";
 import { addOrUpdateIntegration } from "./integrations.js";
 import { BUS_HOME, BUS_HOST, BUS_PORT, MAX_WAIT_MS } from "./protocol.js";
@@ -18,6 +18,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const CLI_PATH = join(ROOT, "cli.js");
 const DEFAULT_STATIC_ROOT = join(ROOT, "dist", "web");
 const PROJECT_META_KEY = "dashboard.projects";
+const SETUP_META_KEY = "dashboard.setup";
 const DEFAULT_SESSION_TTL_MS = 24 * 60 * 60_000;
 const DEFAULT_LOGIN_TICKET_TTL_MS = 60_000;
 export const DASHBOARD_URL = `http://${BUS_HOST}:${BUS_PORT}`;
@@ -247,6 +248,27 @@ function projects(service) {
     }
     return [...map.values()].sort((a, b) => b.lastUsedAt - a.lastUsedAt);
 }
+function setupRecord(service) {
+    try {
+        const parsed = JSON.parse(service.store.getMeta(SETUP_META_KEY) ?? "null");
+        if (parsed && typeof parsed === "object" && parsed.completed) {
+            return { completed: true, completedAt: Number(parsed.completedAt) || null };
+        }
+    }
+    catch { /* treat missing or corrupt setup meta as incomplete */ }
+    return { completed: false, completedAt: null };
+}
+function setupStatus(service) {
+    const record = setupRecord(service);
+    return { ...record, required: !record.completed && service.runs.size === 0 };
+}
+function persistLiveConfig(service, configPath, config) {
+    if (!configPath)
+        throw new Error("configuration editing is unavailable with an in-memory config");
+    assertSafeConfigTransition(service, config);
+    writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+    applyConfig(service, config);
+}
 function rememberProject(service, value) {
     const path = resolve(String(value ?? "").trim());
     if (!path || !existsSync(path) || !statSync(path).isDirectory())
@@ -417,8 +439,8 @@ async function handleApi(req, res, pathname, params, service, sessions, operator
             running = true;
             try {
                 pruneStaleSupervisors(service);
-                const snapshot = await service.handle("/snapshot", { sinceSeq: since });
-                since = Number(snapshot.seq ?? since);
+                const snapshot = service.snapshot(since);
+                since = snapshot.seq;
                 if (!closed)
                     res.write(`event: snapshot\ndata: ${JSON.stringify({ ...snapshot, incremental: true })}\n\n`);
             }
@@ -441,10 +463,21 @@ async function handleApi(req, res, pathname, params, service, sessions, operator
     }
     if (pathname === "/api/state" && req.method === "GET") {
         pruneStaleSupervisors(service);
-        return sendJson(res, 200, await service.handle("/snapshot", { sinceSeq: 0 }));
+        return sendJson(res, 200, service.snapshot(0));
     }
     if (pathname === "/api/catalog" && req.method === "GET")
         return sendJson(res, 200, await service.handle("/catalog", {}));
+    if (pathname === "/api/setup" && req.method === "GET")
+        return sendJson(res, 200, setupStatus(service));
+    if (pathname === "/api/setup" && req.method === "POST") {
+        const body = await readJson(req);
+        const completed = body.completed === undefined ? true : Boolean(body.completed);
+        const record = completed
+            ? { completed: true, completedAt: Date.now() }
+            : { completed: false, completedAt: null };
+        service.store.setMeta(SETUP_META_KEY, JSON.stringify(record));
+        return sendJson(res, 200, setupStatus(service));
+    }
     if (pathname === "/api/projects" && req.method === "GET")
         return sendJson(res, 200, { projects: projects(service) });
     if (pathname === "/api/projects" && req.method === "POST") {
@@ -486,14 +519,22 @@ async function handleApi(req, res, pathname, params, service, sessions, operator
             token: operatorToken(operatorTokenPath),
         }));
     }
-    if (pathname === "/api/agents" && req.method === "POST") {
-        if (!configPath)
-            throw new Error("agent configuration editing is unavailable with an in-memory config");
+    if (pathname === "/api/providers" && req.method === "POST") {
         const body = await readJson(req);
-        const result = stageAgentUpdate(loadConfig(configPath), body);
-        assertSafeConfigTransition(service, result.config);
-        writeFileSync(configPath, `${JSON.stringify(result.config, null, 2)}\n`, "utf8");
-        applyConfig(service, result.config);
+        const result = stageProviderEnabled(loadConfig(configPath || undefined), body);
+        persistLiveConfig(service, configPath, result.config);
+        return sendJson(res, 200, { provider: result.provider, applied: true });
+    }
+    if (pathname === "/api/constraints" && req.method === "POST") {
+        const body = await readJson(req);
+        const result = stageConstraintsPatch(loadConfig(configPath || undefined), body);
+        persistLiveConfig(service, configPath, result.config);
+        return sendJson(res, 200, { constraints: result.constraints, applied: true });
+    }
+    if (pathname === "/api/agents" && req.method === "POST") {
+        const body = await readJson(req);
+        const result = stageAgentUpdate(loadConfig(configPath || undefined), body);
+        persistLiveConfig(service, configPath, result.config);
         return sendJson(res, 200, { agent: result.agent, applied: true });
     }
     if (pathname === "/api/integrations" && req.method === "POST") {

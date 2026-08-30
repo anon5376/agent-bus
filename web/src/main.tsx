@@ -2,6 +2,7 @@ import "./entry.ts";
 import { Component, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { createRoot } from "react-dom/client";
+import type { BusSnapshot, Message, RosterEntry as Agent, Run, Task } from "../../src/protocol.ts";
 import "./styles.css";
 
 const bootMonitor=()=>((window as any).__AGENT_BUS_BOOT__ as {checkpoint?:(number:number,detail?:unknown)=>void;fail?:(title:string,detail:unknown)=>void;diagnose?:(title:string,detail:unknown)=>void;record?:(kind:string,detail:unknown)=>void}|undefined);
@@ -9,17 +10,14 @@ const checkpoint=(number:number,detail?:unknown)=>bootMonitor()?.checkpoint?.(nu
 checkpoint(3,"React application module evaluated");
 checkpoint(4,"React and react-dom/client imports resolved");
 
-type Usage = { turns:number; inputTokens:number; outputTokens:number; totalTokens:number; costUSD:number; latencyMs:number };
-type Agent = { id:string; role:string; model:string; family:string; provider:string; harness:string; description:string; status:string; currentTaskId:string|null; pendingMessages:number; lastSeenSecondsAgo:number; stalled:boolean; supervisorPid:number|null; workdir?:string|null; usage:Usage; permissions:any };
-type Run = { id:string; goal:string; projectRoot:string; status:string; rootTaskId:string|null; createdAt:number; updatedAt:number };
-type Task = { id:string; runId:string|null; parentTaskId:string|null; childTaskIds:string[]; dependencyIds:string[]; title:string; brief:string; assignee:string; assigner:string; role:string; complexity:number; state:string; round:number; attempts:number; maxRetries:number; depth:number; updatedAt:number; routing?:any; result?:any; history:any[]; usage:Usage };
-type Message = { id:string; seq:number; ts:number; from:string; to:string; type:string; subject:string; body:string; taskId:string|null };
-type Snapshot = { roster:Agent[]; tasks:Task[]; runs:Run[]; messages:Message[]; seq:number; telemetry?:any[]; pathLeases:any[] };
-type Catalog = { providers:Record<string,any>; harnesses:Record<string,any>; models:Record<string,any>; roles:Record<string,any>; agents:Record<string,any>; capabilityNotice:string };
+type Snapshot = BusSnapshot;
+type Catalog = { providers:Record<string,any>; harnesses:Record<string,any>; models:Record<string,any>; roles:Record<string,any>; agents:Record<string,any>; capabilityNotice:string; constraints:{maxDelegationDepth:number;maxConcurrentTasks:number;maxRetries:number;independentReviewComplexity:number;preferSubscription:boolean} };
 type Project = { path:string; name:string; createdAt:number; lastUsedAt:number };
-type ProviderStatus = { id:string; displayName:string; configured:boolean; cliFound:boolean; authKind:string; authSource:string; subscriptionBacked:boolean; liveVerification:string; harnesses:any[] };
+type ProviderStatus = { id:string; displayName:string; configured:boolean; cliFound:boolean; authKind:string; authSource:string; subscriptionBacked:boolean; liveVerification:string; enabled?:boolean; harnesses:any[] };
+type SetupStatus = { completed:boolean; completedAt:number|null; required:boolean };
+type View = "setup" | "console";
 
-const empty: Snapshot = { roster:[], tasks:[], runs:[], messages:[], seq:0, pathLeases:[] };
+const empty: Snapshot = { roster:[], tasks:[], runs:[], waiting:[], telemetry:[], pathLeases:[], revision:0, configIdentity:{path:null,digest:""}, messages:[], seq:0, brokerPid:0 };
 
 async function api<T=any>(path:string, init:RequestInit={}):Promise<T>{
   const res=await fetch(path,{credentials:"same-origin",headers:{"content-type":"application/json",...(init.headers||{})},...init});
@@ -27,14 +25,13 @@ async function api<T=any>(path:string, init:RequestInit={}):Promise<T>{
   if(!res.ok) throw new Error(body.error||`HTTP ${res.status}`); return body as T;
 }
 const post=<T=any>(path:string, body:any={})=>api<T>(path,{method:"POST",body:JSON.stringify(body)});
-const fmtAgo=(ts:number)=>{const s=Math.max(0,Math.round((Date.now()-ts)/1000));return s<60?`${s}s`:s<3600?`${Math.round(s/60)}m`:`${Math.round(s/3600)}h`};
 const fmtTokens=(n:number)=>n>=1_000_000?`${(n/1_000_000).toFixed(1)}m`:n>=1000?`${(n/1000).toFixed(1)}k`:String(n||0);
 
 class AppErrorBoundary extends Component<{children:ReactNode},{error:string|null}>{
   state={error:null as string|null};
   static getDerivedStateFromError(error:unknown){return{error:error instanceof Error?error.message:String(error)}}
   componentDidCatch(error:unknown){bootMonitor()?.fail?.("Agent Bus React error boundary",error);(globalThis as any).__AGENT_BUS_BOOTSTRAP__={phase:"react-error",error:error instanceof Error?error.message:String(error)}}
-  render(){if(this.state.error)return <main className="lock"><div className="lock-card"><div className="logo">AB</div><h1>Agent Bus frontend crashed</h1><p className="error">{this.state.error}</p><p>Run <code>agent-bus open</code> again. The broker is still local and your persistent state is unchanged.</p></div></main>;return this.props.children}
+  render(){if(this.state.error)return <main className="lock"><div className="lock-card"><div className="mark" aria-hidden="true">AB</div><h1>Agent Bus frontend crashed</h1><p className="error">{this.state.error}</p><p>Run <code>agent-bus open</code> again. The broker is still local and your persistent state is unchanged.</p></div></main>;return this.props.children}
 }
 
 function Login({onReady}:{onReady:()=>void}){
@@ -49,24 +46,32 @@ function Login({onReady}:{onReady:()=>void}){
       onReady();
     }).catch(e=>{history.replaceState(null,"",location.pathname);bootMonitor()?.diagnose?.("Agent Bus ticket exchange failed",e);setError(e.message)});
   },[]);
-  return <main className="lock"><div className="lock-card"><div className="logo">AB</div><h1>Agent Bus is locked</h1><p>Open this dashboard through the trusted CLI so the browser receives a one-time operator session.</p><code>agent-bus open</code>{error&&<p className="error">{error}</p>}</div></main>;
+  return <main className="lock"><div className="lock-card"><div className="mark" aria-hidden="true">AB</div><h1>Agent Bus is locked</h1><p>Open this dashboard through the trusted CLI so the browser receives a one-time operator session.</p><code>agent-bus open</code>{error&&<p className="error">{error}</p>}</div></main>;
 }
 
 function App(){
   checkpoint(7,"App component function executed");
   const [auth,setAuth]=useState<boolean|null>(()=>new URLSearchParams(location.search).has("ticket")?false:null); const [snap,setSnap]=useState<Snapshot>(empty); const [catalog,setCatalog]=useState<Catalog|null>(null); const [projects,setProjects]=useState<Project[]>([]); const [providers,setProviders]=useState<ProviderStatus[]>([]);
   const [runId,setRunId]=useState<string|null>(null); const [taskId,setTaskId]=useState<string|null>(null); const [toast,setToast]=useState(""); const [modal,setModal]=useState<string|null>(null);
+  const [view,setView]=useState<View|null>(null);
   const ready=()=>setAuth(true);
+  const note=(s:string)=>{setToast(s);setTimeout(()=>setToast(""),2800)};
+  const showSetup=()=>{if(location.pathname!=="/setup")history.pushState(null,"","/setup");setView("setup")};
+  const showConsole=()=>{if(location.pathname!=="/")history.pushState(null,"","/");setView("console")};
   useEffect(()=>{
     const hasTicket=new URLSearchParams(location.search).has("ticket");
     if(hasTicket)return;
     checkpoint(8,"existing session validation started");
     api("/api/session").then(()=>{checkpoint(9,"existing browser session restored");setAuth(true)}).catch(()=>setAuth(false));
   },[]);
-  useEffect(()=>{if(auth)window.setTimeout(()=>checkpoint(10,"authenticated dashboard committed to the DOM"),0)},[auth]);
-  useEffect(()=>{if(!auth)return;Promise.all([api<Snapshot>("/api/state"),api<Catalog>("/api/catalog"),api<any>("/api/projects"),api<any>("/api/providers/status")]).then(([s,c,p,ps])=>{setSnap(s);setCatalog(c);setProjects(p.projects||[]);setProviders(ps.providers||[]);setRunId(r=>r||s.runs[0]?.id||null)}).catch(e=>note(e.message));const es=new EventSource("/api/events");es.addEventListener("snapshot",e=>{const n=JSON.parse((e as MessageEvent).data);setSnap(prev=>mergeSnapshot(prev,n))});es.addEventListener("error",()=>note("Live event stream disconnected; reconnecting…"));return()=>es.close()},[auth]);
-  const note=(s:string)=>{setToast(s);setTimeout(()=>setToast(""),2800)};
+  useEffect(()=>{
+    const onPop=()=>setView(location.pathname==="/setup"?"setup":"console");
+    window.addEventListener("popstate",onPop);
+    return()=>window.removeEventListener("popstate",onPop);
+  },[]);
+  useEffect(()=>{if(!auth)return;Promise.all([api<Snapshot>("/api/state"),api<Catalog>("/api/catalog"),api<any>("/api/projects"),api<any>("/api/providers/status"),api<SetupStatus>("/api/setup")]).then(([s,c,p,ps,setup])=>{setSnap(s);setCatalog(c);setProjects(p.projects||[]);setProviders(ps.providers||[]);setRunId(r=>r||s.runs[0]?.id||null);const required=setup.required??(!setup.completed&&s.runs.length===0);const wantSetup=location.pathname==="/setup"||required;setView(wantSetup?"setup":"console");if(required&&location.pathname!=="/setup")history.replaceState(null,"","/setup");checkpoint(10,"authenticated dashboard committed to the DOM")}).catch(e=>note(e.message));const es=new EventSource("/api/events");es.addEventListener("snapshot",e=>{const n=JSON.parse((e as MessageEvent).data);setSnap(prev=>mergeSnapshot(prev,n))});es.addEventListener("error",()=>note("Live event stream disconnected; reconnecting…"));return()=>es.close()},[auth]);
   if(auth===null)return <div className="boot">Starting Agent Bus…</div>; if(!auth)return <Login onReady={ready}/>;
+  if(!catalog||!view)return <div className="boot">Starting Agent Bus…</div>;
 
   const currentRun=snap.runs.find(r=>r.id===runId)||null; const tasks=snap.tasks.filter(t=>!runId||t.runId===runId).sort((a,b)=>a.updatedAt-b.updatedAt); const task=snap.tasks.find(t=>t.id===taskId)||null;
   const agents=snap.roster.filter(a=>a.id!=="operator"); const runTaskIds=new Set(tasks.map(t=>t.id)); const messages=snap.messages.filter(m=>!runId||!m.taskId||runTaskIds.has(m.taskId)).slice().sort((a,b)=>b.seq-a.seq);
@@ -79,34 +84,140 @@ function App(){
   async function stopRun(){if(!currentRun)return;try{await post(`/api/runs/${currentRun.id}/stop`,{reason:"Stopped from dashboard"});note("Run stopped")}catch(e:any){note(e.message)}}
   async function review(accepted:boolean){if(!task)return;const feedback=(document.querySelector<HTMLTextAreaElement>("#task-feedback")?.value||"").trim()||(accepted?"Accepted.":"Changes requested.");try{await post(`/api/tasks/${task.id}/review`,{accepted,feedback});setModal(null)}catch(e:any){note(e.message)}}
 
-  return <div className="app" data-agent-bus-mounted="true">
-    <header><div className="brand"><div className="logo">AB</div><div><b>Agent Bus</b><span>local control plane</span></div></div><div className="header-actions"><span className="live"><i/>127.0.0.1:7717</span><button onClick={()=>setModal("run")}>New run</button><button className="danger" onClick={stopAll}>STOP ALL</button></div></header>
-    <aside className="left">
-      <Section title="Projects" action={<button onClick={()=>setModal("project")}>+</button>}>{projects.map(p=><button className={`nav-row ${currentRun?.projectRoot===p.path?"selected":""}`} key={p.path} onClick={()=>{const r=snap.runs.find(x=>x.projectRoot===p.path);if(r)setRunId(r.id)}}><b>{p.name}</b><small>{p.path}</small></button>)}</Section>
-      <Section title="Recent runs">{snap.runs.map(r=><button className={`nav-row ${r.id===runId?"selected":""}`} key={r.id} onClick={()=>setRunId(r.id)}><b>{r.goal}</b><small>{r.status} · {fmtAgo(r.updatedAt)}</small></button>)}</Section>
-      <Section title="Providers" action={<button onClick={discoverProviders}>Discover</button>}>{providers.map(p=>{const discovered=(p.harnesses||[]).flatMap((h:any)=>h?.discoveredModels||[]);return <div className="provider" key={p.id}><span className={`dot ${p.cliFound?"ok":p.configured?"warn":""}`}/><div><b>{p.displayName}</b><small>{p.cliFound?"CLI found · auth/entitlement unknown":p.configured?"configured · CLI unavailable":"unavailable"}</small><small>{p.authSource}</small><small>live verification: {p.liveVerification||"unknown"}{discovered.length?` · models: ${discovered.slice(0,4).join(", ")}`:""}</small></div></div>})}</Section>
-    </aside>
-    <main className="main">
-      <div className="run-head">{currentRun?<><div><span className="eyebrow">{currentRun.status} · {currentRun.id}</span><h1>{currentRun.goal}</h1><p>{currentRun.projectRoot}</p></div><div className="row"><button onClick={()=>setModal("message")}>Message team</button>{currentRun.status==="active"&&<button className="danger subtle" onClick={stopRun}>Stop run</button>}</div></>:<div><span className="eyebrow">CONTROL ROOM</span><h1>No run selected</h1><p>Create a run to start orchestrating agents.</p></div>}</div>
-      <div className="metrics"><Metric label="Agents" value={`${agents.filter(a=>a.status!=="offline").length}/${agents.length}`} detail="online / configured"/><Metric label="Tokens" value={fmtTokens(usage.tokens)} detail={`${usage.turns} turns`}/><Metric label="Failures / retries" value={String(failures)} detail="current run"/><Metric label="Cost reported" value={`$${usage.cost.toFixed(3)}`} detail="where available"/></div>
-      <div className="workspace"><Panel title="Task graph" badge={tasks.length}>{tasks.map(t=><button className="task" key={t.id} style={{paddingLeft:12+Math.min(6,t.depth||0)*12}} onClick={()=>{setTaskId(t.id);setModal("task")}}><span className={`state ${t.state}`}/><div><b>{t.title}</b><small>{t.state} · {t.assignee||"unassigned"} · {t.role}/c{t.complexity} · r{t.round}{t.attempts?` · ${t.attempts} retry`:""}</small>{t.routing?.reason&&<em>{t.routing.reason}</em>}</div></button>)}</Panel>
-        <Panel title="Live events & messages" badge={messages.length}>{messages.slice(0,250).map(m=><div className="message" key={m.id}><div><b>{m.from}</b><span>→ {m.to} · {m.type} · {new Date(m.ts).toLocaleTimeString()}</span></div><strong>{m.subject}</strong><p>{m.body}</p></div>)}</Panel></div>
-    </main>
-    <aside className="right"><div className="pane-head"><span>Agents</span><button onClick={()=>setModal("agent")}>Add</button></div>{agents.map(a=><AgentCard key={a.id} agent={a} catalog={catalog} project={currentRun?.projectRoot||projects[0]?.path||""} onToast={note} onEdit={()=>{setTaskId(a.id);setModal("agent")}}/> )}</aside>
-    {modal==="run"&&<RunModal projects={projects} close={()=>setModal(null)} onDone={async(r)=>{setRunId(r.id);setModal(null);await refreshCatalog()}} onToast={note}/>} 
-    {modal==="project"&&<ProjectModal close={()=>setModal(null)} onDone={async()=>{setModal(null);await refreshCatalog()}} onToast={note}/>} 
-    {modal==="message"&&<MessageModal agents={agents} close={()=>setModal(null)} onToast={note}/>} 
-    {modal==="task"&&task&&<TaskModal task={task} close={()=>setModal(null)} review={review} onToast={note}/>} 
-    {modal==="agent"&&catalog&&<AgentModal catalog={catalog} existing={catalog.agents[taskId||""]} close={()=>{setModal(null);setTaskId(null)}} onDone={async()=>{setModal(null);setTaskId(null);await refreshCatalog()}} onToast={note}/>} 
+  const liveAgents=agents.filter(a=>a.status!=="offline").length;
+  const projectValue=currentRun?.projectRoot||projects[0]?.path||"";
+  const modals=<>
+    {modal==="run"&&<RunModal projects={projects} close={()=>setModal(null)} onDone={async(r)=>{setRunId(r.id);setModal(null);await refreshCatalog()}} onToast={note}/>}
+    {modal==="project"&&<ProjectModal close={()=>setModal(null)} onDone={async()=>{setModal(null);await refreshCatalog()}} onToast={note}/>}
+    {modal==="message"&&<MessageModal agents={agents} close={()=>setModal(null)} onToast={note}/>}
+    {modal==="task"&&task&&<TaskModal task={task} close={()=>setModal(null)} review={review} onToast={note}/>}
+    {modal==="agent"&&catalog&&<AgentModal catalog={catalog} existing={catalog.agents[taskId||""]} close={()=>{setModal(null);setTaskId(null)}} onDone={async()=>{setModal(null);setTaskId(null);await refreshCatalog()}} onToast={note}/>}
     {toast&&<div className="toast">{toast}</div>}
+  </>;
+  if(view==="setup")return <>
+    <SetupView catalog={catalog} providers={providers} projects={projects} onToast={note} refreshCatalog={refreshCatalog} discoverProviders={discoverProviders} openAgent={(id)=>{setTaskId(id);setModal("agent")}} openProject={()=>setModal("project")} enterConsole={async()=>{try{await post("/api/setup",{completed:true});showConsole()}catch(e:any){note(e.message)}}}/>
+    {modals}
+  </>;
+  return <div className="app" data-agent-bus-mounted="true">
+    <header className="sector">
+      <div className="sector-id"><span className="mark" aria-hidden="true">AB</span><strong>Agent Bus</strong><span className="host">{location.host}</span></div>
+      <div className="sector-place">
+        <label>Project<select value={projectValue} onChange={e=>{const path=e.target.value;const r=snap.runs.find(x=>x.projectRoot===path);if(r)setRunId(r.id)}}>{projects.length?projects.map(p=><option key={p.path} value={p.path}>{p.name}</option>):<option value="">Add a project…</option>}</select></label>
+        <label>Run<select value={runId||""} onChange={e=>setRunId(e.target.value||null)}><option value="">No run</option>{snap.runs.map(r=><option key={r.id} value={r.id}>{r.goal}</option>)}</select></label>
+        <button type="button" onClick={()=>setModal("project")} aria-label="Add project">+</button>
+      </div>
+      <div className="figures">
+        <label><b>{liveAgents}/{agents.length}</b><span>agents</span></label>
+        <label><b>{fmtTokens(usage.tokens)}</b><span>tokens</span></label>
+        <label><b>{failures}</b><span>retries</span></label>
+        <label><b>${usage.cost.toFixed(3)}</b><span>cost</span></label>
+      </div>
+      <div className="sector-actions">
+        <details className="providers-pop">
+          <summary>Providers</summary>
+          <div className="menu"><button type="button" onClick={discoverProviders}>Discover</button>{providers.map(p=>{const discovered=(p.harnesses||[]).flatMap((h:any)=>h?.discoveredModels||[]);return <div className="provider" key={p.id}><span className={`tab ${p.cliFound?"ok":p.configured?"warn":""}`}/><div><b>{p.displayName}</b><small>{p.cliFound?"CLI found · auth/entitlement unknown":p.configured?"configured · CLI unavailable":"unavailable"}</small><small>{p.authSource}</small><small>live verification: {p.liveVerification||"unknown"}{discovered.length?` · models: ${discovered.slice(0,4).join(", ")}`:""}</small></div></div>})}</div>
+        </details>
+        <button type="button" onClick={showSetup}>Configure</button>
+        <button className="primary" onClick={()=>setModal("run")}>New run</button>
+        <button className="alert" onClick={stopAll}>STOP ALL</button>
+      </div>
+    </header>
+    <div className={`mission ${currentRun?"":"vacant"}`}>{currentRun?<><div><h1>{currentRun.goal}</h1><p>{currentRun.status} · {currentRun.id} · {currentRun.projectRoot}</p></div><div className="row"><button onClick={()=>setModal("message")}>Message team</button>{currentRun.status==="active"&&<button className="alert subtle" onClick={stopRun}>Stop run</button>}</div></>:<div><h1>No run selected</h1><p>Start a run with a project path and an objective. Supervisors start from the agent strips.</p></div>}</div>
+    <div className="bay">
+      <section>
+        <div className="bay-head">Task bay <b>{tasks.length}</b></div>
+        <div className="strips">{tasks.length?tasks.map(t=><button className={`strip ${t.id===taskId?"selected":""}`} key={t.id} style={{marginLeft:Math.min(6,t.depth||0)*12}} onClick={()=>{setTaskId(t.id);setModal("task")}}><i className={`tab ${t.state}`}/><span className="strip-body"><b>{t.title}</b><small>{t.assignee||"unassigned"} · {t.role}/c{t.complexity} · r{t.round}{t.attempts?` · ${t.attempts} retry`:""}{t.routing?.reason?` · ${t.routing.reason}`:""}</small></span><span className="strip-meta">{t.state}</span></button>):<p className="empty">No tasks yet. The manager writes the graph after it wakes.</p>}</div>
+      </section>
+      <section>
+        <div className="bay-head">Agent strips <button type="button" data-agent-add="true" onClick={()=>setModal("agent")}>Add</button></div>
+        <div className="strips">{agents.length?agents.map(a=><AgentStrip key={a.id} agent={a} project={currentRun?.projectRoot||projects[0]?.path||""} onToast={note} onEdit={()=>{setTaskId(a.id);setModal("agent")}}/>):<p className="empty">No agents in the current config.</p>}</div>
+      </section>
+    </div>
+    <section className="console">
+      <div className="bay-head">Live log <b>{messages.length}</b></div>
+      {messages.length?<ol className="log">{messages.slice(0,250).map(m=><li key={m.id}><time>{new Date(m.ts).toLocaleTimeString()}</time><b>{m.from} → {m.to}</b><p>{m.subject} — {m.body}</p></li>)}</ol>:<p className="empty">Mail and task events print here as the broker moves.</p>}
+    </section>
+    {modals}
   </div>;
 }
 
-function mergeSnapshot(prev:Snapshot,n:any):Snapshot{if(!n.incremental)return n;const map=new Map(prev.messages.map(m=>[m.id,m]));for(const m of n.messages||[])map.set(m.id,m);return {...prev,...n,messages:[...map.values()].sort((a,b)=>a.seq-b.seq).slice(-5000)}}
-function Section({title,action,children}:{title:string;action?:any;children:any}){return <section><div className="section-head"><span>{title}</span>{action}</div><div className="stack">{children}</div></section>}
-function Panel({title,badge,children}:{title:string;badge:number;children:any}){return <section className="panel"><div className="panel-head"><span>{title}</span><b>{badge}</b></div><div className="scroll">{children||<div className="empty">Nothing here yet.</div>}</div></section>}
-function Metric({label,value,detail}:{label:string;value:string;detail:string}){return <div className="metric"><span>{label}</span><b>{value}</b><small>{detail}</small></div>}
-function AgentCard({agent,project,onToast,onEdit}:{agent:Agent;catalog:Catalog|null;project:string;onToast:(s:string)=>void;onEdit:()=>void}){const active=Boolean(agent.supervisorPid);const act=async()=>{try{if(active)await post(`/api/agents/${agent.id}/stop`);else await post(`/api/agents/${agent.id}/start`,{projectRoot:project});onToast(active?`${agent.id} stopped`:`${agent.id} starting`)}catch(e:any){onToast(e.message)}};return <div className="agent-card"><div className="agent-top"><div><span className={`dot ${agent.status==="working"?"warn":agent.status==="offline"?"":"ok"}`}/><b>{agent.id}</b></div><span>{agent.stalled?"stalled":agent.status}</span></div><small>{agent.provider} · {agent.family}/{agent.model}<br/>{agent.harness} · {agent.role}</small><div className="agent-usage"><span>{fmtTokens(agent.usage?.totalTokens||0)} tok</span><span>{agent.usage?.turns||0} turns</span><span>{Math.round((agent.usage?.latencyMs||0)/1000)}s</span></div><div className="row"><button onClick={act}>{active?"Stop":"Start"}</button><button onClick={onEdit}>Edit</button></div></div>}
+function SetupView({catalog,providers,projects,onToast,refreshCatalog,discoverProviders,openAgent,openProject,enterConsole}:{catalog:Catalog;providers:ProviderStatus[];projects:Project[];onToast:(s:string)=>void;refreshCatalog:()=>Promise<void>;discoverProviders:()=>Promise<void>;openAgent:(id:string)=>void;openProject:()=>void;enterConsole:()=>Promise<void>}){
+  const constraints=catalog.constraints||{maxDelegationDepth:4,maxConcurrentTasks:4,maxRetries:2,independentReviewComplexity:4,preferSubscription:true};
+  const [depth,setDepth]=useState(constraints.maxDelegationDepth);
+  const [reviewAt,setReviewAt]=useState(constraints.independentReviewComplexity);
+  const [retries,setRetries]=useState(constraints.maxRetries);
+  const [busy,setBusy]=useState(false);
+  const agents=Object.values(catalog.agents||{});
+  const enabledAgents=agents.filter((agent:any)=>agent.enabled);
+  async function saveDisk(action:()=>Promise<unknown>, ok?:string){
+    try{await action();await refreshCatalog();if(ok)onToast(ok)}catch(error:any){onToast(error.message)}
+  }
+  async function finish(){
+    setBusy(true);
+    try{
+      try{await post("/api/constraints",{maxDelegationDepth:depth,independentReviewComplexity:reviewAt,maxRetries:retries})}
+      catch(error:any){if(!String(error.message).includes("in-memory"))throw error}
+      await enterConsole();
+    }catch(error:any){onToast(error.message)}
+    finally{setBusy(false)}
+  }
+  return <div className="app setup" data-agent-bus-mounted="true" data-setup-page="true">
+    <header className="sector">
+      <div className="sector-id"><span className="mark" aria-hidden="true">AB</span><strong>Agent Bus</strong><span className="host">{location.host}</span></div>
+      <div className="sector-place"><p className="setup-kicker">First-run configuration</p></div>
+      <div className="figures">
+        <label><b>{enabledAgents.length}/{agents.length}</b><span>enabled</span></label>
+        <label><b>{providers.filter(p=>p.cliFound).length}</b><span>CLIs</span></label>
+        <label><b>{projects.length}</b><span>projects</span></label>
+      </div>
+      <div className="sector-actions">
+        <button type="button" onClick={discoverProviders}>Discover providers</button>
+        <button className="primary" onClick={finish} disabled={busy} data-setup-enter="true">Enter console</button>
+      </div>
+    </header>
+    <div className="mission"><div><h1>Configure the bus</h1><p>Name agents, assign roles, turn providers on, and set delegation limits before the first run. This is not a hardcoded pair — routing uses the roster you save here.</p></div></div>
+    <div className="setup-grid">
+      <section>
+        <div className="bay-head">Providers</div>
+        <div className="strips">{Object.values(catalog.providers||{}).map((provider:any)=>{const status=providers.find(row=>row.id===provider.id);return <article className="strip agent" key={provider.id}><i className={`tab ${status?.cliFound?"ok":provider.enabled?"warn":""}`}/><span className="strip-body"><b>{provider.displayName||provider.id}</b><small>{status?.cliFound?"CLI found":provider.enabled?"enabled · CLI not found":"disabled"} · {provider.authSource}</small></span><label className="enable"><input type="checkbox" checked={Boolean(provider.enabled)} onChange={e=>saveDisk(()=>post("/api/providers",{id:provider.id,enabled:e.target.checked}))}/>on</label></article>})}</div>
+      </section>
+      <section>
+        <div className="bay-head">Agents <button type="button" data-agent-add="true" onClick={()=>openAgent("")}>Add</button></div>
+        <div className="strips">{agents.length?agents.map((agent:any)=><article className={`strip agent ${agent.enabled?"":"offline"}`} key={agent.id}><i className={`tab ${agent.enabled?"idle":""}`}/><span className="strip-body"><b>{agent.id}</b><small>{agent.role} · {agent.model}{agent.autoStart?" · auto-start":""}</small></span><label className="enable"><input type="checkbox" checked={Boolean(agent.enabled)} onChange={e=>saveDisk(()=>post("/api/agents",{id:agent.id,model:agent.model,role:agent.role,description:agent.description,enabled:e.target.checked,autoStart:agent.autoStart,permissions:agent.permissions}))}/>on</label><button type="button" onClick={()=>openAgent(agent.id)}>Edit</button></article>):<p className="empty">Add at least one manager and one worker. Roles, not stock ids, decide who gets the work.</p>}</div>
+      </section>
+      <section>
+        <div className="bay-head">Hierarchy</div>
+        <form className="setup-form" onSubmit={e=>e.preventDefault()}>
+          <label>Max delegation depth<input type="number" min={0} max={8} value={depth} onChange={e=>setDepth(Number(e.target.value))}/></label>
+          <label>Independent review from complexity<input type="number" min={1} max={5} value={reviewAt} onChange={e=>setReviewAt(Number(e.target.value))}/></label>
+          <label>Retries before reroute<input type="number" min={0} max={10} value={retries} onChange={e=>setRetries(Number(e.target.value))}/></label>
+          <p className="empty">A manager may split work down to this depth. Reviewers must be a different family when complexity meets the review gate.</p>
+        </form>
+      </section>
+      <section>
+        <div className="bay-head">Projects <button type="button" onClick={openProject}>Add</button></div>
+        <div className="strips">{projects.length?projects.map(project=><article className="strip" key={project.path}><i className="tab idle"/><span className="strip-body"><b>{project.name}</b><small>{project.path}</small></span></article>):<p className="empty">Add a local project path the operators and agents may work in.</p>}</div>
+      </section>
+    </div>
+    <footer className="setup-foot">
+      <p>{enabledAgents.length?`${enabledAgents.length} agent${enabledAgents.length===1?"":"s"} enabled.`:"Enable the agents you actually have CLIs for. Fake agents are only for tests."}</p>
+      <button className="primary" onClick={finish} disabled={busy}>Enter console</button>
+    </footer>
+  </div>;
+}
+
+function mergeSnapshot(prev:Snapshot,n:BusSnapshot & {incremental?:boolean}):Snapshot{if(!n.incremental)return n;const map=new Map(prev.messages.map(m=>[m.id,m]));for(const m of n.messages||[])map.set(m.id,m);return {...prev,...n,messages:[...map.values()].sort((a,b)=>a.seq-b.seq).slice(-5000)}}
+function AgentStrip({agent,project,onToast,onEdit}:{agent:Agent;project:string;onToast:(s:string)=>void;onEdit:()=>void}){
+  const active=Boolean(agent.supervisorPid);
+  const tab=agent.stalled?"warn":agent.status==="working"?"working":agent.status==="failed"?"failed":agent.status==="offline"?"":"idle";
+  const act=async()=>{try{if(active)await post(`/api/agents/${agent.id}/stop`);else await post(`/api/agents/${agent.id}/start`,{projectRoot:project});onToast(active?`${agent.id} stopped`:`${agent.id} starting`)}catch(e:any){onToast(e.message)}};
+  return <article className={`strip agent ${agent.status==="offline"?"offline":""}`}>
+    <i className={`tab ${tab}`} aria-hidden="true"/>
+    <span className="strip-body"><b>{agent.id}</b><small>{agent.role} · {agent.provider}/{agent.family} · {agent.model} · {agent.harness}</small></span>
+    <span className="strip-meta">{agent.stalled?"stalled":agent.status}<span>{fmtTokens(agent.usage?.totalTokens||0)} tok · {agent.usage?.turns||0}t</span></span>
+    <span className="row">{active?<button type="button" className="alert" onClick={act}>Stop</button>:<button type="button" className="primary" onClick={act}>Start</button>}<button type="button" onClick={onEdit}>Edit</button></span>
+  </article>;
+}
 
 function Modal({title,close,children}:{title:string;close:()=>void;children:any}){return <div className="backdrop" onMouseDown={e=>{if(e.target===e.currentTarget)close()}}><div className="modal"><div className="modal-head"><h2>{title}</h2><button onClick={close}>×</button></div>{children}</div></div>}
 function RunModal({projects,close,onDone,onToast}:{projects:Project[];close:()=>void;onDone:(r:Run)=>void;onToast:(s:string)=>void}){const [path,setPath]=useState(projects[0]?.path||"");const [goal,setGoal]=useState("");return <Modal title="Start run" close={close}><form onSubmit={async e=>{e.preventDefault();try{const x=await post<any>("/api/runs",{projectRoot:path,goal});onDone(x.run)}catch(err:any){onToast(err.message)}}}><label>Project path<input value={path} onChange={e=>setPath(e.target.value)} required/></label><label>Objective<textarea value={goal} onChange={e=>setGoal(e.target.value)} rows={5} required/></label><div className="modal-actions"><button type="button" onClick={close}>Cancel</button><button className="primary">Start run</button></div></form></Modal>}
