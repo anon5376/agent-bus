@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-07-29T00:00:00Z",
+  "title": "Design System: Agent Bus Dashboard",
+  "extensions": {
+    "colorMeta": {
+      "canvas": {"role": "neutral", "displayName": "Work Canvas", "canonical": "#171717"},
+      "sidebar": {"role": "neutral", "displayName": "Anchor Black", "canonical": "#111111"},
+      "surface": {"role": "neutral", "displayName": "Control Surface", "canonical": "#1E1E1E"},
+      "accent": {"role": "primary", "displayName": "Warm Clay", "canonical": "#D97757"}
+    },
+    "typographyMeta": {
+      "title": {"displayName": "Title", "purpose": "Page and project headings."},
+      "body": {"displayName": "Body", "purpose": "Controls, labels, and explanatory copy."},
+      "data": {"displayName": "Data", "purpose": "Identifiers, routes, timestamps, and messages."}
+    },
+    "shadows": [
+      {"name": "feedback", "value": "0 8px 24px rgba(0,0,0,.28)", "purpose": "Transient flash feedback only."}
+    ],
+    "motion": [
+      {"name": "state", "value": "180ms cubic-bezier(.2,.8,.2,1)", "purpose": "Control and selection state changes."}
+    ],
+    "breakpoints": [
+      {"name": "mobile", "value": "760px"}
+    ]
+  },
+  "components": [],
+  "narrative": {
+    "northStar": "The Quiet Control Deck",
+    "overview": "A compact, near-black operating shell with persistent project context, restrained tonal layers, and warm clay reserved for meaningful state.",
+    "keyCharacteristics": ["Dense but calm hierarchy", "Persistent project context", "Warm accent used sparingly", "Monospace only for data"],
+    "rules": [{"name": "The Signal Rule", "body": "Accent color is reserved for selection, focus, and primary actions.", "section": "colors"}],
+    "dos": ["Keep project context visible on every detail screen", "Use real counts and timestamps from connected stores"],
+    "donts": ["Decorate inactive states with the accent", "Use gradients, glass, or terminal tropes as ornament"]
+  }
+}
