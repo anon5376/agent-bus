@@ -1,6 +1,6 @@
 {
   "name": "agent-bus-dashboard",
-  "version": "0.1.0+codex.20260729132108",
+  "version": "0.1.0+codex.20260904130600",
   "description": "Operate the existing local agent coordinator and AgentBus from Codex and a unified localhost dashboard.",
   "author": {
     "name": "Local developer"

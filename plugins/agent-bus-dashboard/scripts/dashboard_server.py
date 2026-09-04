@@ -1408,7 +1408,7 @@ class Dashboard:
   <meta name="color-scheme" content="light dark">
   <title>{esc(title)} — Agent Bus</title>
   <script src="/assets/theme.js"></script>
-  <link rel="stylesheet" href="/assets/dashboard.css?v=evil-cat">
+  <link rel="stylesheet" href="/assets/dashboard.css?v=fold-menu2">
   <script src="/assets/dashboard.js" defer></script>
 </head>
 <body data-project="{esc(project_key)}" data-view="{esc(active)}">
@@ -1439,7 +1439,7 @@ class Dashboard:
             <span>Project selection</span>
             <span class="nav-count">{len(summaries)}</span>
           </summary>
-          {''.join(project_links)}
+          <div class="project-menu-list">{''.join(project_links)}</div>
         </details>
         {section_links}
       </div>
@@ -1455,7 +1455,7 @@ class Dashboard:
           <header class="page-head home-head"><div><p class="eyeline">Main menu</p><h1>Choose a project</h1><p class="page-copy">Open a repository from the project menu.</p></div></header>
           <figure class="home-cat">
             <img class="home-cat-plain" src="/assets/home-cat.jpg" alt="A long-haired grey tabby cat sitting on a kitchen counter">
-            <img class="home-cat-evil" src="/assets/home-cat-evil.jpg" alt="An evil long-haired grey tabby cat sitting on a kitchen counter">
+            <img class="home-cat-evil" src="/assets/home-cat-evil.jpg?v=cape" alt="The same cat with MS Paint horns, a cape, a pitchfork, and a dead mouse">
           </figure>
         """
         return self.shell("Projects", body)
