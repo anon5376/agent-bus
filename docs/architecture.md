@@ -102,7 +102,11 @@ Project knowledge records persist reusable summaries without copying large artif
 
 ## Supervisors and native CLI behaviour
 
-Each agent keeps its own native CLI session. The supervisor blocks on broker mail, wakes the CLI with a scoped prompt, preserves session/resume semantics, captures output, reports usage and returns to waiting. MCP-capable agents call broker tools directly. The fake harness and adapters configured for automatic reporting allow orchestration tests without provider calls.
+Each agent keeps its own native CLI session. The supervisor blocks on broker mail, wakes the CLI with a scoped prompt, captures output, reports usage and returns to waiting. An optional `resumeSessionId` pins the agent to an existing native chat; otherwise the supervisor stores the exact session ID returned by the first turn and resumes it on later mail. A pinned ID is never replaced, and a harness that reports a different ID fails the turn instead of silently forking the conversation.
+
+Resume syntax is owned by the harness adapter because model providers and coding harnesses are separate layers. Claude Code, Cursor and Hermes accept `--resume`; OpenCode uses `--session`; Kimi Code uses `--session`; Grok Build uses `--resume`; Gemini accepts its saved-session selector. Codex uses `queue --thread` for a pinned original Desktop/TUI task and `exec resume <id>` for a managed headless session. Custom command adapters can provide a dedicated `resumeArgs` template with `{session}`.
+
+MCP-capable agents call broker tools directly. The fake harness and adapters configured for automatic reporting allow orchestration tests without provider calls.
 
 This preserves native coding-agent strengths instead of reimplementing file, shell and repository tools inside the broker.
 

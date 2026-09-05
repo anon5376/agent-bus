@@ -121,6 +121,10 @@ export function retryDelayMs(consecutiveFailures: number): number {
   return Math.min(60_000, 2_000 * 2 ** Math.max(0, consecutiveFailures - 1));
 }
 
+export function resumedUnexpectedSession(pinnedSessionId: string | null, observedSessionId: string | null): boolean {
+  return Boolean(pinnedSessionId && observedSessionId && pinnedSessionId !== observedSessionId);
+}
+
 export function runHarnessProcess(
   invocation: HarnessInvocation,
   agent: ResolvedAgent,
@@ -246,6 +250,11 @@ export async function supervise(agentId: string, workdir: string): Promise<void>
 
   const adapter = getHarnessAdapter(agent.harnessDefinition.adapter);
   let session = readSession(agentId);
+  const pinnedSessionId = agent.resumeSessionId?.trim() || null;
+  if (pinnedSessionId && session.sessionId !== pinnedSessionId) {
+    session.sessionId = pinnedSessionId;
+    writeSession(agentId, session);
+  }
   let consecutiveFailures = 0;
 
   try {
@@ -285,6 +294,7 @@ export async function supervise(agentId: string, workdir: string): Promise<void>
       agent,
       prompt,
       sessionId: session.sessionId,
+      pinnedSessionId,
       workdir,
       mcpServerPath: MCP_SERVER,
       fakeHarnessPath: FAKE_HARNESS,
@@ -296,25 +306,29 @@ export async function supervise(agentId: string, workdir: string): Promise<void>
       void reportPresence(token, agent, workdir, childPid);
     });
     const normalized = adapter.parse(processResult.output, processResult.code);
+    const sessionMismatch = resumedUnexpectedSession(pinnedSessionId, normalized.sessionId);
     session.turns += 1;
     session.inputTokens += normalized.usage.inputTokens;
     session.outputTokens += normalized.usage.outputTokens;
     session.totalTokens += normalized.usage.totalTokens;
     session.costUSD += normalized.usage.costUSD;
     session.latencyMs += processResult.durationMs;
-    if (normalized.sessionId) session.sessionId = normalized.sessionId;
+    if (pinnedSessionId) session.sessionId = pinnedSessionId;
+    else if (normalized.sessionId) session.sessionId = normalized.sessionId;
     writeSession(agentId, session);
     appendTranscript(agent, session.turns, response.messages, normalized, processResult);
     await brokerCall("/usage", { token, ...session }, parseOkResponse).catch(() => {});
 
-    const failed = processResult.code !== 0 || processResult.timedOut || normalized.malformed;
+    const failed = processResult.code !== 0 || processResult.timedOut || normalized.malformed || sessionMismatch;
     if (failed) {
       consecutiveFailures += 1;
       const error = processResult.timedOut
         ? `harness timed out after ${processResult.durationMs} ms`
-        : normalized.malformed
-          ? "harness returned malformed output"
-          : `harness exited ${processResult.code}`;
+        : sessionMismatch
+          ? `harness resumed unexpected session ${normalized.sessionId}; expected ${pinnedSessionId}`
+          : normalized.malformed
+            ? "harness returned malformed output"
+            : `harness exited ${processResult.code}`;
       for (const message of relevantTasks) {
         if (!message.taskId) continue;
         await brokerCall("/task/failure", {

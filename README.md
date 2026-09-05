@@ -185,9 +185,39 @@ The repository registry preserves the existing hierarchy:
 Provider → Harness → Model → Family → Agent → Role
 ```
 
-The dashboard agent editor covers normal configuration including model, exact model selector, model family, role, reasoning/effort controls, permissions, enabled state and auto-start. Saved changes update the JSON registry and live broker roster; agent credentials are never exposed to React.
+The dashboard agent editor covers normal configuration including model, exact model selector, model family, role, reasoning/effort controls, native resume session, permissions, enabled state and auto-start. Saved changes update the JSON registry and live broker roster; agent credentials are never exposed to React.
 
 Custom command and OpenAI-compatible endpoint integrations remain available through the config-driven integration layer. Raw text endpoints are intentionally not promoted to manager/reviewer agents because they lack the Qagent tool contract.
+
+### Bind an agent to its original chat
+
+Set `resumeSessionId` in the agent editor when incoming bus mail must wake an existing native chat. Leave it blank for a Qagent-managed session: the supervisor captures the session ID created by the first headless turn and resumes that exact ID thereafter.
+
+Harness resume syntax stays inside its adapter:
+
+| Harness | Exact continuation used by Qagent |
+|---|---|
+| Codex | pinned Desktop/TUI task: `codex queue --thread <id>`; managed headless task: `codex exec resume <id>` |
+| Claude Code | `claude --resume <id>` |
+| Cursor | `agent --resume <chat-id>` |
+| OpenCode, including Z.AI/GLM routes | `opencode run --session <id>` |
+| Hermes | `hermes chat --resume <id>` |
+| Grok Build | `grok --resume <id>` |
+| Kimi Code | `kimi --session <id>` |
+| Gemini CLI | `gemini --resume <latest-or-index>` |
+
+Pinned sessions are fail-closed: if a harness reports that it opened a different session, the turn fails and the stored binding stays unchanged. Codex runs with full access because sandboxed Codex builds cancel stdio MCP calls before the broker can enforce the agent's configured bus permissions.
+
+For another CLI, use `adapter: "command"` and provide both the normal and resumed forms:
+
+```json
+{
+  "harnessOptions": {
+    "args": ["run", "--prompt", "{prompt}"],
+    "resumeArgs": ["run", "--resume", "{session}", "--prompt", "{prompt}"]
+  }
+}
+```
 
 ## Provider status
 
