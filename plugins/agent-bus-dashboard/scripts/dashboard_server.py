@@ -2,10 +2,10 @@
 """Unified localhost dashboard for the existing coordinator and AgentBus stores.
 
 THESIS: Agent work is a conversation ledger, not a terminal feed or an analytics dashboard.
-OWN-WORLD: Warm paper, stone navigation, ink type, burnt-orange actions, and a single B monogram.
+OWN-WORLD: Monochrome Light/Dark; parchment, crimson and Cloister Black in EVIL.
 STORY: Choose a project, control its live agents, then manage complete conversations across Inbox, Archive, and Trash.
 FIRST VIEWPORT: Persistent project navigation opens onto a focused conversation ledger with the selected thread beside it.
-FORM: Anthropic-family product canon; conversation split-pane ranked first, agent command center borrowed for the control view.
+FORM: A project register, readable agent roster, and conversation index/detail workspace.
 """
 
 from __future__ import annotations
@@ -40,17 +40,17 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 ASSETS = ROOT / "assets"
-DEFAULT_COORDINATOR_DB = Path("/Users/anon5376/prototype_0.2/prototype.db")
-DEFAULT_COORDINATOR_CLI = Path("/Users/anon5376/prototype_0.2/.venv/bin/prototype")
-DEFAULT_AGENT_BUS_DB = Path("/Users/anon5376/Desktop/liminal/comms/agentcomms.db")
-DEFAULT_AGENT_BUS_CLI = Path("/Users/anon5376/Desktop/liminal/comms/agent_comms_server.py")
-DEFAULT_STATUS_DIR = Path("/Users/anon5376/Desktop/liminal/comms/status")
-DEFAULT_PROJECTS_ROOT = Path("/Users/anon5376/Projects")
+DEFAULT_COORDINATOR_DB = Path.home() / ".agent-bus" / "coordinator.db"
+DEFAULT_COORDINATOR_CLI = Path.home() / ".agent-bus" / "bin" / "prototype"
+DEFAULT_AGENT_BUS_DB = Path.home() / ".agent-bus" / "agentcomms.db"
+DEFAULT_AGENT_BUS_CLI = Path.home() / ".agent-bus" / "agent_comms_server.py"
+DEFAULT_STATUS_DIR = Path.home() / ".agent-bus" / "status"
+DEFAULT_PROJECTS_ROOT = Path.home() / "Projects"
 DEFAULT_LIVE_BUS_URL = "http://127.0.0.1:7717"
 DEFAULT_OPERATOR_TOKEN = Path.home() / ".agent-bus" / "operator.token"
 DEFAULT_AUDIT_LOG = Path.home() / ".agent-bus" / "bus.jsonl"
 DEFAULT_DASHBOARD_STATE = Path.home() / ".agent-bus" / "dashboard-state.json"
-DEFAULT_AGENT_BUS_ROOT = Path("/Users/anon5376/Projects/Claude/MCP for agents communication")
+DEFAULT_AGENT_BUS_ROOT = Path.home() / ".agent-bus"
 PROJECT_MARKERS = {
     ".git",
     "Cargo.toml",
@@ -320,7 +320,21 @@ class ConversationStateStore:
 
     @staticmethod
     def _empty() -> dict[str, Any]:
-        return {"version": 1, "conversations": {}, "roles": {}}
+        return {"version": 1, "conversations": {}, "roles": {}, "pinned_projects": []}
+
+    @staticmethod
+    def _pinned_keys(value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        keys: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            key = clean_text(item)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            keys.append(key)
+        return keys
 
     def _load(self) -> dict[str, Any]:
         try:
@@ -332,9 +346,11 @@ class ConversationStateStore:
         conversations = data.get("conversations")
         roles = data.get("roles")
         return {
+            **data,
             "version": 1,
             "conversations": conversations if isinstance(conversations, dict) else {},
             "roles": roles if isinstance(roles, dict) else {},
+            "pinned_projects": self._pinned_keys(data.get("pinned_projects")),
         }
 
     def _write(self, data: dict[str, Any]) -> None:
@@ -457,6 +473,25 @@ class ConversationStateStore:
             self._write(data)
             return record if isinstance(record, dict) else None
 
+    def pinned_projects(self) -> list[str]:
+        with self.lock:
+            return list(self._load()["pinned_projects"])
+
+    def set_pinned(self, project_key: str, pinned: bool) -> None:
+        key = clean_text(project_key)
+        if not key:
+            raise ValueError("Unknown project")
+        with self.lock:
+            data = self._load()
+            current = self._pinned_keys(data.get("pinned_projects"))
+            if pinned:
+                if key not in current:
+                    current.append(key)
+            else:
+                current = [item for item in current if item != key]
+            data["pinned_projects"] = current
+            self._write(data)
+
 
 @dataclass(frozen=True)
 class ProjectSource:
@@ -501,6 +536,7 @@ class ProjectSource:
                 "short_name": self.short_name,
                 "description": self.description,
                 "path": self.path_label,
+                "kind": self.kind,
                 "agents": 0,
                 "messages": 0,
                 "available": False,
@@ -513,6 +549,7 @@ class ProjectSource:
                 "short_name": self.short_name,
                 "description": self.description,
                 "path": self.path_label,
+                "kind": self.kind,
                 "agents": self.agent_count(),
                 "messages": self.message_count(),
                 "available": True,
@@ -525,6 +562,7 @@ class ProjectSource:
                 "short_name": self.short_name,
                 "description": self.description,
                 "path": self.path_label,
+                "kind": self.kind,
                 "agents": 0,
                 "messages": 0,
                 "available": False,
@@ -1150,13 +1188,33 @@ class ProjectSource:
 
 
 class Dashboard:
-    def __init__(self, projects: list[ProjectSource], state_store: ConversationStateStore) -> None:
+    def __init__(self, projects: list[ProjectSource], state_store: ConversationStateStore, settings: argparse.Namespace | None = None) -> None:
         self.projects = {project.key: project for project in projects}
         self.state_store = state_store
         self.csrf_token = secrets.token_urlsafe(24)
+        self.settings = settings
 
     def summaries(self) -> list[dict[str, Any]]:
-        return [project.summary() for project in self.projects.values()]
+        return self.catalog()
+
+    def catalog(self) -> list[dict[str, Any]]:
+        pinned_keys = self.state_store.pinned_projects()
+        pinned_rank = {key: index for index, key in enumerate(pinned_keys)}
+        items = []
+        for project in self.projects.values():
+            item = project.summary()
+            item["kind"] = project.kind
+            item["pinned"] = item["key"] in pinned_rank
+            items.append(item)
+
+        def sort_key(item: dict[str, Any]) -> tuple[int, int, str]:
+            if item["pinned"]:
+                return (0, pinned_rank.get(item["key"], 10_000), item["name"].casefold())
+            if item.get("kind") != "workspace":
+                return (1, 0, item["name"].casefold())
+            return (2, 0, item["name"].casefold())
+
+        return sorted(items, key=sort_key)
 
     def project(self, key: str) -> ProjectSource:
         project = self.projects.get(key)
@@ -1370,17 +1428,92 @@ class Dashboard:
           <p class="role-effect role-effect-{esc(effect_kind)}">{esc(effect_label)}</p>
         </div>"""
 
-    def shell(self, title: str, body: str, project_key: str = "", active: str = "projects") -> str:
-        summaries = self.summaries()
-        project = self.projects.get(project_key)
-        project_links = []
-        for summary in summaries:
-            selected_class = " selected-project" if project_key == summary["key"] else ""
-            project_links.append(
-                f'<a class="nav-link project-nav-link{selected_class}" href="/project/{esc(summary["key"])}" title="{esc(summary["name"])}">'
-                f'<span class="nav-glyph">›</span><span>{esc(summary["short_name"])}</span>'
-                f'<span class="nav-count">{summary["agents"]}</span></a>'
+    def project_filter_text(self, item: dict[str, Any]) -> str:
+        return clean_text(
+            " ".join(
+                str(item.get(key, ""))
+                for key in ("name", "short_name", "path", "description", "kind")
             )
+        ).lower()
+
+    def render_project_pin_form(self, item: dict[str, Any]) -> str:
+        pinned = bool(item.get("pinned"))
+        action = "unpin" if pinned else "pin"
+        label = "Unpin" if pinned else "Pin"
+        return (
+            f'<form class="project-pin-form" method="post" action="/project/{esc(item["key"])}/flags/{action}" data-project-pin>'
+            f'<input type="hidden" name="csrf" value="{esc(self.csrf_token)}">'
+            f'<button type="submit" aria-pressed="{"true" if pinned else "false"}" aria-label="{label} {esc(item["short_name"])}">{label}</button>'
+            f"</form>"
+        )
+
+    def render_project_nav_item(self, item: dict[str, Any], project_key: str) -> str:
+        selected_class = " selected-project" if project_key == item["key"] else ""
+        pinned_class = " is-pinned" if item.get("pinned") else ""
+        return (
+            f'<div class="project-nav-item{pinned_class}" data-project-item data-project-key="{esc(item["key"])}" '
+            f'data-filter-text="{esc(self.project_filter_text(item))}" data-pinned="{"1" if item.get("pinned") else "0"}">'
+            f'<a class="nav-link project-nav-link{selected_class}" href="/project/{esc(item["key"])}" title="{esc(item["name"])}">'
+            f'<span class="nav-glyph">{"*" if item.get("pinned") else "›"}</span><span>{esc(item["short_name"])}</span>'
+            f'<span class="nav-count">{item["agents"]}</span></a>'
+            f"{self.render_project_pin_form(item)}</div>"
+        )
+
+    def render_project_strip(self, item: dict[str, Any]) -> str:
+        error = (
+            f'<span class="unavailable">{esc(item["error"])}</span>'
+            if not item.get("available") and item.get("error")
+            else ""
+        )
+        return (
+            f'<article class="project-strip" data-project-item data-project-key="{esc(item["key"])}" '
+            f'data-filter-text="{esc(self.project_filter_text(item))}" data-pinned="{"1" if item.get("pinned") else "0"}">'
+            f'<a class="project-strip-open" href="/project/{esc(item["key"])}">'
+            f'<span class="project-strip-name">{esc(item["name"])}</span>'
+            f'<span class="project-strip-path">{esc(item["path"])}</span>'
+            f'<span class="project-strip-meta"><span><b>{item["agents"]}</b> agents</span>'
+            f'<span><b>{item["messages"]}</b> messages</span></span>{error}</a>'
+            f"{self.render_project_pin_form(item)}</article>"
+        )
+
+    def render_project_bay(self, bay_id: str, title: str, items: list[dict[str, Any]]) -> str:
+        if not items and bay_id != "pinned":
+            return ""
+        if not items:
+            rows = '<p class="project-bay-empty">Nothing pinned yet. Pin a project to keep it at the top.</p>'
+        else:
+            rows = "".join(self.render_project_strip(item) for item in items)
+        return (
+            f'<section class="project-bay" data-project-bay="{esc(bay_id)}" aria-labelledby="{esc(bay_id)}-title">'
+            f'<h2 id="{esc(bay_id)}-title">{esc(title)}</h2>'
+            f'<div class="project-bay-list">{rows}</div></section>'
+        )
+
+    def render_project_register(self) -> str:
+        items = self.catalog()
+        pinned = [item for item in items if item.get("pinned")]
+        sources = [item for item in items if not item.get("pinned") and item.get("kind") != "workspace"]
+        local = [item for item in items if not item.get("pinned") and item.get("kind") == "workspace"]
+        return f"""
+          <section class="project-register" aria-label="Project register">
+            <div class="project-toolbar">
+              <label class="project-search">
+                <span class="sr-only">Search projects</span>
+                <input type="search" data-project-search placeholder="Search projects" autocomplete="off" spellcheck="false">
+              </label>
+              <p class="project-tally"><span data-project-count>{len(items)}</span> of {len(items)}</p>
+            </div>
+            <p class="project-empty" data-project-empty hidden>No projects match that search.</p>
+            {self.render_project_bay("pinned", "Pinned", pinned)}
+            {self.render_project_bay("sources", "Coordination", sources)}
+            {self.render_project_bay("local", "Local", local)}
+          </section>
+        """
+
+    def shell(self, title: str, body: str, project_key: str = "", active: str = "projects") -> str:
+        summaries = self.catalog()
+        project = self.projects.get(project_key)
+        project_links = [self.render_project_nav_item(summary, project_key) for summary in summaries]
         section_links = ""
         mobile_context = ""
         if project is not None:
@@ -1407,9 +1540,9 @@ class Dashboard:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>{esc(title)} — Agent Bus</title>
-  <script src="/assets/theme.js"></script>
-  <link rel="stylesheet" href="/assets/dashboard.css?v=fold-menu2">
-  <script src="/assets/dashboard.js" defer></script>
+  <script src="/assets/theme.js?v=nav-motion"></script>
+  <link rel="stylesheet" href="/assets/dashboard.css?v=portable-2">
+  <script src="/assets/dashboard.js?v=portable-2" defer></script>
 </head>
 <body data-project="{esc(project_key)}" data-view="{esc(active)}">
   <a class="skip-link" href="#content">Skip to content</a>
@@ -1418,12 +1551,12 @@ class Dashboard:
       <div class="sidebar-head">
         <div class="sidebar-head-row">
           <a class="brand" href="/">
-            <span class="brand-mark" aria-hidden="true"><img src="/assets/b-logo.png" alt=""></span>
+            <span class="brand-mark" aria-hidden="true"><img src="/assets/b-logo.png?v=cat" alt=""></span>
             <span class="brand-copy"><strong>Agent Bus</strong><small>Local operations</small></span>
           </a>
           <button class="nav-toggle" type="button" data-nav-toggle aria-expanded="true" aria-controls="sidebar-scroll">Hide</button>
         </div>
-        <div class="theme-switch" role="radiogroup" aria-label="Theme">
+        <div class="theme-switch" role="group" aria-label="Theme">
           <button type="button" data-theme-set="light" aria-pressed="true">Light</button>
           <button type="button" data-theme-set="dark" aria-pressed="false">Dark</button>
           <button type="button" data-theme-set="evil" aria-pressed="false">Evil</button>
@@ -1434,6 +1567,12 @@ class Dashboard:
         <a class="nav-link" href="/"{' aria-current="page"' if active == 'projects' else ''}>
           <span class="nav-glyph">P</span><span>Projects</span><span class="nav-count">{len(summaries)}</span>
         </a>
+        <div class="project-menu-tools">
+          <label class="project-search project-search-rail">
+            <span class="sr-only">Search projects</span>
+            <input type="search" data-project-search placeholder="Search" autocomplete="off" spellcheck="false">
+          </label>
+        </div>
         <details class="project-menu" data-project-menu open>
           <summary class="project-menu-summary">
             <span>Project selection</span>
@@ -1443,16 +1582,66 @@ class Dashboard:
         </details>
         {section_links}
       </div>
-      <div class="sidebar-foot"><span class="live-dot"></span>Local service · 127.0.0.1</div>
+      <div class="sidebar-foot"><a href="/setup">Local setup</a><span>Runs on this machine</span></div>
     </aside>
     <main class="main" id="content" tabindex="-1"><div class="content">{mobile_context}{body}</div></main>
   </div>
 </body>
 </html>"""
 
-    def home(self) -> str:
-        body = """
-          <header class="page-head home-head"><div><p class="eyeline">Main menu</p><h1>Choose a project</h1><p class="page-copy">Open a repository from the project menu.</p></div></header>
+    def setup_notice(self) -> str:
+        if not self.settings:
+            return '<p class="setup-notice"><a href="/setup">Local setup</a></p>'
+        local_count = sum(project.kind == "workspace" for project in self.projects.values())
+        if not local_count:
+            return '<section class="setup-notice"><h2>Set up this machine</h2><p>Choose a projects folder, then open a project to see its agents and conversations. Coordinator and AgentBus history are optional.</p><a class="btn" href="/setup">Choose projects folder</a></section>'
+        return '<p class="setup-notice">Open a project to see agents and conversations. <a href="/setup">Local setup &amp; connections</a></p>'
+
+    def setup_page(self, query: dict[str, list[str]], values: dict[str, str] | None = None, error: str = "") -> str:
+        settings = self.settings
+        if settings is None:
+            return self.shell("Local setup", '<h1>Local setup</h1><p>Start the dashboard with scripts/run_dashboard.sh.</p>')
+        values = values or {}
+        saved = read_config(settings.config)
+        fields = []
+        for key, (label, helper) in CONFIG_FIELDS.items():
+            target = getattr(settings, key)
+            explicit = key in saved or "AGENT_DASHBOARD_" + key.upper() in os.environ or any(arg.startswith("--" + key.replace("_", "-")) for arg in settings.launch_argv)
+            value = values.get(key, str(target) if target is not None and (target.exists() or explicit) else "")
+            fields.append(f'<label class="setup-field" for="setup-{key}"><span>{esc(label)}</span><input id="setup-{key}" aria-label="{esc(label)}" name="{key}" value="{esc(value)}" placeholder="Not configured" spellcheck="false"><small>{esc(helper)}</small></label>')
+        roots = values.get("projects_root", "\n".join(str(root) for root in settings.projects_root))
+        statuses = []
+        for key, name in (("coordinator_db", "Coordinator"), ("agent_bus_db", "AgentBus history")):
+            project = self.projects.get("coordinator" if key == "coordinator_db" else "liminal")
+            summary = project.summary() if project else None
+            state = "Connected" if summary and summary["available"] else "Cannot read source" if summary else "File unavailable — review path below" if saved.get(key) and getattr(settings, key) else "Not configured"
+            statuses.append(f'<li><strong>{name}</strong><span>{state}</span></li>')
+        probe = ProjectSource("setup", "Setup", "Setup", "", "", "workspace", bus_url=settings.live_bus_url)
+        snapshot = probe._live_snapshot()
+        reachable = snapshot.get("_reachable", True) is not False
+        statuses.append(f'<li><strong>Live broker</strong><span>{"Connected" if reachable else "Disconnected — start your existing AgentBus broker"}</span></li>')
+        notice = f'<p class="flash flash-error" role="alert">{esc(error)}</p>' if error else '<p class="flash" role="status">Setup saved. Open a project to continue.</p>' if query.get("saved") else ""
+        return self.shell("Local setup", f'''
+          <header class="page-head"><div><h1>Local setup</h1><p class="page-copy">Point this dashboard at your projects and existing services. Everything stays on this machine.</p></div><a class="text-link" href="/">Open projects →</a></header>
+          {notice}
+          <section class="connection-status" aria-label="Connection status"><h2>Connections</h2><ul>{''.join(statuses)}</ul><p>Dashboard running. Connected sources can be read; no agents are started here.</p></section>
+          <form class="setup-form" method="post" action="/setup">
+            <input type="hidden" name="csrf" value="{esc(self.csrf_token)}">
+            <label class="setup-field" for="projects-root"><span>Projects folder</span><textarea id="projects-root" aria-label="Projects folder" name="projects_root" rows="2" required spellcheck="false" aria-describedby="roots-help">{esc(roots)}</textarea><small id="roots-help">Use ~/Projects or an existing absolute folder path. One root per line. Immediate folders and nested repositories appear in the register.</small></label>
+            <label class="setup-field" for="broker-url"><span>Live AgentBus broker</span><input id="broker-url" aria-label="Live AgentBus broker" name="live_bus_url" value="{esc(values.get('live_bus_url', settings.live_bus_url))}" required spellcheck="false"><small>Default: http://127.0.0.1:7717. Agents belong to a project when their workdir matches its folder exactly.</small></label>
+            <details class="setup-sources"><summary>Optional sources and agent controls</summary><p>Use paths from your existing installations. Leave unused sources blank. This dashboard does not install or start coordination services.</p>{''.join(fields)}</details>
+            <div class="setup-save"><button class="btn" type="submit">Save local setup</button><span>Applies immediately; no supervisor restart.</span></div>
+          </form>
+          <p class="config-location">Saved in <code>{esc(settings.config)}</code>. Command-line flags override environment variables, which override this file. Edit those overrides at launch if a saved value does not change.</p>
+          <section class="setup-next"><h2>Next: open a project</h2><p>Use <a href="/">Projects</a> to choose a folder, then Agents to check attached identities and usage. Conversations contains Inbox, Archived, and Trash; restoring a conversation returns it to Inbox without changing source history.</p></section>
+        ''')
+
+    def home(self, query: dict[str, list[str]] | None = None) -> str:
+        body = f"""
+          {self.flash(query or {})}
+          <header class="page-head home-head"><div><p class="eyeline">Main menu</p><h1>Choose a project</h1><p class="page-copy">Search the local folders and coordination sources. Pin the ones you keep opening.</p></div></header>
+          {self.setup_notice()}
+          {self.render_project_register()}
           <figure class="home-cat">
             <img class="home-cat-plain" src="/assets/home-cat.jpg" alt="A long-haired grey tabby cat sitting on a kitchen counter">
             <img class="home-cat-evil" src="/assets/home-cat-evil.jpg?v=cape" alt="The same cat with MS Paint horns, a cape, a pitchfork, and a dead mouse">
@@ -1554,7 +1743,7 @@ class Dashboard:
         if live_agents:
             live_table = self.render_agent_rows(project, live_agents, include_usage)
         else:
-            live_table = '<div class="empty"><h2>No agents attached</h2><p>Start a registered supervisor below, or wait for an agent to attach.</p></div>'
+            live_table = '<div class="empty"><h2>No agents attached</h2><p>Connect an existing AgentBus supervisor using this project’s exact folder as its workdir. Registered supervisors appear below when configured. <a href="/setup">Check local setup</a>.</p></div>'
         registered_section = ""
         if registered_agents:
             registered_table = self.render_agent_rows(project, registered_agents, include_usage=False)
@@ -1568,18 +1757,18 @@ class Dashboard:
             f'<option value="{esc(item.get("id"))}">{esc(item.get("id"))}</option>' for item in bindable
         )
         session_form = f"""
-          <section class="session-assign" aria-labelledby="session-assign-title">
-            <div><p class="eyeline">Session</p><h2 id="session-assign-title">Assign by session ID</h2><p>Paste a Claude or Codex session id, optionally bind it to an agent in this project, then save the role.</p></div>
+          <details class="session-assign" aria-labelledby="session-assign-title">
+            <summary id="session-assign-title">Assign a role by session ID</summary><div><p>Paste a Claude or Codex session id, optionally bind it to an agent in this project, then save the role.</p></div>
             <form class="session-assign-form" method="post" action="/project/{esc(project.key)}/agents/set-role">
               <input type="hidden" name="csrf" value="{esc(self.csrf_token)}">
               <div class="session-assign-fields">
-                <label for="session-id-input">Session ID<input id="session-id-input" name="session_id" value="" maxlength="{MAX_SESSION_LENGTH}" autocomplete="off" required placeholder="019ff1f7-cfea-7240-a6fe-f1ab2cb2fe4a"></label>
+                <label for="session-id-input">Session ID<input id="session-id-input" name="session_id" value="" maxlength="{MAX_SESSION_LENGTH}" autocomplete="off" required placeholder="Paste a Claude or Codex session ID"></label>
                 <label for="session-agent-input">Agent<select id="session-agent-input" name="agent_id"><option value="">None · session only</option>{bind_options}</select></label>
                 <label for="session-role-input">Role<input id="session-role-input" name="role" list="role-presets" maxlength="{MAX_ROLE_LENGTH}" autocomplete="off" required placeholder="Independent QA"></label>
                 <button class="btn btn-primary" type="submit">Save</button>
               </div>
             </form>
-          </section>
+          </details>
         """
         controls = ""
         usage_monitor = ""
@@ -1587,26 +1776,28 @@ class Dashboard:
             active_ids = project.attached_agent_ids()
             definitions = [item for item in project.agent_definitions() if item["id"] not in active_ids]
             options = ''.join(f'<option value="{esc(item["id"])}">{esc(item["id"])} · {esc(item["model"] or item["harness"])}</option>' for item in definitions)
-            select_disabled = "" if options else " disabled"
+            reachable = live_snapshot is None or live_snapshot.get("_reachable", True) is not False
+            select_disabled = "" if options and reachable else " disabled"
             controllable_count = sum(1 for agent in live_agents if agent.get("controllable"))
-            stop_disabled = "" if controllable_count else " disabled"
+            stop_disabled = "" if controllable_count and reachable else " disabled"
             controls = f"""
               <section class="control-strip" aria-labelledby="control-title"><div><p class="eyeline">Agent controls</p><h2 id="control-title">Run this project</h2><p>Starts an existing AgentBus supervisor in this repository. Stop sends a graceful termination request to that supervisor.</p></div>
-                <div class="control-actions"><form class="agent-control-form" method="post" action="/project/{esc(project.key)}/agents/start"><input type="hidden" name="csrf" value="{esc(self.csrf_token)}"><label for="agent-id">Registered agent</label><div class="field-row"><select id="agent-id" name="agent_id" required{select_disabled}><option value="" selected disabled>{'Choose an agent…' if options else 'All registered agents are attached'}</option>{options}</select><button class="btn btn-primary" type="submit"{select_disabled}>Start agent</button></div></form>
+                <div class="control-actions"><form class="agent-control-form" method="post" action="/project/{esc(project.key)}/agents/start"><input type="hidden" name="csrf" value="{esc(self.csrf_token)}"><label for="agent-id">Registered agent</label><div class="field-row"><select id="agent-id" name="agent_id" required{select_disabled}><option value="" selected disabled>{'Choose an agent…' if options else 'No registered agents available — check Local setup'}</option>{options}</select><button class="btn btn-primary" type="submit"{select_disabled}>Start agent</button></div></form>
                 <form class="inline-form" method="post" action="/project/{esc(project.key)}/agents/stop-all" data-confirm="Stop all {controllable_count} controllable supervisors in this project?"><input type="hidden" name="csrf" value="{esc(self.csrf_token)}"><button class="btn btn-danger" type="submit"{stop_disabled}>Stop all</button></form></div></section>
             """
             live_reachable = live_snapshot is None or live_snapshot.get("_reachable", True) is not False
             last_observed = "" if live_snapshot is None else clean_text(live_snapshot.get("_observedAt"))
             usage_monitor = self.render_usage_monitor(project, live_agents, live_reachable, last_observed)
         body = f"""
-          <header class="page-head"><div><p class="eyeline">{esc(project.short_name)}</p><h1>Agents</h1><p class="page-copy">Live identities, persistent roles, usage, and supervisor controls for this project. Assign a role by Claude or Codex session id when you need a specific session.</p></div><a class="text-link" href="/project/{esc(project.key)}/messages">Conversations →</a></header>
-          {flash}{controls}{session_form}
+          <header class="page-head"><div><p class="eyeline">{esc(project.short_name)}</p><h1>Agents</h1><p class="page-copy">Check attached agents, their current activity, and saved roles. Usage and controls are available for live AgentBus workspaces.</p></div><a class="text-link" href="/project/{esc(project.key)}/messages">Conversations →</a></header>
+          {flash}{controls}
           {usage_monitor}
           {self.role_presets_datalist()}
           <div class="toolbar"><div class="search"><input data-search type="search" aria-label="Filter agents" placeholder="Search agents"></div><a class="btn btn-quiet" href="/project/{esc(project.key)}/agents">Refresh</a></div>
           <section class="panel" aria-label="Agent list"><div class="panel-head"><h2>Attached agents</h2><span class="panel-meta">{len(live_agents)} observed</span></div>{live_table}</section>
           {registered_section}
           {session_section}
+          {session_form}
         """
         return self.shell(f"{project.name} agents", body, project.key, "agents")
 
@@ -1710,7 +1901,7 @@ class Dashboard:
           <nav class="conversation-tabs" aria-label="Conversation folders">{tabs}</nav>
           <section class="conversation-workspace" aria-label="{esc(box.title())} conversations">
             <aside class="conversation-index"><form class="conversation-tools" method="get" action="/project/{esc(project.key)}/messages"><input type="hidden" name="box" value="{esc(box)}"><div class="search"><input data-search name="q" value="{esc(search_query)}" type="search" aria-label="Search all conversations" placeholder="Search all conversations"></div><button class="btn btn-small" type="submit">Search</button><span>{len(filtered)} found</span></form>{list_html}{pagination}</aside>
-            <article class="conversation-detail">{detail_html}</article>
+            <article class="conversation-detail" id="conversation-detail" tabindex="-1">{detail_html}</article>
           </section>
           {compose}
         """
@@ -1718,7 +1909,7 @@ class Dashboard:
 
     def render_conversation_list(self, project: ProjectSource, conversations: list[dict[str, Any]], box: str, selected_id: str, page: int, search_query: str) -> str:
         if not conversations:
-            return f'<div class="empty compact-empty"><h2>{esc(box.title())} is empty</h2><p>{"Archived conversations appear here." if box == "archived" else "Deleted conversations stay here until you restore them." if box == "trash" else "New project traffic appears here."}</p></div>'
+            return f'<div class="empty compact-empty"><h2>{esc(box.title())} is empty</h2><p>{"Archived conversations appear here." if box == "archived" else "Deleted conversations stay here until you restore them." if box == "trash" else "Messages appear when agents are attached to this project’s exact folder. Check Agents or Local setup to connect your existing services."}</p></div>'
         rows = []
         for conversation in conversations:
             actions = self.conversation_actions(project, conversation["id"], box, compact=True)
@@ -1748,15 +1939,17 @@ class Dashboard:
             role_note = f'<span class="conversation-role-label">{esc(conversation_role)}</span>' if conversation_role else ""
             rows.append(f"""
               <div class="conversation-row{selected_class}" data-filter-text="{esc(filter_text + ' ' + conversation_role)}">
-                <a class="conversation-link" href="/project/{esc(project.key)}/messages?{esc(link_query)}"><span class="conversation-row-top"><strong>{esc(conversation['title'])}</strong><time>{esc(conversation.get('latest_display', ''))}</time></span><span class="conversation-route">{esc(participants)}</span><span class="conversation-preview">{esc(conversation['latest_body'])}</span><span class="conversation-meta">{conversation['message_count']} message{'s' if conversation['message_count'] != 1 else ''}{role_note}</span></a>
-                <div class="conversation-actions">{actions}</div>
-                <div class="conversation-role">{role_control}</div>
+                <a class="conversation-link" href="/project/{esc(project.key)}/messages?{esc(link_query)}#conversation-detail"><span class="conversation-row-top"><strong>{esc(conversation['title'])}</strong><time>{esc(conversation.get('latest_display', ''))}</time></span><span class="conversation-route">{esc(participants)}</span><span class="conversation-preview">{esc(conversation['latest_body'])}</span><span class="conversation-meta">{conversation['message_count']} message{'s' if conversation['message_count'] != 1 else ''}{role_note}</span></a>
+                <div class="conversation-foot">
+                  <details class="conversation-role role-editor"><summary>{esc(conversation_role) if conversation_role else "Add role"}</summary>{role_control}</details>
+                  <div class="conversation-actions">{actions}</div>
+                </div>
               </div>""")
         return f'<div class="conversation-list">{"".join(rows)}</div>'
 
     def render_conversation_detail(self, project: ProjectSource, conversation: dict[str, Any] | None, box: str) -> str:
         if conversation is None:
-            return '<div class="empty detail-empty"><span class="empty-mark" aria-hidden="true"><img src="/assets/b-logo.png" alt=""></span><h2>No conversation selected</h2><p>Choose a conversation from the list.</p></div>'
+            return '<div class="empty detail-empty"><span class="empty-mark" aria-hidden="true"><img src="/assets/b-logo.png?v=cat" alt=""></span><h2>No conversation selected</h2><p>Choose a conversation from the list.</p></div>'
         transcript = []
         for message in conversation["messages"]:
             recipient = message.get("recipient") or "all"
@@ -1784,9 +1977,9 @@ class Dashboard:
     def conversation_actions(self, project: ProjectSource, conversation_id: str, box: str, compact: bool = False) -> str:
         button_class = "icon-action" if compact else "btn btn-quiet"
         if box == "inbox":
-            actions = (("archive", "Archive", ""), ("delete", "Delete", "Move this conversation to Trash?"))
+            actions = (("archive", "Archive", ""), ("delete", "Move to Trash", ""))
         elif box == "archived":
-            actions = (("restore", "Restore", ""), ("delete", "Delete", "Move this conversation to Trash?"))
+            actions = (("restore", "Restore", ""), ("delete", "Move to Trash", ""))
         else:
             actions = (("restore", "Restore", ""),)
         forms = []
@@ -1825,7 +2018,7 @@ class Dashboard:
 
     def render_conversation_teasers(self, project: ProjectSource, conversations: list[dict[str, Any]]) -> str:
         if not conversations:
-            return '<div class="empty"><h2>No conversations yet</h2><p>Project messages will appear here.</p></div>'
+            return '<div class="empty"><h2>No conversations yet</h2><p>Messages appear when agents are attached to this project’s exact folder. Open Agents to check the roster, or <a href="/setup">check local setup</a>.</p></div>'
         rows = []
         for conversation in conversations:
             rows.append(f'<a class="teaser-row" href="/project/{esc(project.key)}/messages?conversation={esc(conversation["id"])}"><span><strong>{esc(conversation["title"])}</strong><small>{esc(", ".join(conversation["participants"]))}</small></span><span class="teaser-preview">{esc(conversation["latest_body"])}</span><time>{esc(conversation.get("latest_display", ""))}</time><span class="arrow">→</span></a>')
@@ -1853,7 +2046,7 @@ class Dashboard:
         return f'<div class="flash flash-success" role="status">{messages[action]}</div>' if action in messages else ""
 
     def error_page(self, project: ProjectSource, error: str, active: str = "project") -> str:
-        body = f'<header class="page-head"><div><p class="eyeline">{esc(project.short_name)}</p><h1>Source unavailable</h1><p class="page-copy">This project could not be read. No other project data was substituted.</p></div></header><section class="panel error-panel"><div class="panel-head"><h2>Connection error</h2></div><div class="error-copy">{esc(error)}</div></section>'
+        body = f'<header class="page-head"><div><p class="eyeline">{esc(project.short_name)}</p><h1>Source unavailable</h1><p class="page-copy">This project could not be read. No other project data was substituted.</p></div></header><section class="panel error-panel"><div class="panel-head"><h2>Check this source</h2></div><div class="error-copy">{esc(error)}<p><a href="/setup">Open local setup</a> to review the path and connection.</p></div></section>'
         return self.shell("Source unavailable", body, project.key, active)
 
     def health(self) -> dict[str, Any]:
@@ -1868,7 +2061,10 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path.rstrip("/") or "/"
         try:
             if path == "/":
-                self.send_html(self.dashboard.home())
+                self.send_html(self.dashboard.home(urllib.parse.parse_qs(parsed.query)))
+                return
+            if path == "/setup":
+                self.send_html(self.dashboard.setup_page(urllib.parse.parse_qs(parsed.query)))
                 return
             if path == "/health":
                 self.send_json(self.dashboard.health())
@@ -1925,6 +2121,25 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path.rstrip("/")
         parts = [part for part in path.split("/") if part]
+        if path == "/setup":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if not 0 < length <= 16000:
+                    raise ValueError("Invalid form size. Reload setup and try again.")
+                form = {key: values[0] for key, values in urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8"), keep_blank_values=True).items()}
+                if not secrets.compare_digest(form.get("csrf", ""), self.dashboard.csrf_token):
+                    self.send_error_page(HTTPStatus.FORBIDDEN, "The form expired. Reload setup and try again.")
+                    return
+                settings = self.dashboard.settings
+                if settings is None:
+                    raise ValueError("Setup is unavailable in this test instance.")
+                settings = save_setup(settings, form)
+                self.dashboard.projects = {project.key: project for project in make_projects(settings)}
+                self.dashboard.settings = settings
+                self.redirect("/setup?saved=1")
+            except (OSError, ValueError) as error:
+                self.send_html(self.dashboard.setup_page({}, locals().get("form", {}), str(error)))
+            return
         if len(parts) != 4 or parts[0] != "project":
             self.send_error_page(HTTPStatus.NOT_FOUND, "Action not found")
             return
@@ -1938,12 +2153,21 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError:
             length = 0
         if length <= 0 or length > 16000:
+            if parts[2] == "flags":
+                self.redirect("/?error=" + urllib.parse.quote("Invalid form payload"))
+                return
             self.redirect(self.action_error_location(project, parts[2], "Invalid form payload"))
             return
         payload = self.rfile.read(length).decode("utf-8", errors="replace")
         form = {key: values[0] for key, values in urllib.parse.parse_qs(payload, keep_blank_values=True).items()}
         if not secrets.compare_digest(form.get("csrf", ""), self.dashboard.csrf_token):
+            if parts[2] == "flags":
+                self.redirect("/?error=" + urllib.parse.quote("The form expired. Refresh and try again."))
+                return
             self.redirect(self.action_error_location(project, parts[2], "The form expired. Refresh and try again."))
+            return
+        if parts[2] == "flags" and parts[3] in {"pin", "unpin"}:
+            self.pin_action(project, parts[3])
             return
         if parts[2:] == ["messages", "send"]:
             self.send_message_action(project, form)
@@ -1958,6 +2182,24 @@ class Handler(BaseHTTPRequestHandler):
             self.role_action(project, parts[2], parts[3], form)
             return
         self.send_error_page(HTTPStatus.NOT_FOUND, "Action not found")
+
+    def pin_action(self, project: ProjectSource, action: str) -> None:
+        try:
+            self.dashboard.state_store.set_pinned(project.key, action == "pin")
+        except (OSError, ValueError) as error:
+            self.redirect("/?error=" + urllib.parse.quote(str(error)))
+            return
+        self.redirect(self.safe_return_path())
+
+    def safe_return_path(self) -> str:
+        referer = self.headers.get("Referer", "")
+        parsed = urllib.parse.urlparse(referer)
+        if parsed.hostname in {None, "127.0.0.1", "localhost"} and parsed.path.startswith("/"):
+            path = parsed.path
+            if parsed.query:
+                return f"{path}?{parsed.query}"
+            return path
+        return "/"
 
     def send_message_action(self, project: ProjectSource, form: dict[str, str]) -> None:
         sender = clean_text(form.get("sender"))[:80]
@@ -2173,9 +2415,9 @@ def make_projects(args: argparse.Namespace) -> list[ProjectSource]:
         ),
         ProjectSource(
             key="liminal",
-            name="Liminal AgentBus",
-            short_name="Liminal",
-            description="Lightweight message channel used by the existing Liminal agent sessions.",
+            name="AgentBus history",
+            short_name="Bus history",
+            description="Messages from the optional AgentBus SQLite store.",
             path_label=str(args.agent_bus_db),
             db_path=args.agent_bus_db,
             kind="agent-bus",
@@ -2183,8 +2425,12 @@ def make_projects(args: argparse.Namespace) -> list[ProjectSource]:
             status_dir=args.status_dir,
         ),
     ]
+    projects = [project for project in projects if project.db_path and project.db_path.is_file()]
     for path, root in discover_project_paths(args.projects_root):
-        relative = path.relative_to(root)
+        try:
+            relative = path.relative_to(root)
+        except ValueError:
+            relative = Path(path.name)
         name = " / ".join(relative.parts)
         projects.append(
             ProjectSource(
@@ -2485,23 +2731,20 @@ def run_check(dashboard: Dashboard) -> int:
     failures = []
     warnings = []
     summaries = dashboard.summaries()
-    if len(summaries) <= 2:
-        failures.append("expected discovered local projects in addition to coordination sources")
     if len({summary["key"] for summary in summaries}) != len(summaries):
         failures.append("project keys are not unique")
     home = dashboard.home()
     for required in (
         "Choose a project",
-        "Agent Coordinator",
-        "Liminal AgentBus",
-        "MCP for agents communication",
-        'src="/assets/b-logo.png"',
+        "/assets/b-logo.png",
         'src="/assets/home-cat.jpg"',
-        'src="/assets/home-cat-evil.jpg"',
+        "/assets/home-cat-evil.jpg",
         "data-project-menu",
         "data-nav-toggle",
         "data-theme-set",
-        'src="/assets/theme.js"',
+        "/assets/theme.js",
+        "data-project-search",
+        "Pinned",
     ):
         if required not in home:
             failures.append(f"home missing {required!r}")
@@ -2521,6 +2764,7 @@ def run_check(dashboard: Dashboard) -> int:
         for required in ("Conversations", "Inbox", "Archived", "Trash"):
             if required not in conversation_page:
                 failures.append(f"{project.key}: conversations page missing {required!r}")
+    failures.extend(check_configuration())
     failures.extend(check_role_assignment())
     print(json.dumps({"projects": summaries, "warnings": warnings, "failures": failures}, indent=2))
     return 1 if failures else 0
@@ -2528,6 +2772,7 @@ def run_check(dashboard: Dashboard) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the local Agent Bus Dashboard.")
+    parser.add_argument("--config", type=Path, default=Path(os.environ.get("AGENT_DASHBOARD_CONFIG", str(Path.home() / ".agent-bus/dashboard.json"))))
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8788)
     parser.add_argument("--coordinator-db", type=Path, default=DEFAULT_COORDINATOR_DB)
@@ -2539,7 +2784,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--projects-root",
         type=Path,
         action="append",
-        default=[DEFAULT_PROJECTS_ROOT],
+        default=None,
         help="Discover each immediate folder plus nested marked repositories/apps under this root.",
     )
     parser.add_argument("--live-bus-url", default=DEFAULT_LIVE_BUS_URL)
@@ -2551,9 +2796,181 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+CONFIG_FIELDS = {
+    "coordinator_db": ("Coordinator database", "Optional SQLite file from your existing Agent Coordinator."),
+    "coordinator_cli": ("Coordinator command", "Optional executable; required only for sending through Coordinator."),
+    "agent_bus_db": ("AgentBus history database", "Optional SQLite message store. The live broker works without this."),
+    "agent_bus_cli": ("AgentBus history command", "Optional agent_comms_server.py; required only for sending to the SQLite store."),
+    "agent_bus_root": ("AgentBus implementation folder", "Folder containing agents.json and the existing supervisor implementation. Blank uses ~/.agent-bus."),
+    "status_dir": ("AgentBus status folder", "Optional status files for the SQLite source."),
+}
+
+
+def read_config(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise ValueError(f"Cannot read {path}. Use a JSON object with the keys shown in README.md.") from error
+    if not isinstance(data, dict):
+        raise ValueError(f"{path} must contain a JSON object.")
+    return data
+
+
+def parse_settings(argv: list[str] | None = None) -> argparse.Namespace:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    parser = build_parser()
+    initial = parser.parse_args(argv)
+    initial.config = initial.config.expanduser().resolve()
+    data = read_config(initial.config)
+    allowed = {action.dest for action in parser._actions} - {"help", "check", "config"}
+    unknown = set(data) - allowed
+    if unknown:
+        raise ValueError("Unknown configuration keys: " + ", ".join(sorted(unknown)))
+    for key in allowed:
+        env = os.environ.get("AGENT_DASHBOARD_" + key.upper())
+        if env is not None:
+            data[key] = env.split(os.pathsep) if key == "projects_root" else env
+    parser.set_defaults(**data)
+    args = parser.parse_args(argv)
+    args.config = initial.config
+    args.launch_argv = argv
+    roots = args.projects_root if args.projects_root is not None else [DEFAULT_PROJECTS_ROOT]
+    if not isinstance(roots, list) or not all(isinstance(item, (str, Path)) and str(item).strip() for item in roots):
+        raise ValueError("projects_root must be an array of folder paths.")
+    # Explicit repeated flags replace, rather than append to, configuration roots.
+    if any(item == "--projects-root" or item.startswith("--projects-root=") for item in argv):
+        roots = build_parser().parse_args(argv).projects_root
+    args.projects_root = [Path(item).expanduser().resolve() for item in roots]
+    for key in (*CONFIG_FIELDS, "operator_token", "audit_log", "dashboard_state"):
+        value = getattr(args, key)
+        if value is None and key in {"coordinator_db", "coordinator_cli", "agent_bus_db", "agent_bus_cli", "status_dir"}:
+            continue
+        if not isinstance(value, (str, Path)) or not str(value).strip():
+            raise ValueError(f"{key} must be a non-empty path; omit it to use the default.")
+        setattr(args, key, Path(value).expanduser().resolve())
+    try:
+        args.port = int(args.port)
+        if not 1 <= args.port <= 65535:
+            raise ValueError()
+    except (TypeError, ValueError):
+        raise ValueError("port must be between 1 and 65535") from None
+    validate_bus_url(args.live_bus_url)
+    if not isinstance(args.host, str) or not args.host:
+        raise ValueError("host must be an address; omit it to bind to 127.0.0.1")
+    return args
+
+
+def validate_bus_url(value: str) -> None:
+    try:
+        parsed = urllib.parse.urlparse(value)
+        if parsed.scheme != "http" or parsed.hostname not in {"localhost", "127.0.0.1", "::1"} or parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path not in {"", "/"}:
+            raise ValueError()
+        parsed.port
+    except (TypeError, ValueError):
+        raise ValueError("Broker URL must be a loopback HTTP address, such as http://127.0.0.1:7717.") from None
+
+
+def save_setup(settings: argparse.Namespace, form: dict[str, str]) -> argparse.Namespace:
+    with REGISTRY_LOCK:
+        data = read_config(settings.config)
+        roots = [line.strip() for line in form.get("projects_root", "").splitlines() if line.strip()]
+        if not roots:
+            raise ValueError("Enter at least one projects folder. Create the folder first if needed.")
+        if any(not Path(item).expanduser().is_absolute() or not Path(item).expanduser().is_dir() for item in roots):
+            raise ValueError("Projects folders must exist. Use an absolute path or ~/Projects.")
+        data["projects_root"] = roots
+        for key in CONFIG_FIELDS:
+            value = form.get(key, "").strip()
+            if value:
+                target = Path(value).expanduser()
+                expected_directory = key in {"agent_bus_root", "status_dir"}
+                unchanged = target.resolve() == getattr(settings, key)
+                if not target.is_absolute() or (not unchanged and not (target.is_dir() if expected_directory else target.is_file())):
+                    raise ValueError(f"{CONFIG_FIELDS[key][0]} must point to an existing {'folder' if expected_directory else 'file'}.")
+                data[key] = value
+            else:
+                if key == "agent_bus_root":
+                    data.pop(key, None)
+                else:
+                    data[key] = None
+        url = form.get("live_bus_url", DEFAULT_LIVE_BUS_URL).strip()
+        validate_bus_url(url)
+        data["live_bus_url"] = url.rstrip("/")
+        settings.config.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(prefix=".dashboard-", dir=settings.config.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(data, stream, indent=2)
+                stream.write("\n")
+            os.replace(temporary, settings.config)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+        return parse_settings(settings.launch_argv)
+
+
+def check_configuration() -> list[str]:
+    failures = []
+    with tempfile.TemporaryDirectory() as folder:
+        base = Path(folder).resolve()
+        config = base / "dashboard.json"
+        config.write_text(json.dumps({"projects_root": [str(base / "absent")]}))
+        args = parse_settings(["--config", str(config)])
+        empty = Dashboard([], ConversationStateStore(base / "state.json"), args)
+        if "Set up this machine" not in empty.home() or "Save local setup" not in empty.setup_page({}):
+            failures.append("first-run guidance did not render without projects or sources")
+        try:
+            save_setup(args, {"projects_root": str(base), "live_bus_url": "https://example.com"})
+            failures.append("setup accepted a non-loopback broker URL")
+        except ValueError:
+            pass
+        args = save_setup(args, {"projects_root": str(base), "live_bus_url": DEFAULT_LIVE_BUS_URL})
+        if args.projects_root != [base] or config.stat().st_mode & 0o077:
+            failures.append("setup did not persist private configuration")
+        if args.coordinator_db is not None or args.agent_bus_db is not None:
+            failures.append("blank optional sources were not disabled")
+        missing = base / "offline.db"
+        saved = read_config(config)
+        saved["coordinator_db"] = str(missing)
+        config.write_text(json.dumps(saved))
+        args = parse_settings(["--config", str(config)])
+        page = Dashboard([], state_store=ConversationStateStore(base / "state.json"), settings=args).setup_page({})
+        if str(missing) not in page:
+            failures.append("missing configured source was hidden")
+        args = save_setup(args, {"projects_root": str(base), "coordinator_db": str(missing), "live_bus_url": DEFAULT_LIVE_BUS_URL})
+        if args.coordinator_db != missing:
+            failures.append("unrelated save discarded disconnected source")
+        linked_root = base / "links"
+        linked_root.mkdir()
+        external = base / "external"
+        external.mkdir()
+        (linked_root / "external").symlink_to(external, target_is_directory=True)
+        args.projects_root = [linked_root]
+        if not any(project.workspace_path == external for project in make_projects(args)):
+            failures.append("symlinked project outside root was not discovered")
+        second = base / "second"
+        second.mkdir()
+        override = parse_settings(["--config", str(config), "--projects-root", str(second)])
+        if override.projects_root != [second]:
+            failures.append("explicit projects root did not replace config roots")
+        state = ConversationStateStore(base / "state.json")
+        state.path.write_text(json.dumps({"extension": {"keep": True}, "roles": {}, "conversations": {}}))
+        data = state._load()
+        state._write(data)
+        if json.loads(state.path.read_text()).get("extension") != {"keep": True}:
+            failures.append("state write discarded unknown keys")
+    return failures
+
+
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
-    dashboard = Dashboard(make_projects(args), ConversationStateStore(args.dashboard_state))
+    try:
+        args = parse_settings(argv)
+    except ValueError as error:
+        print(f"Configuration error: {error}", file=sys.stderr)
+        return 2
+    dashboard = Dashboard(make_projects(args), ConversationStateStore(args.dashboard_state), args)
     if args.check:
         return run_check(dashboard)
     if args.host not in {"127.0.0.1", "localhost", "::1"}:

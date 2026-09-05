@@ -35,25 +35,45 @@
 
   var navToggle = document.querySelector("[data-nav-toggle]");
   var projectMenu = document.querySelector("[data-project-menu]");
-  try {
-    if (localStorage.getItem("agent-bus.nav-hidden") === "1") {
-      document.body.classList.add("nav-hidden");
-      if (navToggle) {
-        navToggle.setAttribute("aria-expanded", "false");
-        navToggle.textContent = "Show";
-      }
+  var sidebarScroll = document.getElementById("sidebar-scroll");
+  var sidebarFoot = document.querySelector(".sidebar-foot");
+
+  function applyNavHidden(hidden, persist) {
+    document.documentElement.classList.toggle("nav-hidden", hidden);
+    document.body.classList.toggle("nav-hidden", hidden);
+    if (navToggle) {
+      navToggle.setAttribute("aria-expanded", hidden ? "false" : "true");
+      navToggle.textContent = hidden ? "Show" : "Hide";
     }
+    if (sidebarScroll) {
+      sidebarScroll.inert = hidden;
+      sidebarScroll.setAttribute("aria-hidden", hidden ? "true" : "false");
+    }
+    if (sidebarFoot) {
+      sidebarFoot.inert = hidden;
+      sidebarFoot.setAttribute("aria-hidden", hidden ? "true" : "false");
+    }
+    if (persist) {
+      try { localStorage.setItem("agent-bus.nav-hidden", hidden ? "1" : "0"); } catch (_ignore) {}
+    }
+  }
+
+  var navHidden = document.documentElement.classList.contains("nav-hidden");
+  try {
+    if (!navHidden && localStorage.getItem("agent-bus.nav-hidden") === "1") navHidden = true;
     if (projectMenu && localStorage.getItem("agent-bus.project-menu-open") === "0") {
       projectMenu.open = false;
     }
   } catch (_storage) {}
+  applyNavHidden(navHidden, false);
+  window.requestAnimationFrame(function () {
+    window.requestAnimationFrame(function () {
+      document.documentElement.classList.add("nav-motion");
+    });
+  });
   if (navToggle) {
     navToggle.addEventListener("click", function () {
-      var hidden = !document.body.classList.contains("nav-hidden");
-      document.body.classList.toggle("nav-hidden", hidden);
-      navToggle.setAttribute("aria-expanded", hidden ? "false" : "true");
-      navToggle.textContent = hidden ? "Show" : "Hide";
-      try { localStorage.setItem("agent-bus.nav-hidden", hidden ? "1" : "0"); } catch (_ignore) {}
+      applyNavHidden(!document.documentElement.classList.contains("nav-hidden"), true);
     });
   }
   if (projectMenu) {
@@ -72,6 +92,74 @@
     });
   }
 
+  var projectSearchers = document.querySelectorAll("[data-project-search]");
+  var projectItems = document.querySelectorAll("[data-project-item]");
+  function applyProjectQuery(query) {
+    query = query.trim().toLowerCase();
+    var visible = 0;
+    var counted = {};
+    projectItems.forEach(function (row) {
+      var match = query.length === 0 || (row.dataset.filterText || "").indexOf(query) !== -1;
+      row.hidden = !match;
+      var key = row.dataset.projectKey || "";
+      if (match && key && !counted[key]) {
+        counted[key] = true;
+        visible += 1;
+      }
+    });
+    document.querySelectorAll("[data-project-bay]").forEach(function (bay) {
+      var any = bay.querySelector("[data-project-item]:not([hidden])");
+      var hint = bay.querySelector(".project-bay-empty");
+      if (hint) hint.hidden = query.length > 0;
+      bay.hidden = !any && !(hint && query.length === 0);
+    });
+    document.querySelectorAll("[data-project-empty]").forEach(function (empty) {
+      empty.hidden = visible > 0;
+    });
+    document.querySelectorAll("[data-project-count]").forEach(function (el) {
+      el.textContent = String(visible);
+    });
+  }
+  projectSearchers.forEach(function (input) {
+    input.addEventListener("input", function () {
+      projectSearchers.forEach(function (other) {
+        if (other !== input) other.value = input.value;
+      });
+      applyProjectQuery(input.value);
+    });
+  });
+
+  document.querySelectorAll("[data-copy-target]").forEach(function (button) {
+    button.addEventListener("click", function () {
+      var target = document.getElementById(button.getAttribute("data-copy-target") || "");
+      if (!target) return;
+      var text = target.textContent || "";
+      var previous = button.textContent;
+      function done(ok) {
+        button.textContent = ok ? "Copied" : "Copy failed";
+        window.setTimeout(function () { button.textContent = previous; }, 1400);
+      }
+      function fallback() {
+        var area = document.createElement("textarea");
+        area.value = text;
+        area.setAttribute("readonly", "");
+        area.style.position = "fixed";
+        area.style.left = "-9999px";
+        document.body.appendChild(area);
+        area.select();
+        var ok = false;
+        try { ok = document.execCommand("copy"); } catch (_err) {}
+        document.body.removeChild(area);
+        done(ok);
+      }
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(function () { done(true); }).catch(fallback);
+        return;
+      }
+      fallback();
+    });
+  });
+
   document.querySelectorAll("form[data-confirm]").forEach(function (form) {
     form.addEventListener("submit", function (event) {
       if (!window.confirm(form.dataset.confirm)) event.preventDefault();
@@ -81,6 +169,7 @@
   document.querySelectorAll("form").forEach(function (form) {
     form.addEventListener("submit", function (event) {
       if (event.defaultPrevented) return;
+      if (form.hasAttribute("data-project-pin")) return;
       var button = form.querySelector('button[type="submit"]');
       if (!button) return;
       button.disabled = true;
@@ -219,9 +308,10 @@
     var target = event.target;
     var editing = target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT" || target.isContentEditable);
 
-    if (event.key === "/" && !editing && search) {
+    var activeSearch = search || document.querySelector(".project-register [data-project-search]") || document.querySelector("[data-project-search]");
+    if (event.key === "/" && !editing && activeSearch) {
       event.preventDefault();
-      search.focus();
+      activeSearch.focus();
       return;
     }
 

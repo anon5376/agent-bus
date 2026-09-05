@@ -50,7 +50,7 @@ Agent Bus is an exact local operations instrument. Light and Dark stay monochrom
 ## Composition
 
 - A white rail establishes system and project context; the selected workspace is marked in black. The rail and project list can be hidden or expanded.
-- With no project selected, the landing is a single photograph. EVIL swaps in the sinister cat. Project choice lives in the expandable menu.
+- With no project selected, the landing is a searchable project register: pinned first, then coordination sources, then local folders. Setup prompts and the cat follow the register. The rail repeats the same pin and search.
 - Agents progress from explicit run controls to current-session usage to the attached roster.
 - Conversations preserve the index/detail workspace, with folder state and reversible actions always visible.
 - Flat regions, ruled sections, and negative space provide hierarchy. No cards, glow, or decorative color.

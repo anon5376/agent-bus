@@ -1,10 +1,7 @@
 {
   "name": "agent-bus-dashboard",
-  "version": "0.1.0+codex.20260904130600",
+  "version": "0.2.0",
   "description": "Operate the existing local agent coordinator and AgentBus from Codex and a unified localhost dashboard.",
-  "author": {
-    "name": "Local developer"
-  },
   "keywords": [
     "agents",
     "dashboard",
@@ -18,7 +15,6 @@
     "displayName": "Agent Bus Dashboard",
     "shortDescription": "Projects, usage, live sessions, agent controls, and conversations.",
     "longDescription": "Connects Codex to the existing Agent Coordinator and AgentBus services, and adds a dependency-free localhost dashboard for choosing a project, monitoring current-session usage, opening resumable agent sessions in Terminal, controlling attached supervisors, and managing complete conversation history with Inbox, Archive, and Trash.",
-    "developerName": "Local developer",
     "category": "Developer Tools",
     "capabilities": [
       "Read",
@@ -32,6 +28,6 @@
       "Show current AgentBus usage by subscription.",
       "Open the complete AgentBus conversation history."
     ],
-    "brandColor": "#D97757"
+    "brandColor": "#000000"
   }
 }

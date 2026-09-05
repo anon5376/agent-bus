@@ -1,33 +1,18 @@
 {
   "mcpServers": {
     "agent-coordinator": {
-      "title": "Agent Coordinator",
-      "description": "Full local coordination server for agents, tasks, review, and messages.",
-      "command": "/Users/anon5376/prototype_0.2/.venv/bin/prototype",
+      "command": "python3",
       "args": [
-        "--db",
-        "/Users/anon5376/prototype_0.2/prototype.db",
-        "mcp",
-        "--agent-id",
-        "codex"
-      ],
-      "cwd": "/Users/anon5376/prototype_0.2",
-      "env": {
-        "COORD_AGENT_ID": "codex"
-      }
+        "${CLAUDE_PLUGIN_ROOT}/scripts/mcp_launcher.py",
+        "coordinator"
+      ]
     },
     "agent-bus": {
-      "title": "AgentBus Messages",
-      "description": "Lightweight local messaging bus shared by the existing agent sessions.",
-      "command": "/usr/bin/python3",
+      "command": "python3",
       "args": [
-        "/Users/anon5376/Desktop/liminal/comms/agent_comms_server.py"
-      ],
-      "cwd": "/Users/anon5376/Desktop/liminal",
-      "env": {
-        "AGENT_COMMS_DB": "/Users/anon5376/Desktop/liminal/comms/agentcomms.db",
-        "AGENT_COMMS_ID": "codex"
-      }
+        "${CLAUDE_PLUGIN_ROOT}/scripts/mcp_launcher.py",
+        "bus"
+      ]
     }
   }
 }
