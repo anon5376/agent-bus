@@ -41,7 +41,7 @@ The product runs locally during coding sessions. Codex and other agents communic
 
 ## Brand Commitments
 
-The dashboard ships three themes: Light and Dark stay monochrome; EVIL uses parchment ink, crimson accent, and Cloister Black. Product behavior remains operator-first, keyboard-friendly, and local-only.
+The dashboard is a switchboard: a status bar with the live broker state, a project dock, and pages that say who is live, what they are doing, and what the operator can do next. It ships three themes: Light (paper), Dark (graphite), and Evil (void, bone ink, vermilion signal, and the painted evil cat). Agents are shown by role and readable model name with their provider's mark; raw ids stay one click away. Status is a dot with a label. Product behavior remains operator-first, keyboard-friendly, and local-only.
 
 ## First Run and Configuration
 

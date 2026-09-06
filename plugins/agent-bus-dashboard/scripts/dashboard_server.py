@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Unified localhost dashboard for the existing coordinator and AgentBus stores.
 
-THESIS: Agent work is a conversation ledger, not a terminal feed or an analytics dashboard.
-OWN-WORLD: Monochrome Light/Dark; parchment, crimson and Cloister Black in EVIL.
-STORY: Choose a project, control its live agents, then manage complete conversations across Inbox, Archive, and Trash.
-FIRST VIEWPORT: Persistent project navigation opens onto a focused conversation ledger with the selected thread beside it.
-FORM: A project register, readable agent roster, and conversation index/detail workspace.
+THESIS: One operator, many agents, many projects. The dashboard is a switchboard: every page says who is live,
+        what they are doing, and what the operator can do next.
+OWN-WORLD: Paper (Day), graphite (Night), and bone-on-void with a vermilion signal (Evil). Serif titles on a sans
+        instrument body; identifiers and time in mono. Agent identity is a provider mark on a quiet tile; status is a dot plus a label.
+STORY: Choose a project, read its live roster and tasks, supervise its agents, then work through complete conversations
+        across Inbox, Archived, and Trash.
+FIRST VIEWPORT: Status bar with broker state, project dock, page title, then the numbers and the roster.
+FORM: Layered panels with hairlines, stat tiles, a responsive roster list, and an index/detail conversation workspace.
 """
 
 from __future__ import annotations
@@ -185,12 +188,13 @@ def summarize_usage(agents: list[dict[str, Any]]) -> dict[str, Any]:
         subscription = clean_text(agent.get("auth")) or "Unknown subscription"
         group = grouped.setdefault(
             subscription,
-            {"name": subscription, "turns": 0, "tokens": 0, "costUSD": 0.0, "agents": []},
+            {"name": subscription, "turns": 0, "tokens": 0, "costUSD": 0.0, "agents": [], "labels": []},
         )
         group["turns"] += int(usage["turns"])
         group["tokens"] += int(usage["tokens"])
         group["costUSD"] += float(usage["costUSD"])
         group["agents"].append(str(agent.get("id") or ""))
+        group["labels"].append(agent_title(agent))
     return {
         "total": total,
         "subscriptions": sorted(grouped.values(), key=lambda item: str(item["name"]).lower()),
@@ -301,6 +305,7 @@ def group_conversations(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
             conversation["latest"] = moment
             conversation["latest_display"] = display_time(message.get("ts"))
             conversation["latest_body"] = preview(message.get("body"), 110)
+            conversation["latest_sender"] = clean_text(message.get("sender"))
             conversation["title"] = clean_text(message.get("subject")) or conversation["thread"] or "Conversation"
     result = []
     for conversation in grouped.values():
@@ -320,7 +325,7 @@ class ConversationStateStore:
 
     @staticmethod
     def _empty() -> dict[str, Any]:
-        return {"version": 1, "conversations": {}, "roles": {}, "pinned_projects": []}
+        return {"version": 1, "conversations": {}, "roles": {}, "pinned_projects": [], "hidden_projects": []}
 
     @staticmethod
     def _pinned_keys(value: Any) -> list[str]:
@@ -351,6 +356,7 @@ class ConversationStateStore:
             "conversations": conversations if isinstance(conversations, dict) else {},
             "roles": roles if isinstance(roles, dict) else {},
             "pinned_projects": self._pinned_keys(data.get("pinned_projects")),
+            "hidden_projects": self._pinned_keys(data.get("hidden_projects")),
         }
 
     def _write(self, data: dict[str, Any]) -> None:
@@ -484,12 +490,70 @@ class ConversationStateStore:
         with self.lock:
             data = self._load()
             current = self._pinned_keys(data.get("pinned_projects"))
+            hidden = self._pinned_keys(data.get("hidden_projects"))
             if pinned:
                 if key not in current:
                     current.append(key)
+                hidden = [item for item in hidden if item != key]
             else:
                 current = [item for item in current if item != key]
             data["pinned_projects"] = current
+            data["hidden_projects"] = hidden
+            self._write(data)
+
+    def hidden_projects(self) -> list[str]:
+        with self.lock:
+            return list(self._load()["hidden_projects"])
+
+    def set_hidden(self, project_key: str, hidden: bool) -> None:
+        key = clean_text(project_key)
+        if not key:
+            raise ValueError("Unknown project")
+        with self.lock:
+            data = self._load()
+            current = self._pinned_keys(data.get("hidden_projects"))
+            pinned = self._pinned_keys(data.get("pinned_projects"))
+            if hidden:
+                if key not in current:
+                    current.append(key)
+                pinned = [item for item in pinned if item != key]
+            else:
+                current = [item for item in current if item != key]
+            data["hidden_projects"] = current
+            data["pinned_projects"] = pinned
+            self._write(data)
+
+    def hide_projects(self, keys: list[str]) -> None:
+        wanted = self._pinned_keys(keys)
+        if not wanted:
+            return
+        with self.lock:
+            data = self._load()
+            current = self._pinned_keys(data.get("hidden_projects"))
+            seen = set(current)
+            for key in wanted:
+                if key not in seen:
+                    current.append(key)
+                    seen.add(key)
+            data["hidden_projects"] = current
+            data["pinned_projects"] = [item for item in self._pinned_keys(data.get("pinned_projects")) if item not in seen]
+            self._write(data)
+
+    def archive_conversations(self, mapping: dict[str, list[str]]) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        with self.lock:
+            data = self._load()
+            conversations = data.setdefault("conversations", {})
+            for project_key, ids in mapping.items():
+                key = clean_text(project_key)
+                if not key:
+                    continue
+                project = conversations.setdefault(key, {})
+                for conversation_id in ids:
+                    cid = clean_text(conversation_id)[:80]
+                    if not cid:
+                        continue
+                    project[cid] = {"status": "archived", "updated": now}
             self._write(data)
 
 
@@ -734,9 +798,11 @@ class ProjectSource:
                     "last_active": f"{seconds}s ago",
                     "supervisor_pid": item.get("supervisorPid"),
                     "harness": item.get("harness") or "",
+                    "effort": clean_text(item.get("effort") or item.get("reasoningEffort") or item.get("reasoning_effort")),
                     "cli": cli,
                     "auth": clean_text(item.get("auth")) or "Unknown subscription",
                     "workdir": clean_text(item.get("workdir")),
+                    "description": clean_text(item.get("description")),
                     "usage": usage,
                     "blocked": bool(item.get("blocked")),
                     "stalled": bool(item.get("stalled")),
@@ -850,6 +916,85 @@ class ProjectSource:
             result = [dict(row) for row in connection.execute(query).fetchall()]
         return result if limit is None else result[:limit]
 
+    def tasks(self, snapshot: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        """Read-only task view: coordinator tasks table or live AgentBus tasks touching this project's agents."""
+        if self.kind == "coordinator":
+            if self.db_path is None:
+                return []
+            query = """
+                SELECT id, title, description, creator, assignee, priority, status, created_ts, updated_ts
+                FROM tasks ORDER BY updated_ts DESC LIMIT 80
+            """
+            try:
+                with connect_read_only(self.db_path) as connection:
+                    rows = connection.execute(query).fetchall()
+            except sqlite3.Error:
+                return []
+            tasks = []
+            for row in rows:
+                item = dict(row)
+                tasks.append(
+                    {
+                        "id": str(item.get("id") or ""),
+                        "title": clean_text(item.get("title")) or f"Task {item.get('id')}",
+                        "brief": preview(item.get("description"), 140),
+                        "assigner": clean_text(item.get("creator")),
+                        "assignee": clean_text(item.get("assignee")),
+                        "state": clean_text(item.get("status")) or "todo",
+                        "priority": clean_text(item.get("priority")) or "normal",
+                        "round": None,
+                        "attempts": None,
+                        "max_retries": None,
+                        "updated": display_time(item.get("updated_ts")),
+                        "updated_key": timestamp_key(item.get("updated_ts")),
+                    }
+                )
+            return tasks
+        if self.kind != "workspace":
+            return []
+        data = snapshot if snapshot is not None else self._live_snapshot()
+        agent_ids = {str(item.get("id")) for item in self._workspace_roster(data) if item.get("id")}
+        raw = data.get("tasks", [])
+        if not isinstance(raw, list):
+            return []
+        tasks = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            assigner = clean_text(item.get("assigner"))
+            assignee = clean_text(item.get("assignee"))
+            if assigner not in agent_ids and assignee not in agent_ids:
+                continue
+            try:
+                round_number = int(item.get("round") or 0)
+            except (TypeError, ValueError):
+                round_number = 0
+            try:
+                attempts = int(item.get("attempts") or 0)
+            except (TypeError, ValueError):
+                attempts = 0
+            try:
+                max_retries = int(item.get("maxRetries") or 0)
+            except (TypeError, ValueError):
+                max_retries = 0
+            tasks.append(
+                {
+                    "id": clean_text(item.get("id")),
+                    "title": clean_text(item.get("title")) or clean_text(item.get("id")) or "Task",
+                    "brief": preview(item.get("brief") or item.get("context"), 140),
+                    "assigner": assigner,
+                    "assignee": assignee,
+                    "state": clean_text(item.get("state")) or "unknown",
+                    "priority": "",
+                    "round": round_number,
+                    "attempts": attempts,
+                    "max_retries": max_retries,
+                    "updated": display_time(item.get("updatedAt") or item.get("createdAt")),
+                    "updated_key": timestamp_key(item.get("updatedAt") or item.get("createdAt")),
+                }
+            )
+        return sorted(tasks, key=lambda task: task["updated_key"], reverse=True)
+
     def send(self, sender: str, recipient: str, subject: str, thread: str, body: str) -> None:
         if self.kind == "workspace":
             self._send_to_workspace(recipient, subject, body)
@@ -961,6 +1106,7 @@ class ProjectSource:
                     "harness": clean_text(item.get("harness")),
                     "model": clean_text(item.get("model")),
                     "role": clean_text(item.get("role")) or "worker",
+                    "effort": clean_text(item.get("effort") or item.get("reasoningEffort") or item.get("reasoning_effort")),
                     "description": clean_text(item.get("description")),
                 }
             )
@@ -990,8 +1136,11 @@ class ProjectSource:
             live = self._workspace_agents(snapshot)
             registry = {item["id"]: item for item in self.agent_definitions()}
             for agent in live:
-                agent["in_registry"] = str(agent.get("id")) in registry
+                entry = registry.get(str(agent.get("id")))
+                agent["in_registry"] = entry is not None
                 agent["listed"] = "live"
+                if entry and not clean_text(agent.get("effort")):
+                    agent["effort"] = entry.get("effort", "")
             seen = {str(agent.get("id")) for agent in live}
             extras = []
             for item in self.agent_definitions():
@@ -1002,6 +1151,7 @@ class ProjectSource:
                         "id": item["id"],
                         "name": item["id"],
                         "model": item["model"],
+                        "effort": item.get("effort", ""),
                         "role": item["role"],
                         "parent_id": "",
                         "status": "registered",
@@ -1010,6 +1160,7 @@ class ProjectSource:
                         "in_registry": True,
                         "listed": "registered",
                         "harness": item["harness"],
+                        "description": item["description"],
                         "usage": usage_values({}),
                         "controllable": False,
                         "session_available": False,
@@ -1187,6 +1338,389 @@ class ProjectSource:
         return command_path
 
 
+STATUS_LABELS = {
+    "working": "Working",
+    "active": "Active",
+    "waiting": "Waiting",
+    "idle": "Idle",
+    "waiting_review": "Waiting review",
+    "blocked": "Blocked",
+    "stalled": "Stalled",
+    "stale": "Stale",
+    "offline": "Offline",
+    "failed": "Failed",
+    "unregistered": "Unregistered",
+    "registered": "Registered",
+    "session": "Session",
+    "unknown": "Unknown",
+}
+HARNESS_LABELS = {
+    "claude": ("Claude Code", "C"),
+    "codex": ("Codex CLI", "X"),
+    "grok": ("Grok CLI", "G"),
+    "kimi": ("Kimi CLI", "K"),
+    "opencode": ("OpenCode", "O"),
+    "cursor": ("Cursor", "U"),
+    "gemini": ("Gemini CLI", "M"),
+    "aider": ("Aider", "A"),
+}
+HARNESS_PROVIDERS = {
+    "claude": "Anthropic",
+    "codex": "OpenAI",
+    "grok": "xAI",
+    "kimi": "Moonshot AI",
+    "gemini": "Google",
+}
+MODEL_PROVIDERS = (
+    ("claude", "Anthropic"),
+    ("fable", "Anthropic"),
+    ("opus", "Anthropic"),
+    ("sonnet", "Anthropic"),
+    ("haiku", "Anthropic"),
+    ("gpt", "OpenAI"),
+    ("codex", "OpenAI"),
+    ("o1", "OpenAI"),
+    ("o3", "OpenAI"),
+    ("o4", "OpenAI"),
+    ("grok", "xAI"),
+    ("kimi", "Moonshot AI"),
+    ("moonshot", "Moonshot AI"),
+    ("gemini", "Google"),
+    ("deepseek", "DeepSeek"),
+    ("glm", "Zhipu"),
+    ("qwen", "Alibaba"),
+    ("llama", "Meta"),
+    ("mistral", "Mistral"),
+)
+TASK_STATE_CLASSES = {
+    "in_progress": "working",
+    "working": "working",
+    "started": "working",
+    "assigned": "waiting",
+    "ready": "waiting",
+    "todo": "idle",
+    "open": "idle",
+    "submitted": "waiting_review",
+    "review": "waiting_review",
+    "waiting_review": "waiting_review",
+    "changes_requested": "blocked",
+    "blocked": "blocked",
+    "failed": "failed",
+    "cancelled": "offline",
+    "canceled": "offline",
+    "accepted": "active",
+    "done": "active",
+    "completed": "active",
+    "approved": "active",
+}
+TASK_OPEN_STATES = {"blocked", "ready", "assigned", "in_progress", "submitted", "changes_requested", "todo", "open", "review", "working", "started"}
+
+
+def status_class(value: Any) -> str:
+    slug = "".join(character if character.isalnum() or character == "_" else "-" for character in clean_text(value).lower())
+    return slug.strip("-") or "unknown"
+
+
+def status_label(value: Any) -> str:
+    key = clean_text(value).lower()
+    if not key:
+        return "Unknown"
+    return STATUS_LABELS.get(key, key.replace("_", " ").capitalize())
+
+
+def harness_key(value: Any) -> str:
+    key = clean_text(value).lower()
+    if not key:
+        return ""
+    for known in HARNESS_LABELS:
+        if key == known or key.startswith(known):
+            return known
+    return "other"
+
+
+def infer_harness(agent: dict[str, Any]) -> str:
+    key = harness_key(agent.get("cli")) or harness_key(agent.get("harness"))
+    if key and key != "other":
+        return key
+    model = clean_text(agent.get("model")).lower()
+    for needle, _provider in MODEL_PROVIDERS:
+        if needle in model:
+            if needle in {"claude", "fable", "opus", "sonnet", "haiku"}:
+                return "claude"
+            if needle in {"gpt", "codex", "o1", "o3", "o4"}:
+                return "codex"
+            if needle == "grok":
+                return "grok"
+            if needle in {"kimi", "moonshot"}:
+                return "kimi"
+            if needle == "gemini":
+                return "gemini"
+            break
+    if str(agent.get("role") or "").lower() == "human" or str(agent.get("id") or "") == "operator":
+        return "human"
+    identity = clean_text(f"{agent.get('id') or ''} {agent.get('name') or ''}").lower()
+    for known in HARNESS_LABELS:
+        if known in identity:
+            return known
+    return key or "other"
+
+
+def harness_label(key: str) -> str:
+    if key == "human":
+        return "Human"
+    return HARNESS_LABELS.get(key, ("Other harness", "?"))[0]
+
+
+def provider_label(key: str, model: Any) -> str:
+    text = clean_text(model).lower()
+    for needle, provider in MODEL_PROVIDERS:
+        if needle in text:
+            return provider
+    return HARNESS_PROVIDERS.get(key, "")
+
+
+def monogram_text(value: Any) -> str:
+    text = clean_text(value)
+    for character in text:
+        if character.isalnum():
+            return character.upper()
+    return "?"
+
+
+PROVIDER_NAMES = {
+    "anthropic": "Anthropic",
+    "openai": "OpenAI",
+    "xai": "xAI",
+    "cursor": "Cursor",
+    "zai": "Z.ai",
+    "moonshot": "Moonshot AI",
+    "google": "Google",
+    "deepseek": "DeepSeek",
+    "alibaba": "Alibaba",
+    "meta": "Meta",
+    "mistral": "Mistral",
+    "opencode": "OpenCode",
+    "aider": "Aider",
+    "human": "Human operator",
+    "agent": "Agent",
+}
+MODEL_PROVIDER_KEYS = (
+    ("claude", "anthropic"),
+    ("fable", "anthropic"),
+    ("mythos", "anthropic"),
+    ("opus", "anthropic"),
+    ("sonnet", "anthropic"),
+    ("haiku", "anthropic"),
+    ("gpt", "openai"),
+    ("codex", "openai"),
+    ("o1", "openai"),
+    ("o3", "openai"),
+    ("o4", "openai"),
+    ("grok", "xai"),
+    ("kimi", "moonshot"),
+    ("moonshot", "moonshot"),
+    ("glm", "zai"),
+    ("zhipu", "zai"),
+    ("gemini", "google"),
+    ("deepseek", "deepseek"),
+    ("qwen", "alibaba"),
+    ("llama", "meta"),
+    ("mistral", "mistral"),
+    ("mixtral", "mistral"),
+    ("devstral", "mistral"),
+    ("cursor", "cursor"),
+    ("composer", "cursor"),
+)
+HARNESS_PROVIDER_KEYS = {
+    "claude": "anthropic",
+    "codex": "openai",
+    "grok": "xai",
+    "kimi": "moonshot",
+    "gemini": "google",
+    "cursor": "cursor",
+    "opencode": "opencode",
+    "aider": "aider",
+    "human": "human",
+}
+# Monochrome marks, 24x24, painted with currentColor so every theme can tint them.
+PROVIDER_MARKS = {
+    "anthropic": '<path fill="currentColor" d="M17.3041 3.541h-3.6718l6.696 16.918H24Zm-10.6082 0L0 20.459h3.7442l1.3693-3.5527h7.0052l1.3693 3.5528h3.7442L10.5363 3.5409Zm-.3712 10.2232 2.2914-5.9456 2.2914 5.9456Z"/>',
+    "openai": '<path fill="currentColor" d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z"/>',
+    "xai": '<path fill="currentColor" d="M2.6 3h4.1L21.6 21h-4.1zM21.4 3l-8 10.1-2-2.5L17.3 3zM2.4 21l8-10.1 2 2.6L6.5 21z"/>',
+    "cursor": '<path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" d="M12 2.4l8.4 4.8v9.6L12 21.6l-8.4-4.8V7.2z"/><path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" d="M3.6 7.2L12 12l8.4-4.8M12 12v9.6"/>',
+    "zai": '<path fill="currentColor" d="M4 3.5h16v3.2L9.9 17.4H20v3.1H4v-3.2L14.1 6.6H4z"/>',
+    "moonshot": '<path fill="currentColor" d="M14.2 2.2a10 10 0 1 0 7.6 16.6A8.6 8.6 0 0 1 14.2 2.2z"/>',
+    "google": '<path fill="currentColor" d="M12 1.5c.7 5.9 4.6 9.8 10.5 10.5-5.9.7-9.8 4.6-10.5 10.5C11.3 16.6 7.4 12.7 1.5 12 7.4 11.3 11.3 7.4 12 1.5z"/>',
+    "deepseek": '<path fill="currentColor" d="M21.6 6.2c-.7.6-1.5 1.7-2 2.6-1.7-2.2-4.4-3.5-7.4-3.5-4.7 0-8.6 3.1-9.8 7.3 1 .9 2.2 1.6 3.5 2.1l-1.2 3.6 3.6-2.4c.9.4 1.9.6 2.9.7L10.5 19h3.4l-.1-2.4c3.5-.4 6.3-2.8 7.1-6.1.9-.6 1.6-1.6 2-2.8.2-.6-.3-1.2-.9-1.1-.2 0-.3 0-.4-.4zM9 10.6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>',
+    "alibaba": '<path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" d="M12 2.5l8.2 4.75v9.5L12 21.5l-8.2-4.75v-9.5z"/><path fill="currentColor" d="M12 7.6l4.1 2.35v4.1L12 16.4l-4.1-2.35v-4.1z"/>',
+    "meta": '<path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" d="M6.6 6.8C3.6 6.8 2 10 2 12s1.6 5.2 4.6 5.2c4.4 0 6.4-10.4 10.8-10.4 3 0 4.6 3.2 4.6 5.2s-1.6 5.2-4.6 5.2c-4.4 0-6.4-10.4-10.8-10.4z"/>',
+    "mistral": '<path fill="currentColor" d="M2 3h4v4H2zm16 0h4v4h-4zM2 7h8v4H2zm12 0h8v4h-8zM2 11h20v4H2zm0 4h4v4H2zm8 0h4v4h-4zm8 0h4v4h-4zM2 19h4v2H2zm16 0h4v2h-4z"/>',
+    "opencode": '<path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" d="M4 6l6 6-6 6M12.5 18h7.5"/>',
+    "aider": '<path fill="currentColor" d="M12 3l8 18h-3.3l-2-4.9H9.3L7.3 21H4zm-1.8 10.3h3.6L12 8.6z"/>',
+    "human": '<circle fill="currentColor" cx="12" cy="7.5" r="4"/><path fill="currentColor" d="M4 21c0-4.4 3.6-7.5 8-7.5s8 3.1 8 7.5z"/>',
+    "agent": '<circle fill="currentColor" cx="12" cy="12" r="3.2"/><circle fill="none" stroke="currentColor" stroke-width="1.8" cx="12" cy="12" r="8.5"/>',
+}
+EFFORT_TOKENS = ("minimal", "low", "medium", "high", "xhigh", "max", "ultra")
+MODEL_TOKEN_CASE = {
+    "gpt": "GPT",
+    "glm": "GLM",
+    "o1": "o1",
+    "o3": "o3",
+    "o4": "o4",
+    "k2": "K2",
+    "k1.5": "K1.5",
+    "r1": "R1",
+    "v3": "V3",
+    "ai": "AI",
+    "xai": "xAI",
+}
+GENERIC_ROLES = {"", "worker", "agent", "human", "interactive", "message peer", "unknown", "none", "n/a"}
+
+
+def provider_key(harness: Any, model: Any = "", agent: dict[str, Any] | None = None) -> str:
+    agent = agent or {}
+    text = clean_text(model or agent.get("model")).lower()
+    if not text:
+        text = clean_text(agent.get("id")).lower()
+    for needle, key in MODEL_PROVIDER_KEYS:
+        if needle in text:
+            return key
+    key = HARNESS_PROVIDER_KEYS.get(clean_text(harness).lower())
+    if key:
+        return key
+    if str(agent.get("role") or "").lower() == "human" or str(agent.get("id") or "") == "operator":
+        return "human"
+    return "agent"
+
+
+def provider_name(key: str) -> str:
+    return PROVIDER_NAMES.get(key, "Agent")
+
+
+def split_model_effort(model: Any) -> tuple[str, str]:
+    """Split a trailing effort token off a model string: 'gpt-5.6-sol-high' -> ('gpt-5.6-sol', 'high')."""
+    text = clean_text(model)
+    lowered = text.lower()
+    for token in sorted(EFFORT_TOKENS, key=len, reverse=True):
+        for separator in ("-", "_", " ", ":", "/"):
+            suffix = separator + token
+            if lowered.endswith(suffix) and len(lowered) > len(suffix):
+                return text[: -len(suffix)], token
+    return text, ""
+
+
+def agent_effort(agent: dict[str, Any]) -> str:
+    for key in ("effort", "reasoningEffort", "reasoning_effort", "reasoning", "thinking", "thinkingLevel", "thinking_level"):
+        value = agent.get(key)
+        if isinstance(value, dict):
+            value = value.get("effort") or value.get("level")
+        text = clean_text(value).lower()
+        if text and text not in {"none", "off", "false", "default", "auto"}:
+            return text
+    return split_model_effort(agent.get("model"))[1]
+
+
+def model_display(model: Any, effort: Any = "") -> str:
+    """Turn a model id into a readable name: 'claude-fable-5-1' -> 'Fable 5.1', 'gpt-5.6-sol' -> 'GPT 5.6 sol'."""
+    text, inline_effort = split_model_effort(model)
+    effort = clean_text(effort).lower() or inline_effort
+    text = clean_text(text)
+    if not text:
+        return ""
+    if text.lower() == "control-panel":
+        return "Control panel"
+    if "/" in text:
+        text = text.rsplit("/", 1)[-1]
+    tokens = [token for token in re.split(r"[-_\s]+", text) if token]
+    if not tokens:
+        return ""
+    lowered = [token.lower() for token in tokens]
+    if lowered[0] in {"claude", "anthropic"} and len(tokens) > 1 and lowered[1] in {"fable", "mythos", "opus", "sonnet", "haiku"}:
+        tokens, lowered = tokens[1:], lowered[1:]
+    words: list[str] = []
+    for token, low in zip(tokens, lowered):
+        if re.fullmatch(r"\d{8}", low):
+            continue  # drop date stamps like 20251001
+        if re.fullmatch(r"\d+(\.\d+)?", low) and words and re.search(r"\d$", words[-1]) and "." not in words[-1].split(" ")[-1]:
+            words[-1] = f"{words[-1]}.{low}"
+            continue
+        if low in MODEL_TOKEN_CASE:
+            words.append(MODEL_TOKEN_CASE[low])
+        elif re.fullmatch(r"\d+(\.\d+)?", low):
+            words.append(low)
+        elif len(low) <= 2 and low.isalpha():
+            words.append(low.upper())
+        else:
+            words.append(token[0].upper() + token[1:] if len(words) == 0 else token.lower())
+    label = " ".join(words)
+    if effort:
+        label = f"{label} {effort}"
+    return label
+
+
+def agent_title(agent: dict[str, Any]) -> str:
+    """The name a human would use for an agent: its role, else its display name, else its id."""
+    role = clean_text(agent.get("role"))
+    if role.lower() not in GENERIC_ROLES:
+        return role
+    name = clean_text(agent.get("name"))
+    agent_id = clean_text(agent.get("id"))
+    if name and name != agent_id:
+        return name
+    return agent_id or "Unknown agent"
+
+
+def agent_model_line(agent: dict[str, Any], with_provider: bool = False) -> str:
+    key = provider_key(infer_harness(agent), agent.get("model"), agent)
+    label = model_display(agent.get("model"), agent_effort(agent))
+    if not label:
+        label = "Model not reported" if key in {"agent", "human"} else provider_name(key)
+    if with_provider and key not in {"agent", "human"} and provider_name(key).lower() not in label.lower():
+        return f"{provider_name(key)} {label}"
+    return label
+
+
+def avatar_html(agent: dict[str, Any] | None = None, size: str = "", harness: str = "", model: Any = "", label: str = "") -> str:
+    agent = agent or {}
+    harness = harness or infer_harness(agent)
+    key = provider_key(harness, model or agent.get("model"), agent)
+    mark = PROVIDER_MARKS.get(key, PROVIDER_MARKS["agent"])
+    title = label or " · ".join(part for part in (provider_name(key), model_display(model or agent.get("model"))) if part)
+    classes = " ".join(part for part in ("avatar", size, f"p-{key}") if part)
+    return (
+        f'<span class="{classes}" title="{esc(title)}" aria-hidden="true">'
+        f'<svg viewBox="0 0 24 24" focusable="false">{mark}</svg></span>'
+    )
+
+
+def monogram_html(name: Any, harness: str, size: str = "") -> str:
+    """Compatibility shim: callers that only know an id and a harness get a provider mark."""
+    size = {"monogram": "", "monogram-s": "avatar-s", "monogram-l": "avatar-l"}.get(size, size)
+    return avatar_html({"id": clean_text(name)}, size=size, harness=harness)
+
+
+def task_state_class(value: Any) -> str:
+    key = clean_text(value).lower()
+    return TASK_STATE_CLASSES.get(key, "idle")
+
+
+def task_state_label(value: Any) -> str:
+    key = clean_text(value).lower()
+    return key.replace("_", " ").capitalize() if key else "Unknown"
+
+
+def format_short(value: Any) -> str:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return "0"
+    if number >= 1_000_000:
+        return f"{number / 1_000_000:.1f}M".replace(".0M", "M")
+    if number >= 10_000:
+        return f"{number / 1_000:.1f}K".replace(".0K", "K")
+    return f"{number:,}"
+
+
 class Dashboard:
     def __init__(self, projects: list[ProjectSource], state_store: ConversationStateStore, settings: argparse.Namespace | None = None) -> None:
         self.projects = {project.key: project for project in projects}
@@ -1199,15 +1733,19 @@ class Dashboard:
 
     def catalog(self) -> list[dict[str, Any]]:
         pinned_keys = self.state_store.pinned_projects()
+        hidden_keys = set(self.state_store.hidden_projects())
         pinned_rank = {key: index for index, key in enumerate(pinned_keys)}
         items = []
         for project in self.projects.values():
             item = project.summary()
             item["kind"] = project.kind
-            item["pinned"] = item["key"] in pinned_rank
+            item["hidden"] = item["key"] in hidden_keys
+            item["pinned"] = item["key"] in pinned_rank and not item["hidden"]
             items.append(item)
 
         def sort_key(item: dict[str, Any]) -> tuple[int, int, str]:
+            if item["hidden"]:
+                return (3, 0, item["name"].casefold())
             if item["pinned"]:
                 return (0, pinned_rank.get(item["key"], 10_000), item["name"].casefold())
             if item.get("kind") != "workspace":
@@ -1216,11 +1754,54 @@ class Dashboard:
 
         return sorted(items, key=sort_key)
 
+    def visible_catalog(self) -> list[dict[str, Any]]:
+        return [item for item in self.catalog() if not item.get("hidden")]
+
+    def hidden_notice(self, project: ProjectSource) -> str:
+        if project.key not in self.state_store.hidden_projects():
+            return ""
+        return (
+            f'<aside class="notice notice-hidden">This project is hidden from the register and the dock. '
+            f'<form class="inline-form" method="post" action="/project/{esc(project.key)}/flags/unhide">'
+            f'<input type="hidden" name="csrf" value="{esc(self.csrf_token)}">'
+            f'<button class="link-btn" type="submit">Show it again</button></form></aside>'
+        )
+
     def project(self, key: str) -> ProjectSource:
         project = self.projects.get(key)
         if project is None:
             raise KeyError(key)
         return project
+
+    @staticmethod
+    def agent_index(agents: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        index: dict[str, dict[str, Any]] = {}
+        for agent in agents:
+            agent_id = clean_text(agent.get("id"))
+            if agent_id and agent_id not in index:
+                index[agent_id] = agent
+        return index
+
+    @staticmethod
+    def who(index: dict[str, dict[str, Any]], agent_id: Any) -> dict[str, Any]:
+        key = clean_text(agent_id)
+        if key in index:
+            return index[key]
+        if key in {"operator", "human"}:
+            return {"id": key, "name": "Operator", "role": "human", "model": ""}
+        if key == "all":
+            return {"id": key, "name": "All project agents", "role": "", "model": ""}
+        return {"id": key, "name": key, "role": "", "model": ""}
+
+    def who_label(self, index: dict[str, dict[str, Any]], agent_id: Any) -> str:
+        agent = self.who(index, agent_id)
+        title = agent_title(agent)
+        raw = clean_text(agent_id)
+        tip = raw if raw and raw != title else ""
+        return f'<span class="who" title="{esc(tip)}">{esc(title)}</span>' if tip else f'<span class="who">{esc(title)}</span>'
+
+    def who_names(self, index: dict[str, dict[str, Any]], ids: list[Any]) -> str:
+        return ", ".join(agent_title(self.who(index, item)) for item in ids)
 
     def known_agent_ids(self, project: ProjectSource) -> set[str]:
         return {str(agent.get("id")) for agent in project.listed_agents() if agent.get("id")}
@@ -1414,7 +1995,7 @@ class Dashboard:
               {box_field}
               <label class="sr-only" for="{esc(control_id)}">Role for {esc(subject_id)}</label>
               <div class="role-control-fields">
-                <input id="{esc(control_id)}" name="role" list="role-presets" value="{esc(current_role)}" maxlength="{MAX_ROLE_LENGTH}" autocomplete="off" required>
+                <input id="{esc(control_id)}" name="role" list="role-presets" value="{esc(current_role)}" maxlength="{MAX_ROLE_LENGTH}" autocomplete="off" required placeholder="Role">
                 <button class="btn btn-small" type="submit">Save</button>
               </div>
             </form>
@@ -1428,35 +2009,150 @@ class Dashboard:
           <p class="role-effect role-effect-{esc(effect_kind)}">{esc(effect_label)}</p>
         </div>"""
 
+    # ---------- shared fragments ----------
+
+    def broker_status(self) -> dict[str, Any]:
+        bus_url = ""
+        for project in self.projects.values():
+            if project.kind == "workspace":
+                bus_url = project.bus_url
+                break
+        if not bus_url and self.settings is not None:
+            bus_url = str(getattr(self.settings, "live_bus_url", "") or "")
+        if not bus_url:
+            return {"known": False, "reachable": False, "live": 0, "waiting": 0, "stalled": 0, "observed": "", "error": ""}
+        probe = ProjectSource("probe", "Probe", "Probe", "", "", "workspace", bus_url=bus_url)
+        snapshot = probe._live_snapshot()
+        roster = snapshot.get("roster", [])
+        roster = roster if isinstance(roster, list) else []
+        live = [
+            item
+            for item in roster
+            if isinstance(item, dict) and item.get("workdir") and str(item.get("status") or "") not in {"offline", "unregistered"}
+        ]
+        waiting = snapshot.get("waiting", [])
+        return {
+            "known": True,
+            "reachable": snapshot.get("_reachable", True) is not False,
+            "live": len(live),
+            "waiting": len(waiting) if isinstance(waiting, list) else 0,
+            "stalled": sum(1 for item in live if item.get("stalled")),
+            "observed": clean_text(snapshot.get("_observedAt")),
+            "error": clean_text(snapshot.get("_error")),
+        }
+
+    def render_live_pill(self, broker: dict[str, Any], compact: bool = False) -> str:
+        if not broker.get("known"):
+            return '<span class="live-pill" data-broker-state="unknown"><span class="dot is-ring"></span><span class="text">Broker</span> <b>not configured</b></span>'
+        if not broker.get("reachable"):
+            seen = f' · <span class="text">last seen {esc(display_time(broker.get("observed")))}</span>' if broker.get("observed") else ""
+            return (
+                f'<span class="live-pill" data-broker-state="disconnected" title="{esc(broker.get("error") or "AgentBus broker unavailable")}">'
+                f'<span class="dot dot-crit is-ring"></span><span class="text">Broker</span> <b>disconnected</b>{seen}</span>'
+            )
+        stalled = f' · <b>{broker["stalled"]}</b> stalled' if broker.get("stalled") else ""
+        waiting = "" if compact else f' · <b>{broker["waiting"]}</b> waiting'
+        return (
+            f'<span class="live-pill" data-broker-state="connected"><span class="dot dot-ok"></span>'
+            f'<span class="text">Broker</span> <b>connected</b><span class="pill-counts"> · <b>{broker["live"]}</b> live{waiting}{stalled}</span></span>'
+        )
+
+    @staticmethod
+    def status_pill(status: Any, hook: bool = False) -> str:
+        klass = status_class(status)
+        attrs = ' data-agent-status' if hook else ""
+        label = f'<span data-agent-status-label>{esc(status_label(status))}</span>' if hook else esc(status_label(status))
+        return f'<span class="status-pill status-{esc(klass)}"{attrs}><span class="dot"></span>{label}</span>'
+
+    @staticmethod
+    def harness_chip(key: str) -> str:
+        if not key:
+            return ""
+        return f'<span class="harness-chip"><span class="swatch h-{esc(key)}"></span>{esc(harness_label(key))}</span>'
+
+    @staticmethod
+    def kind_label(kind: str) -> str:
+        return {"workspace": "Local workspace", "coordinator": "Coordinator source", "agent-bus": "Bus history source"}.get(kind, kind)
+
+    @staticmethod
+    def cell(label: str, inner: str, klass: str) -> str:
+        return f'<div class="{klass}"><span class="cell-label">{esc(label)}</span>{inner}</div>'
+
+    def render_mascot(self) -> str:
+        return """
+          <figure class="mascot">
+            <div class="mascot-photo">
+              <img class="mascot-plain" src="/assets/home-cat.jpg" alt="A long-haired grey tabby cat sitting on a kitchen counter">
+              <img class="mascot-evil" src="/assets/home-cat-evil.jpg?v=cape" alt="The same cat with MS Paint horns, a cape, a pitchfork, and a dead mouse">
+            </div>
+            <figcaption>
+              <strong>Bus cat is on duty.</strong>
+              <span class="mascot-caption-plain">Watching every project from the counter. Pin the ones you keep opening, hide the ones you don’t.</span>
+              <span class="mascot-caption-evil">Evil mode engaged. The mouse had it coming. Pin the projects you keep opening, hide the rest.</span>
+            </figcaption>
+          </figure>
+        """
+
+    @staticmethod
+    def empty_state(title: str, copy: str, actions: str = "", compact: bool = False, cat: bool = False) -> str:
+        if cat:
+            icon = (
+                '<span class="empty-cat" aria-hidden="true"><img class="mascot-plain" src="/assets/home-cat.jpg" alt="">'
+                '<img class="mascot-evil" src="/assets/home-cat-evil.jpg?v=cape" alt=""></span>'
+            )
+        else:
+            icon = '<span class="empty-icon" aria-hidden="true"><img src="/assets/b-logo.png?v=cat" alt=""></span>'
+        klass = "empty-state empty-compact" if compact else "empty-state"
+        buttons = f'<div class="empty-actions">{actions}</div>' if actions else ""
+        return f'<div class="{klass}">{icon}<h3>{esc(title)}</h3><p>{copy}</p>{buttons}</div>'
+
+    # ---------- project register ----------
+
     def project_filter_text(self, item: dict[str, Any]) -> str:
         return clean_text(
-            " ".join(
-                str(item.get(key, ""))
-                for key in ("name", "short_name", "path", "description", "kind")
-            )
+            " ".join(str(item.get(key, "")) for key in ("name", "short_name", "path", "description", "kind"))
         ).lower()
 
-    def render_project_pin_form(self, item: dict[str, Any]) -> str:
+    def render_project_pin_form(self, item: dict[str, Any], compact: bool = False) -> str:
         pinned = bool(item.get("pinned"))
         action = "unpin" if pinned else "pin"
         label = "Unpin" if pinned else "Pin"
+        klass = "dock-pin" if compact else "flag-form"
+        text = ("★" if pinned else "☆") if compact else label
+        button_class = "" if compact else ' class="flag-btn"'
         return (
-            f'<form class="project-pin-form" method="post" action="/project/{esc(item["key"])}/flags/{action}" data-project-pin>'
+            f'<form class="{klass}" method="post" action="/project/{esc(item["key"])}/flags/{action}" data-project-pin>'
             f'<input type="hidden" name="csrf" value="{esc(self.csrf_token)}">'
-            f'<button type="submit" aria-pressed="{"true" if pinned else "false"}" aria-label="{label} {esc(item["short_name"])}">{label}</button>'
+            f'<button{button_class} type="submit" aria-pressed="{"true" if pinned else "false"}" aria-label="{label} {esc(item["short_name"])}" title="{label}">{text}</button>'
             f"</form>"
         )
 
-    def render_project_nav_item(self, item: dict[str, Any], project_key: str) -> str:
-        selected_class = " selected-project" if project_key == item["key"] else ""
-        pinned_class = " is-pinned" if item.get("pinned") else ""
+    def render_project_hide_form(self, item: dict[str, Any]) -> str:
+        hidden = bool(item.get("hidden"))
+        action = "unhide" if hidden else "hide"
+        label = "Show" if hidden else "Hide"
         return (
-            f'<div class="project-nav-item{pinned_class}" data-project-item data-project-key="{esc(item["key"])}" '
+            f'<form class="flag-form" method="post" action="/project/{esc(item["key"])}/flags/{action}" data-project-hide>'
+            f'<input type="hidden" name="csrf" value="{esc(self.csrf_token)}">'
+            f'<button class="flag-btn" type="submit" aria-pressed="{"true" if hidden else "false"}" aria-label="{label} {esc(item["short_name"])}">{label}</button>'
+            f"</form>"
+        )
+
+    def render_project_flag_forms(self, item: dict[str, Any]) -> str:
+        pin = "" if item.get("hidden") else self.render_project_pin_form(item)
+        return f'<div class="project-card-flags">{pin}{self.render_project_hide_form(item)}</div>'
+
+    def render_project_nav_item(self, item: dict[str, Any], project_key: str) -> str:
+        selected_class = " is-selected" if project_key == item["key"] else ""
+        pinned_class = " is-pinned" if item.get("pinned") else ""
+        live_class = " is-live" if item.get("agents") and item.get("kind") == "workspace" else ""
+        return (
+            f'<div class="dock-item{pinned_class}" data-project-item data-project-key="{esc(item["key"])}" '
             f'data-filter-text="{esc(self.project_filter_text(item))}" data-pinned="{"1" if item.get("pinned") else "0"}">'
-            f'<a class="nav-link project-nav-link{selected_class}" href="/project/{esc(item["key"])}" title="{esc(item["name"])}">'
-            f'<span class="nav-glyph">{"*" if item.get("pinned") else "›"}</span><span>{esc(item["short_name"])}</span>'
-            f'<span class="nav-count">{item["agents"]}</span></a>'
-            f"{self.render_project_pin_form(item)}</div>"
+            f'<a class="dock-link{selected_class}" href="/project/{esc(item["key"])}" title="{esc(item["name"])}">'
+            f'<span class="dock-glyph">{esc(monogram_text(item["short_name"]))}</span><span>{esc(item["short_name"])}</span>'
+            f'<span class="dock-count{live_class}">{item["agents"]}</span></a>'
+            f"{self.render_project_pin_form(item, compact=True)}</div>"
         )
 
     def render_project_strip(self, item: dict[str, Any]) -> str:
@@ -1465,74 +2161,111 @@ class Dashboard:
             if not item.get("available") and item.get("error")
             else ""
         )
+        live = bool(item.get("agents")) and item.get("kind") == "workspace"
+        agents_stat = (
+            f'<span class="is-live"><span class="dot dot-ok"></span><b>{item["agents"]}</b> attached</span>'
+            if live
+            else f'<span><b>{item["agents"]}</b> agents</span>'
+        )
         return (
-            f'<article class="project-strip" data-project-item data-project-key="{esc(item["key"])}" '
+            f'<article class="project-card" data-project-item data-project-key="{esc(item["key"])}" '
             f'data-filter-text="{esc(self.project_filter_text(item))}" data-pinned="{"1" if item.get("pinned") else "0"}">'
-            f'<a class="project-strip-open" href="/project/{esc(item["key"])}">'
-            f'<span class="project-strip-name">{esc(item["name"])}</span>'
-            f'<span class="project-strip-path">{esc(item["path"])}</span>'
-            f'<span class="project-strip-meta"><span><b>{item["agents"]}</b> agents</span>'
-            f'<span><b>{item["messages"]}</b> messages</span></span>{error}</a>'
-            f"{self.render_project_pin_form(item)}</article>"
+            f'<a class="project-card-main" href="/project/{esc(item["key"])}">'
+            f'<span class="project-card-icon kind-{esc(item.get("kind") or "workspace")}" aria-hidden="true">{esc(monogram_text(item["short_name"]))}</span>'
+            f'<span class="project-card-copy"><span class="project-card-name">{esc(item["name"])}</span>'
+            f'<span class="project-card-path">{esc(item["path"])}</span></span>'
+            f'<span class="project-card-stats">{agents_stat}<span><b>{item["messages"]}</b> messages</span></span>{error}</a>'
+            f"{self.render_project_flag_forms(item)}</article>"
         )
 
-    def render_project_bay(self, bay_id: str, title: str, items: list[dict[str, Any]]) -> str:
+    def render_project_bay(self, bay_id: str, title: str, items: list[dict[str, Any]], note: str = "") -> str:
         if not items and bay_id != "pinned":
             return ""
         if not items:
-            rows = '<p class="project-bay-empty">Nothing pinned yet. Pin a project to keep it at the top.</p>'
+            rows = '<p class="bay-empty">Nothing pinned yet. Pin a project to keep it at the top of the register and the dock.</p>'
         else:
             rows = "".join(self.render_project_strip(item) for item in items)
+        note_html = f'<span class="quiet">{esc(note)}</span>' if note else ""
         return (
-            f'<section class="project-bay" data-project-bay="{esc(bay_id)}" aria-labelledby="{esc(bay_id)}-title">'
-            f'<h2 id="{esc(bay_id)}-title">{esc(title)}</h2>'
-            f'<div class="project-bay-list">{rows}</div></section>'
+            f'<section class="bay" data-project-bay="{esc(bay_id)}" aria-labelledby="{esc(bay_id)}-title">'
+            f'<div class="bay-head"><h2 id="{esc(bay_id)}-title">{esc(title)}</h2><span class="bay-count">{len(items)}</span>'
+            f"{note_html}</div>"
+            f'<div class="bay-list">{rows}</div></section>'
+        )
+
+    def render_hidden_bay(self, items: list[dict[str, Any]]) -> str:
+        if not items:
+            return ""
+        rows = "".join(self.render_project_strip(item) for item in items)
+        return (
+            f'<details class="bay" data-project-bay="hidden" data-hidden-bay>'
+            f'<summary><span class="chev" aria-hidden="true">›</span><h2 id="hidden-title">Hidden</h2><span class="bay-count">{len(items)}</span>'
+            f'<span class="quiet">Hidden projects stay out of the dock until you show them again.</span></summary>'
+            f'<div class="bay-list">{rows}</div></details>'
         )
 
     def render_project_register(self) -> str:
         items = self.catalog()
-        pinned = [item for item in items if item.get("pinned")]
-        sources = [item for item in items if not item.get("pinned") and item.get("kind") != "workspace"]
-        local = [item for item in items if not item.get("pinned") and item.get("kind") == "workspace"]
+        visible = [item for item in items if not item.get("hidden")]
+        hidden = [item for item in items if item.get("hidden")]
+        pinned = [item for item in visible if item.get("pinned")]
+        sources = [item for item in visible if not item.get("pinned") and item.get("kind") != "workspace"]
+        local = [item for item in visible if not item.get("pinned") and item.get("kind") == "workspace"]
+        if hidden and not visible:
+            empty = "Every project is hidden. Open Hidden below and choose Show to bring one back."
+        else:
+            empty = "No projects match that search."
         return f"""
-          <section class="project-register" aria-label="Project register">
-            <div class="project-toolbar">
-              <label class="project-search">
+          <section class="register" aria-label="Project register">
+            <div class="register-toolbar">
+              <label class="register-search">
                 <span class="sr-only">Search projects</span>
-                <input type="search" data-project-search placeholder="Search projects" autocomplete="off" spellcheck="false">
+                <input type="search" data-project-search placeholder="Search projects by name or path  ( / )" autocomplete="off" spellcheck="false">
+                <span class="register-tally" aria-live="polite"><span data-project-count>{len(visible)}</span> of {len(items)}</span>
               </label>
-              <p class="project-tally"><span data-project-count>{len(items)}</span> of {len(items)}</p>
             </div>
-            <p class="project-empty" data-project-empty hidden>No projects match that search.</p>
+            <p class="register-empty" data-project-empty{" hidden" if visible else ""}>{esc(empty)}</p>
             {self.render_project_bay("pinned", "Pinned", pinned)}
-            {self.render_project_bay("sources", "Coordination", sources)}
-            {self.render_project_bay("local", "Local", local)}
+            {self.render_project_bay("sources", "Coordination sources", sources, "Attached databases, not folders.")}
+            {self.render_project_bay("local", "Local projects", local)}
+            {self.render_hidden_bay(hidden)}
           </section>
         """
 
+    # ---------- shell ----------
+
     def shell(self, title: str, body: str, project_key: str = "", active: str = "projects") -> str:
         summaries = self.catalog()
+        visible = [item for item in summaries if not item.get("hidden")]
         project = self.projects.get(project_key)
-        project_links = [self.render_project_nav_item(summary, project_key) for summary in summaries]
+        broker = self.broker_status()
+        project_links = [self.render_project_nav_item(summary, project_key) for summary in visible]
         section_links = ""
-        mobile_context = ""
+        crumbs = '<a href="/">Projects</a>'
         if project is not None:
             summary = next(item for item in summaries if item["key"] == project.key)
             active_label = {"project": "Overview", "agents": "Agents", "messages": "Conversations"}.get(active, "Overview")
-            mobile_context = (
-                f'<nav class="mobile-context" aria-label="Breadcrumb"><a href="/">Projects</a><span>/</span>'
-                f'<a href="/project/{esc(project.key)}">{esc(project.short_name)}</a><span>/</span>'
-                f'<strong>{esc(active_label)}</strong></nav>'
+            crumbs = (
+                f'<a href="/">Projects</a><span class="sep">/</span>'
+                f'<a href="/project/{esc(project.key)}">{esc(project.short_name)}</a><span class="sep">/</span>'
+                f"<strong>{esc(active_label)}</strong>"
             )
+            live_class = " is-live" if summary["agents"] and project.kind == "workspace" else ""
             section_links = f"""
-              <div class="nav-label">Workspace</div>
-              <a class="nav-link" href="/project/{esc(project.key)}/agents"{' aria-current="page"' if active == 'agents' else ''}>
-                <span class="nav-glyph">A</span><span>Agents</span><span class="nav-count">{summary['agents']}</span>
+              <div class="dock-label">{esc(project.short_name)}</div>
+              <a class="dock-link" href="/project/{esc(project.key)}"{' aria-current="page"' if active == 'project' else ''}>
+                <span class="dock-glyph">O</span><span>Overview</span>
               </a>
-              <a class="nav-link" href="/project/{esc(project.key)}/messages"{' aria-current="page"' if active == 'messages' else ''}>
-                <span class="nav-glyph">C</span><span>Conversations</span><span class="nav-count">{summary['messages']}</span>
+              <a class="dock-link" href="/project/{esc(project.key)}/agents"{' aria-current="page"' if active == 'agents' else ''}>
+                <span class="dock-glyph">A</span><span>Agents</span><span class="dock-count{live_class}">{summary['agents']}</span>
+              </a>
+              <a class="dock-link" href="/project/{esc(project.key)}/messages"{' aria-current="page"' if active == 'messages' else ''}>
+                <span class="dock-glyph">C</span><span>Conversations</span><span class="dock-count">{summary['messages']}</span>
               </a>
             """
+        elif active == "setup":
+            crumbs = '<a href="/">Projects</a><span class="sep">/</span><strong>Local setup</strong>'
+        project_list = "".join(project_links) or '<p class="dock-empty">No visible projects. Use Hidden on the projects page to show one.</p>'
         return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -1540,67 +2273,73 @@ class Dashboard:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
   <title>{esc(title)} — Agent Bus</title>
-  <script src="/assets/theme.js?v=nav-motion"></script>
-  <link rel="stylesheet" href="/assets/dashboard.css?v=portable-2">
-  <script src="/assets/dashboard.js?v=portable-2" defer></script>
+  <script src="/assets/theme.js?v=switchboard-2"></script>
+  <link rel="stylesheet" href="/assets/dashboard.css?v=switchboard-2">
+  <script src="/assets/dashboard.js?v=switchboard-2" defer></script>
 </head>
 <body data-project="{esc(project_key)}" data-view="{esc(active)}">
   <a class="skip-link" href="#content">Skip to content</a>
-  <div class="app-shell">
-    <aside class="sidebar" id="sidebar" aria-label="Main navigation">
-      <div class="sidebar-head">
-        <div class="sidebar-head-row">
-          <a class="brand" href="/">
-            <span class="brand-mark" aria-hidden="true"><img src="/assets/b-logo.png?v=cat" alt=""></span>
-            <span class="brand-copy"><strong>Agent Bus</strong><small>Local operations</small></span>
-          </a>
-          <button class="nav-toggle" type="button" data-nav-toggle aria-expanded="true" aria-controls="sidebar-scroll">Hide</button>
-        </div>
-        <div class="theme-switch" role="group" aria-label="Theme">
-          <button type="button" data-theme-set="light" aria-pressed="true">Light</button>
-          <button type="button" data-theme-set="dark" aria-pressed="false">Dark</button>
-          <button type="button" data-theme-set="evil" aria-pressed="false">Evil</button>
-        </div>
-      </div>
-      <div class="sidebar-scroll" id="sidebar-scroll">
-        <div class="nav-label">Main menu</div>
-        <a class="nav-link" href="/"{' aria-current="page"' if active == 'projects' else ''}>
-          <span class="nav-glyph">P</span><span>Projects</span><span class="nav-count">{len(summaries)}</span>
+  <header class="topbar">
+    <button class="dock-toggle" type="button" data-nav-toggle aria-expanded="true" aria-controls="sidebar-scroll" aria-label="Hide project dock" title="Hide project dock">
+      <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3 5.5h14M3 10h14M3 14.5h14"/></svg>
+    </button>
+    <a class="brand" href="/">
+      <span class="brand-mark" aria-hidden="true"><img src="/assets/b-logo.png?v=cat" alt=""></span>
+      <span class="brand-name">Agent Bus</span>
+    </a>
+    <nav class="crumbs" aria-label="Breadcrumb">{crumbs}</nav>
+    <span class="topbar-spacer"></span>
+    {self.render_live_pill(broker)}
+    <div class="theme-switch" role="group" aria-label="Theme">
+      <button type="button" data-theme-set="light" aria-pressed="true">Light</button>
+      <button type="button" data-theme-set="dark" aria-pressed="false">Dark</button>
+      <button type="button" data-theme-set="evil" aria-pressed="false">Evil</button>
+    </div>
+    <a class="topbar-link" href="/setup"{' aria-current="page"' if active == 'setup' else ''}>Local setup</a>
+  </header>
+  <div class="frame">
+    <aside class="dock" id="sidebar" aria-label="Project dock">
+      <div class="dock-scroll" id="sidebar-scroll">
+        <label class="dock-search">
+          <span class="sr-only">Search projects</span>
+          <input type="search" data-project-search placeholder="Search projects" autocomplete="off" spellcheck="false">
+        </label>
+        <a class="dock-link" href="/"{' aria-current="page"' if active == 'projects' else ''}>
+          <span class="dock-glyph">P</span><span>All projects</span><span class="dock-count">{len(visible)}</span>
         </a>
-        <div class="project-menu-tools">
-          <label class="project-search project-search-rail">
-            <span class="sr-only">Search projects</span>
-            <input type="search" data-project-search placeholder="Search" autocomplete="off" spellcheck="false">
-          </label>
-        </div>
-        <details class="project-menu" data-project-menu open>
-          <summary class="project-menu-summary">
-            <span>Project selection</span>
-            <span class="nav-count">{len(summaries)}</span>
-          </summary>
-          <div class="project-menu-list">{''.join(project_links)}</div>
+        <details class="dock-group" data-project-menu open>
+          <summary><span><span class="chev" aria-hidden="true">›</span> Projects</span><span class="dock-count">{len(visible)}</span></summary>
+          <div class="dock-list">{project_list}</div>
         </details>
         {section_links}
       </div>
-      <div class="sidebar-foot"><a href="/setup">Local setup</a><span>Runs on this machine</span></div>
+      <div class="dock-foot sidebar-foot"><a href="/setup">Local setup</a><span>Runs on this machine</span></div>
     </aside>
-    <main class="main" id="content" tabindex="-1"><div class="content">{mobile_context}{body}</div></main>
+    <div class="dock-scrim" data-dock-scrim></div>
+    <main class="main" id="content" tabindex="-1"><div class="content">{body}</div></main>
   </div>
 </body>
 </html>"""
 
+    # ---------- setup ----------
+
     def setup_notice(self) -> str:
         if not self.settings:
-            return '<p class="setup-notice"><a href="/setup">Local setup</a></p>'
+            return '<p class="setup-hint"><a href="/setup">Local setup</a></p>'
         local_count = sum(project.kind == "workspace" for project in self.projects.values())
         if not local_count:
-            return '<section class="setup-notice"><h2>Set up this machine</h2><p>Choose a projects folder, then open a project to see its agents and conversations. Coordinator and AgentBus history are optional.</p><a class="btn" href="/setup">Choose projects folder</a></section>'
-        return '<p class="setup-notice">Open a project to see agents and conversations. <a href="/setup">Local setup &amp; connections</a></p>'
+            return (
+                '<section class="setup-card"><div><h2>Set up this machine</h2>'
+                "<p>Choose a projects folder, then open a project to see its agents and conversations. "
+                "Coordinator and AgentBus history are optional.</p></div>"
+                '<a class="btn btn-primary" href="/setup">Choose projects folder</a></section>'
+            )
+        return ""
 
     def setup_page(self, query: dict[str, list[str]], values: dict[str, str] | None = None, error: str = "") -> str:
         settings = self.settings
         if settings is None:
-            return self.shell("Local setup", '<h1>Local setup</h1><p>Start the dashboard with scripts/run_dashboard.sh.</p>')
+            return self.shell("Local setup", '<h1>Local setup</h1><p class="lede">Start the dashboard with scripts/run_dashboard.sh.</p>', active="setup")
         values = values or {}
         saved = read_config(settings.config)
         fields = []
@@ -1608,67 +2347,176 @@ class Dashboard:
             target = getattr(settings, key)
             explicit = key in saved or "AGENT_DASHBOARD_" + key.upper() in os.environ or any(arg.startswith("--" + key.replace("_", "-")) for arg in settings.launch_argv)
             value = values.get(key, str(target) if target is not None and (target.exists() or explicit) else "")
-            fields.append(f'<label class="setup-field" for="setup-{key}"><span>{esc(label)}</span><input id="setup-{key}" aria-label="{esc(label)}" name="{key}" value="{esc(value)}" placeholder="Not configured" spellcheck="false"><small>{esc(helper)}</small></label>')
+            fields.append(
+                f'<label class="setup-field" for="setup-{key}"><span>{esc(label)}</span>'
+                f'<input id="setup-{key}" aria-label="{esc(label)}" name="{key}" value="{esc(value)}" placeholder="Not configured" spellcheck="false">'
+                f"<small>{esc(helper)}</small></label>"
+            )
         roots = values.get("projects_root", "\n".join(str(root) for root in settings.projects_root))
-        statuses = []
-        for key, name in (("coordinator_db", "Coordinator"), ("agent_bus_db", "AgentBus history")):
+        cards = []
+        for key, name, hint in (
+            ("coordinator_db", "Coordinator", "Agents, tasks, review state, and messages from the coordinator database."),
+            ("agent_bus_db", "AgentBus history", "Messages from the optional AgentBus SQLite store."),
+        ):
             project = self.projects.get("coordinator" if key == "coordinator_db" else "liminal")
             summary = project.summary() if project else None
-            state = "Connected" if summary and summary["available"] else "Cannot read source" if summary else "File unavailable — review path below" if saved.get(key) and getattr(settings, key) else "Not configured"
-            statuses.append(f'<li><strong>{name}</strong><span>{state}</span></li>')
+            if summary and summary["available"]:
+                state, klass = "Connected", "working"
+            elif summary:
+                state, klass = "Cannot read source", "failed"
+            elif saved.get(key) and getattr(settings, key):
+                state, klass = "File unavailable", "blocked"
+                hint = f"{hint} The saved path does not resolve to a readable file; review it under Optional sources below."
+            else:
+                state, klass = "Not configured", "idle"
+            cards.append(f'<div class="conn-card"><strong>{name}</strong>{self.status_pill_named(state, klass)}<p>{esc(hint)}</p></div>')
         probe = ProjectSource("setup", "Setup", "Setup", "", "", "workspace", bus_url=settings.live_bus_url)
         snapshot = probe._live_snapshot()
         reachable = snapshot.get("_reachable", True) is not False
-        statuses.append(f'<li><strong>Live broker</strong><span>{"Connected" if reachable else "Disconnected — start your existing AgentBus broker"}</span></li>')
-        notice = f'<p class="flash flash-error" role="alert">{esc(error)}</p>' if error else '<p class="flash" role="status">Setup saved. Open a project to continue.</p>' if query.get("saved") else ""
-        return self.shell("Local setup", f'''
-          <header class="page-head"><div><h1>Local setup</h1><p class="page-copy">Point this dashboard at your projects and existing services. Everything stays on this machine.</p></div><a class="text-link" href="/">Open projects →</a></header>
+        broker_state = "Connected" if reachable else "Disconnected"
+        broker_hint = (
+            f"{settings.live_bus_url}. Agents belong to a project when their workdir matches its folder exactly."
+            if reachable
+            else f"{settings.live_bus_url} is not answering. Start your existing AgentBus broker, then reload."
+        )
+        cards.append(
+            f'<div class="conn-card"><strong>Live broker</strong>{self.status_pill_named(broker_state, "working" if reachable else "failed")}'
+            f"<p>{esc(broker_hint)}</p></div>"
+        )
+        local_count = sum(project.kind == "workspace" for project in self.projects.values())
+        cards.append(
+            f'<div class="conn-card"><strong>Local projects</strong>{self.status_pill_named(f"{local_count} discovered", "active" if local_count else "idle")}'
+            f"<p>{esc(', '.join(str(root) for root in settings.projects_root))}</p></div>"
+        )
+        if error:
+            notice = f'<div class="flash flash-error" role="alert"><div><strong>Setup was not saved</strong>{esc(error)}</div></div>'
+        elif query.get("saved"):
+            notice = '<div class="flash flash-success" role="status"><div>Setup saved. Open a project to continue.</div></div>'
+        else:
+            notice = ""
+        return self.shell(
+            "Local setup",
+            f"""
+          <header class="page-head"><div><p class="kicker">This machine</p><h1>Local setup</h1><p class="lede">Point the dashboard at your projects and existing services. Everything stays on this machine; nothing here starts an agent.</p></div><a class="text-link" href="/">Open projects →</a></header>
           {notice}
-          <section class="connection-status" aria-label="Connection status"><h2>Connections</h2><ul>{''.join(statuses)}</ul><p>Dashboard running. Connected sources can be read; no agents are started here.</p></section>
+          <section class="connections" aria-label="Connection status">{''.join(cards)}</section>
           <form class="setup-form" method="post" action="/setup">
             <input type="hidden" name="csrf" value="{esc(self.csrf_token)}">
             <label class="setup-field" for="projects-root"><span>Projects folder</span><textarea id="projects-root" aria-label="Projects folder" name="projects_root" rows="2" required spellcheck="false" aria-describedby="roots-help">{esc(roots)}</textarea><small id="roots-help">Use ~/Projects or an existing absolute folder path. One root per line. Immediate folders and nested repositories appear in the register.</small></label>
-            <label class="setup-field" for="broker-url"><span>Live AgentBus broker</span><input id="broker-url" aria-label="Live AgentBus broker" name="live_bus_url" value="{esc(values.get('live_bus_url', settings.live_bus_url))}" required spellcheck="false"><small>Default: http://127.0.0.1:7717. Agents belong to a project when their workdir matches its folder exactly.</small></label>
-            <details class="setup-sources"><summary>Optional sources and agent controls</summary><p>Use paths from your existing installations. Leave unused sources blank. This dashboard does not install or start coordination services.</p>{''.join(fields)}</details>
-            <div class="setup-save"><button class="btn" type="submit">Save local setup</button><span>Applies immediately; no supervisor restart.</span></div>
+            <label class="setup-field" for="broker-url"><span>Live AgentBus broker</span><input id="broker-url" aria-label="Live AgentBus broker" name="live_bus_url" value="{esc(values.get('live_bus_url', settings.live_bus_url))}" required spellcheck="false"><small>Default: http://127.0.0.1:7717. Loopback only.</small></label>
+            <details class="setup-sources"><summary>Optional sources and agent controls</summary><div class="setup-sources-body"><p>Use paths from your existing installations. Leave unused sources blank. This dashboard does not install or start coordination services.</p>{''.join(fields)}</div></details>
+            <div class="setup-save"><button class="btn btn-primary" type="submit">Save local setup</button><span>Applies immediately; no supervisor restart.</span></div>
           </form>
           <p class="config-location">Saved in <code>{esc(settings.config)}</code>. Command-line flags override environment variables, which override this file. Edit those overrides at launch if a saved value does not change.</p>
-          <section class="setup-next"><h2>Next: open a project</h2><p>Use <a href="/">Projects</a> to choose a folder, then Agents to check attached identities and usage. Conversations contains Inbox, Archived, and Trash; restoring a conversation returns it to Inbox without changing source history.</p></section>
-        ''')
+          <section class="setup-next"><h2>Next: open a project</h2><p>Use <a href="/">Projects</a> to choose a folder, then Agents to check attached identities, usage, and tasks. Conversations contains Inbox, Archived, and Trash; restoring a conversation returns it to Inbox without changing source history.</p></section>
+        """,
+            active="setup",
+        )
+
+    @staticmethod
+    def status_pill_named(label: str, klass: str) -> str:
+        return f'<span class="status-pill status-{esc(klass)}"><span class="dot"></span>{esc(label)}</span>'
+
+    # ---------- home ----------
 
     def home(self, query: dict[str, list[str]] | None = None) -> str:
+        broker = self.broker_status()
+        items = self.catalog()
+        visible = [item for item in items if not item.get("hidden")]
+        live_projects = [item for item in visible if item.get("kind") == "workspace" and item.get("agents")]
+        total_live = sum(int(item.get("agents") or 0) for item in live_projects)
+        live_chip = (
+            f'<span class="summary-chip"><span class="dot dot-ok"></span><b>{total_live}</b> agent{"s" if total_live != 1 else ""} attached in <b>{len(live_projects)}</b> project{"s" if len(live_projects) != 1 else ""}</span>'
+            if total_live
+            else '<span class="summary-chip"><span class="dot is-ring"></span>No agents attached in visible projects</span>'
+        )
         body = f"""
           {self.flash(query or {})}
-          <header class="page-head home-head"><div><p class="eyeline">Main menu</p><h1>Choose a project</h1><p class="page-copy">Search the local folders and coordination sources. Pin the ones you keep opening.</p></div></header>
+          <header class="page-head"><div><p class="kicker">Switchboard</p><h1>Choose a project</h1><p class="lede">Every folder under your projects roots, plus the coordination sources you attached. Open one to see its agents, tasks, and conversations.</p></div>
+          <div class="home-summary"><span class="summary-chip"><b>{len(visible)}</b> visible · <b>{len(items) - len(visible)}</b> hidden</span>{live_chip}</div></header>
           {self.setup_notice()}
           {self.render_project_register()}
-          <figure class="home-cat">
-            <img class="home-cat-plain" src="/assets/home-cat.jpg" alt="A long-haired grey tabby cat sitting on a kitchen counter">
-            <img class="home-cat-evil" src="/assets/home-cat-evil.jpg?v=cape" alt="The same cat with MS Paint horns, a cape, a pitchfork, and a dead mouse">
-          </figure>
+          {self.render_mascot()}
         """
         return self.shell("Projects", body)
+
+    # ---------- project overview ----------
 
     def project_page(self, project: ProjectSource) -> str:
         summary = project.summary()
         if not summary["available"]:
             return self.error_page(project, summary["error"])
-        recent = [
-            conversation
-            for conversation in group_conversations(project.messages())
-            if self.state_store.status(project.key, conversation["id"]) == "inbox"
-        ][:5]
-        recent_rows = self.render_conversation_teasers(project, recent)
-        body = f"""
-          <header class="page-head"><div><p class="eyeline">Project</p><h1>{esc(project.name)}</h1><p class="page-copy">{esc(project.description)}</p></div><div class="path-chip">{esc(project.path_label)}</div></header>
-          <section class="view-grid" aria-labelledby="choose-view-title">
-            <h2 id="choose-view-title" class="sr-only">Choose a view</h2>
-            <a class="view-card" href="/project/{esc(project.key)}/agents"><span class="view-index">01</span><h2>Agents</h2><p>See live status and start or stop attached supervisors.</p><span class="arrow">→</span></a>
-            <a class="view-card" href="/project/{esc(project.key)}/messages"><span class="view-index">02</span><h2>Conversations</h2><p>Read, archive, trash, restore, and compose project messages.</p><span class="arrow">→</span></a>
+        try:
+            snapshot = project._live_snapshot() if project.kind == "workspace" else None
+            agents = self.apply_saved_agent_roles(project, project.listed_agents(snapshot))
+            messages = project.messages()
+            tasks = project.tasks(snapshot)
+        except (OSError, sqlite3.Error, ValueError) as error:
+            return self.error_page(project, str(error))
+        conversations = group_conversations(messages)
+        for conversation in conversations:
+            conversation["status"] = self.state_store.status(project.key, conversation["id"])
+        inbox = [item for item in conversations if item["status"] == "inbox"]
+        live_agents = [agent for agent in agents if agent.get("listed") not in {"registered", "session"}]
+        registered = [agent for agent in agents if agent.get("listed") == "registered"]
+        open_tasks = [task for task in tasks if clean_text(task.get("state")).lower() in TASK_OPEN_STATES]
+        reachable = snapshot is None or snapshot.get("_reachable", True) is not False
+        if project.kind == "workspace":
+            controllable = sum(1 for agent in live_agents if agent.get("controllable"))
+            agents_sub = f"{controllable} controllable · {len(registered)} registered, not attached" if live_agents or registered else "Attach a supervisor to this folder"
+            source_value = "Connected" if reachable else "Disconnected"
+            source_sub = "Live AgentBus broker" if reachable else "Showing last-known values"
+            source_class = "is-ok" if reachable else "is-crit"
+        else:
+            working = sum(1 for agent in live_agents if clean_text(agent.get("status")).lower() == "working")
+            agents_sub = f"{working} working now"
+            source_value = "Readable"
+            source_sub = self.kind_label(project.kind)
+            source_class = "is-ok"
+        stats = f"""
+          <section class="stat-row" aria-label="Project summary">
+            <div class="stat"><span class="stat-label">Attached agents</span><span class="stat-value">{'<span class="dot dot-ok"></span>' if live_agents else ''}{len(live_agents)}</span><span class="stat-sub">{esc(agents_sub)}</span></div>
+            <div class="stat"><span class="stat-label">Inbox conversations</span><span class="stat-value">{len(inbox)}</span><span class="stat-sub">{len(messages)} messages · {len(conversations)} conversations total</span></div>
+            <div class="stat"><span class="stat-label">Open tasks</span><span class="stat-value">{len(open_tasks)}</span><span class="stat-sub">{len(tasks)} tracked</span></div>
+            <div class="stat"><span class="stat-label">Source</span><span class="stat-value is-text">{esc(source_value)}</span><span class="stat-sub {source_class}">{esc(source_sub)}</span></div>
           </section>
-          <section class="panel" aria-labelledby="recent-title"><div class="panel-head"><h2 id="recent-title">Recent conversations</h2><a class="text-link" href="/project/{esc(project.key)}/messages">View all →</a></div>{recent_rows}</section>
+        """
+        index = self.agent_index(agents)
+        if live_agents:
+            chips = []
+            for agent in live_agents[:8]:
+                detail = " · ".join(part for part in (agent_model_line(agent), clean_text(agent.get("doing"))) if part)
+                chips.append(
+                    f'<a class="agent-chip" href="/project/{esc(project.key)}/agents" title="{esc(agent.get("id"))}">{avatar_html(agent)}'
+                    f'<span class="agent-chip-copy"><strong>{esc(agent_title(agent))}</strong><span>{esc(detail)}</span></span>'
+                    f'{self.status_pill(agent.get("status"))}</a>'
+                )
+            more = f'<p class="panel-foot">{len(live_agents) - 8} more on the Agents page</p>' if len(live_agents) > 8 else ""
+            roster = f'<div class="roster-mini">{"".join(chips)}</div>{more}'
+        else:
+            copy = (
+                "Connect an existing AgentBus supervisor using this project’s exact folder as its workdir."
+                if project.kind == "workspace"
+                else "This source has no agents recorded."
+            )
+            roster = self.empty_state("No agents attached", copy, f'<a class="btn btn-small" href="/project/{esc(project.key)}/agents">Open Agents</a>', compact=True)
+        overview = f"""
+          <div class="grid-2">
+            <section class="panel" aria-labelledby="overview-agents"><div class="panel-head"><div><h2 id="overview-agents">Agents</h2><p>Live status, supervision, usage, and roles.</p></div><a class="text-link" href="/project/{esc(project.key)}/agents">Manage agents →</a></div>{roster}</section>
+            <section class="panel" aria-labelledby="overview-conversations"><div class="panel-head"><div><h2 id="overview-conversations">Recent conversations</h2><p>Inbox only. Archive and Trash are on the Conversations page.</p></div><a class="text-link" href="/project/{esc(project.key)}/messages">View all →</a></div>{self.render_conversation_teasers(project, inbox[:5], index)}</section>
+          </div>
+          {self.render_tasks_panel(project, tasks, limit=6, index=index)}
+        """
+        body = f"""
+          <header class="page-head"><div><p class="kicker">{esc(self.kind_label(project.kind))}</p><h1>{esc(project.name)}</h1><p class="lede">{esc(project.description)}</p></div>
+          <div class="page-side"><span class="tag tag-kind-{esc(project.kind)}">{esc(self.kind_label(project.kind))}</span><span class="path-chip" title="{esc(project.path_label)}">{esc(project.path_label)}</span></div></header>
+          {self.hidden_notice(project)}
+          {stats}
+          {overview}
         """
         return self.shell(project.name, body, project.key, "project")
+
+    # ---------- agents ----------
 
     def render_agent_rows(self, project: ProjectSource, agents: list[dict[str, Any]], include_usage: bool) -> str:
         rows = []
@@ -1676,7 +2524,7 @@ class Dashboard:
             filter_text = clean_text(
                 " ".join(
                     str(agent.get(key, ""))
-                    for key in ("id", "name", "role", "model", "status", "doing", "auth", "role_effect_label", "session_id")
+                    for key in ("id", "name", "role", "model", "status", "doing", "auth", "role_effect_label", "session_id", "harness", "cli", "description")
                 )
             ).lower()
             actions = []
@@ -1684,22 +2532,41 @@ class Dashboard:
                 actions.append(f"""<form class="inline-form" method="post" action="/project/{esc(project.key)}/agents/open-session">
                   <input type="hidden" name="csrf" value="{esc(self.csrf_token)}"><input type="hidden" name="agent_id" value="{esc(agent.get('id'))}"><button class="btn btn-small" type="submit">{esc(agent.get('session_label') or 'Open latest session')}</button></form>""")
             if project.kind == "workspace" and agent.get("controllable"):
-                actions.append(f"""<form class="inline-form" method="post" action="/project/{esc(project.key)}/agents/stop" data-confirm="Stop {esc(agent.get('id'))} and its running child process?">
+                actions.append(f"""<form class="inline-form" method="post" action="/project/{esc(project.key)}/agents/stop" data-confirm="Stop {esc(agent_title(agent))} ({esc(agent.get('id'))}) and its running child process?">
                   <input type="hidden" name="csrf" value="{esc(self.csrf_token)}"><input type="hidden" name="agent_id" value="{esc(agent.get('id'))}"><button class="btn btn-danger btn-small" type="submit">Stop</button></form>""")
-            action = f'<div class="control-stack">{"".join(actions)}</div>' if actions else "—"
-            usage_cell = ""
+            if actions:
+                action = f'<div class="control-stack">{"".join(actions)}</div>'
+            elif agent.get("listed") == "registered":
+                action = '<span class="agent-actions-none">Start from Supervision</span>'
+            else:
+                action = '<span class="agent-actions-none">No controls</span>'
             row_attrs = ""
             if project.kind == "workspace" and agent.get("listed") == "live":
                 control_signature = f"{int(bool(agent.get('session_available')))}|{int(bool(agent.get('controllable')))}"
                 row_attrs = f' data-agent-id="{esc(agent.get("id"))}" data-agent-control-signature="{control_signature}"'
+            harness = infer_harness(agent)
+            model = clean_text(agent.get("model"))
+            model_line = agent_model_line(agent, with_provider=True)
+            auth = clean_text(agent.get("auth")) if project.kind == "workspace" else ""
+            harness_cell = self.cell(
+                "Harness · model",
+                f'{self.harness_chip(harness) if harness and harness != "human" else ""}<span class="model" title="{esc(model)}">{esc(model_line)}</span>'
+                + (f'<span class="auth">{esc(auth)}</span>' if auth else ""),
+                "agent-harness",
+            )
+            usage_cell = ""
             if include_usage:
                 usage = usage_values(agent.get("usage"))
-                usage_cell = f"""<td data-label="Usage"><div class="agent-usage">
+                usage_cell = self.cell(
+                    "Usage",
+                    f"""<div class="agent-usage">
                   <strong data-agent-usage="tokens">{format_count(usage['tokens'])} tokens</strong>
                   <span data-agent-usage="turns">{format_count(usage['turns'])} turns</span>
                   <span data-agent-usage="cost">{format_cost(usage['costUSD'])} equivalent</span>
-                  <small>{esc(agent.get('auth') or 'Unknown subscription')}</small>
-                </div></td>"""
+                  <small>Current broker session</small>
+                </div>""",
+                    "agent-usage-cell",
+                )
             role_subject = "session" if agent.get("listed") == "session" else "agent"
             role_id = str(agent.get("session_id") or agent.get("id") or "") if role_subject == "session" else str(agent.get("id") or "")
             role_control = self.render_role_control(
@@ -1711,18 +2578,165 @@ class Dashboard:
                 str(agent.get("role_effect_label") or "Operator metadata"),
                 suffix=str(agent.get("listed") or "row"),
             )
-            session_note = ""
             session_id = clean_text(agent.get("session_id"))
+            ident_rows = [f'<span class="ident-key">Agent ID</span><code class="ident-value">{esc(agent.get("id"))}</code>']
             if session_id:
-                session_note = f'<div class="mono quiet">session {esc(session_id)}</div>'
-            rows.append(
-                f"""<tr data-filter-text="{esc(filter_text)}"{row_attrs}><td data-label="Agent"><strong>{esc(agent.get('name'))}</strong><div class="mono quiet">{esc(agent.get('id'))}</div>{session_note}</td>
-                <td data-label="Status"><span class="status status-{esc(agent.get('status') or 'unknown')}">{esc(agent.get('status') or 'unknown')}</span></td>
-                <td data-label="Role"><div class="role-cell">{role_control}<div class="mono quiet">{esc(agent.get('model') or '')}</div></div></td>
-                <td data-label="Current">{esc(agent.get('doing') or 'No activity reported')}</td>{usage_cell}<td data-label="Active" class="mono muted">{esc(display_time(agent.get('last_active')))}</td><td data-label="Control">{action}</td></tr>"""
+                ident_rows.append(f'<span class="ident-key">Session</span><code class="ident-value">{esc(session_id)}</code>')
+            if model:
+                ident_rows.append(f'<span class="ident-key">Model ID</span><code class="ident-value">{esc(model)}</code>')
+            ident_note = (
+                f'<details class="agent-ident"><summary>Identifiers</summary><dl class="ident-list">{"".join(ident_rows)}</dl></details>'
             )
-        usage_heading = "<th>Usage</th>" if include_usage else ""
-        return f'<div class="table-wrap"><table class="data-table"><thead><tr><th>Agent</th><th>Status</th><th>Role / model</th><th>Current context</th>{usage_heading}<th>Last active</th><th>Control</th></tr></thead><tbody>{"".join(rows)}</tbody></table></div>'
+            description = clean_text(agent.get("description"))
+            desc_note = f'<span class="agent-desc">{esc(description)}</span>' if description else ""
+            flags = []
+            if agent.get("listed") == "live" and agent.get("in_registry"):
+                flags.append('<span class="flag">Registered identity</span>')
+            if agent.get("stalled"):
+                flags.append('<span class="flag flag-serious">Stalled</span>')
+            if agent.get("blocked"):
+                flags.append('<span class="flag flag-accent">Idle in bus_wait</span>')
+            pending = int(agent.get("pending_messages") or 0)
+            flags.append(
+                f'<span class="flag flag-warn" data-agent-pending{" hidden" if not pending else ""}>{pending} pending message{"s" if pending != 1 else ""}</span>'
+            )
+            parent = clean_text(agent.get("parent_id"))
+            if parent:
+                flags.append(f'<span class="flag">Reports to {esc(parent)}</span>')
+            capabilities = agent.get("capabilities") if isinstance(agent.get("capabilities"), list) else []
+            for capability in capabilities[:4]:
+                flags.append(f'<span class="flag">{esc(capability)}</span>')
+            supervisor = agent.get("supervisor_pid")
+            if supervisor:
+                flags.append(f'<span class="flag">supervisor pid {esc(supervisor)}</span>')
+            identity = (
+                f'<div class="agent-identity">{avatar_html(agent)}'
+                f'<div class="agent-identity-copy"><span class="agent-name" title="{esc(agent.get("id"))}">{esc(agent_title(agent))}</span>'
+                f'<span class="agent-model-line">{esc(agent_model_line(agent))}</span>{desc_note}{ident_note}</div></div>'
+            )
+            status_cell = self.cell(
+                "Status",
+                f'<div class="agent-status">{self.status_pill(agent.get("status"), hook=True)}'
+                f'<small>seen <span data-agent-seen>{esc(display_time(agent.get("last_active")))}</span></small></div>',
+                "agent-status-cell",
+            )
+            activity_cell = self.cell(
+                "Activity",
+                f'<div class="agent-activity"><span data-agent-doing>{esc(agent.get("doing") or "No activity reported")}</span>'
+                f'<div class="agent-flags">{"".join(flags)}</div></div>',
+                "agent-activity-cell",
+            )
+            role_cell = self.cell("Role", role_control, "agent-role")
+            actions_cell = self.cell("Controls", f'<div class="agent-actions">{action}</div>', "agent-actions-cell")
+            row_class = "agent-row" if include_usage else "agent-row no-usage"
+            rows.append(
+                f'<div class="{row_class}" data-filter-text="{esc(filter_text)}"{row_attrs}>'
+                f"{identity}{status_cell}{harness_cell}{activity_cell}{usage_cell}{role_cell}{actions_cell}</div>"
+            )
+        return f'<div class="roster-list">{"".join(rows)}</div>'
+
+    def render_supervision(self, project: ProjectSource, live_agents: list[dict[str, Any]], registered_count: int, snapshot: dict[str, Any] | None) -> str:
+        active_ids = project.attached_agent_ids()
+        definitions = [item for item in project.agent_definitions() if item["id"] not in active_ids]
+        options = "".join(
+            f'<option value="{esc(item["id"])}">{esc(agent_title(item))} · {esc(model_display(item["model"]) or harness_label(harness_key(item["harness"])) or "Unknown model")}</option>' for item in definitions
+        )
+        reachable = snapshot is None or snapshot.get("_reachable", True) is not False
+        select_disabled = "" if options and reachable else " disabled"
+        controllable_count = sum(1 for agent in live_agents if agent.get("controllable"))
+        waiting_count = sum(1 for agent in live_agents if clean_text(agent.get("status")).lower() == "waiting")
+        working_count = sum(1 for agent in live_agents if clean_text(agent.get("status")).lower() == "working")
+        stalled_count = sum(1 for agent in live_agents if agent.get("stalled"))
+        online_count = sum(
+            1 for agent in live_agents if clean_text(agent.get("status")).lower() not in {"offline", "stale", "unregistered", "failed"}
+        )
+        stop_disabled = "" if controllable_count and reachable else " disabled"
+        if not reachable:
+            note = "The broker is unreachable, so start and stop are disabled and the roster shows last-known values marked stale."
+        elif not options and not live_agents:
+            note = "No registered AgentBus identities are available to start. Check the implementation folder in Local setup."
+        elif not options:
+            note = "Every registered identity is already attached. Stop one to free it."
+        else:
+            note = "Start launches an existing supervisor with this folder as its workdir. Stop sends a graceful termination request."
+        counts = "".join(
+            f'<div class="count-item"><span>{label}</span><strong>{dot}{value}</strong></div>'
+            for label, value, dot in (
+                ("Attached", len(live_agents), ""),
+                ("Online", online_count, '<span class="dot dot-ok"></span>' if online_count else '<span class="dot is-ring"></span>'),
+                ("Working", working_count, ""),
+                ("Waiting", waiting_count, ""),
+                ("Stalled", stalled_count, '<span class="dot dot-serious"></span>' if stalled_count else ""),
+                ("Controllable", controllable_count, ""),
+                ("Registered", registered_count, ""),
+            )
+        )
+        return f"""
+          <section class="panel" aria-labelledby="control-title">
+            <div class="panel-head"><div><h2 id="control-title">Supervision</h2><p>Start a registered supervisor in this folder, or stop the ones the broker can control.</p></div>{self.status_pill_named("Broker connected" if reachable else "Broker disconnected", "working" if reachable else "failed")}</div>
+            <div class="supervision-grid">
+              <div><div class="counts">{counts}</div><p class="supervision-note">{esc(note)}</p></div>
+              <div class="control-actions">
+                <form class="agent-control-form" method="post" action="/project/{esc(project.key)}/agents/start"><input type="hidden" name="csrf" value="{esc(self.csrf_token)}"><label for="agent-id">Registered agent</label><div class="field-row"><select id="agent-id" name="agent_id" required{select_disabled}><option value="" selected disabled>{'Choose an agent…' if options else 'No registered agents available — check Local setup'}</option>{options}</select><button class="btn btn-primary" type="submit"{select_disabled}>Start agent</button></div></form>
+                <div class="stop-all-row"><span>Stops every controllable supervisor in this project.</span><form class="inline-form" method="post" action="/project/{esc(project.key)}/agents/stop-all" data-confirm="Stop all {controllable_count} controllable supervisors in this project?"><input type="hidden" name="csrf" value="{esc(self.csrf_token)}"><button class="btn btn-danger" type="submit"{stop_disabled}>Stop all</button></form></div>
+              </div>
+            </div>
+          </section>
+        """
+
+    def render_tasks_panel(
+        self,
+        project: ProjectSource,
+        tasks: list[dict[str, Any]],
+        limit: int | None = None,
+        index: dict[str, dict[str, Any]] | None = None,
+    ) -> str:
+        if project.kind == "agent-bus":
+            return ""
+        index = index or {}
+        shown = tasks if limit is None else tasks[:limit]
+        if project.kind == "workspace":
+            subtitle = "Live broker tasks assigned to or by agents attached here. Read-only; resets when the broker restarts."
+            empty_copy = "No tasks in the current broker session touch this project’s agents."
+        else:
+            subtitle = "Tasks recorded in the coordinator database. Read-only."
+            empty_copy = "The coordinator has no tasks recorded."
+        if shown:
+            rows = []
+            for task in shown:
+                who = ""
+                if task.get("assigner") or task.get("assignee"):
+                    assigner = self.who_label(index, task["assigner"]) if task.get("assigner") else "—"
+                    assignee = self.who_label(index, task["assignee"]) if task.get("assignee") else "unassigned"
+                    who = f'{assigner} <span class="arrow">→</span> {assignee}'
+                if task.get("round") is not None:
+                    tries = f' · {task["attempts"]}/{task["max_retries"]} tries' if task.get("max_retries") else ""
+                    round_text = f'round {task["round"]}{tries}'
+                else:
+                    round_text = f'priority {task.get("priority") or "normal"}'
+                brief_html = f'<span>{esc(task["brief"])}</span>' if task.get("brief") else ""
+                rows.append(
+                    f'<div class="task-row">{self.status_pill_named(task_state_label(task.get("state")), task_state_class(task.get("state")))}'
+                    f'<div class="task-copy"><strong>{esc(task["title"])}</strong>{brief_html}</div>'
+                    f'<div class="task-people">{who}</div><span class="task-round">{esc(round_text)}</span><time>{esc(task["updated"])}</time></div>'
+                )
+            body = f'<div class="task-list">{"".join(rows)}</div>'
+        else:
+            body = self.empty_state("No tasks", empty_copy, compact=True)
+        counts: dict[str, int] = {}
+        for task in tasks:
+            key = task_state_label(task.get("state"))
+            counts[key] = counts.get(key, 0) + 1
+        summary = "".join(f'<span class="flag">{esc(label)} {count}</span>' for label, count in sorted(counts.items()))
+        if not summary:
+            summary = f'<span class="panel-meta">{len(tasks)} tasks</span>'
+        foot = f'<div class="panel-foot"><span>Showing {len(shown)} of {len(tasks)}</span><a class="text-link" href="/project/{esc(project.key)}/agents#tasks">All tasks →</a></div>' if limit is not None and len(tasks) > len(shown) else ""
+        return f"""
+          <section class="panel" id="tasks" aria-labelledby="tasks-title">
+            <div class="panel-head"><div><h2 id="tasks-title">Tasks</h2><p>{esc(subtitle)}</p></div><div class="task-summary">{summary}</div></div>
+            {body}{foot}
+          </section>
+        """
 
     def agents_page(self, project: ProjectSource, query: dict[str, list[str]] | None = None) -> str:
         query = query or {}
@@ -1733,6 +2747,7 @@ class Dashboard:
                 agents = self.apply_saved_agent_roles(project, project.listed_agents(live_snapshot))
             else:
                 agents = self.apply_saved_agent_roles(project, project.listed_agents())
+            tasks = project.tasks(live_snapshot)
         except (OSError, sqlite3.Error, ValueError) as error:
             return self.error_page(project, str(error), "agents")
         flash = self.flash(query)
@@ -1743,22 +2758,27 @@ class Dashboard:
         if live_agents:
             live_table = self.render_agent_rows(project, live_agents, include_usage)
         else:
-            live_table = '<div class="empty"><h2>No agents attached</h2><p>Connect an existing AgentBus supervisor using this project’s exact folder as its workdir. Registered supervisors appear below when configured. <a href="/setup">Check local setup</a>.</p></div>'
+            copy = (
+                "Connect an existing AgentBus supervisor using this project’s exact folder as its workdir. "
+                "Registered supervisors appear below and can be started from Supervision. <a href=\"/setup\">Check local setup</a>."
+                if project.kind == "workspace"
+                else "This source has no agents recorded yet."
+            )
+            live_table = self.empty_state("No agents attached", copy)
         registered_section = ""
         if registered_agents:
             registered_table = self.render_agent_rows(project, registered_agents, include_usage=False)
-            registered_section = f'<section class="panel" aria-label="Registered AgentBus agents"><div class="panel-head"><h2>Registered AgentBus agents</h2><span class="panel-meta">{len(registered_agents)} identities</span></div>{registered_table}</section>'
+            registered_section = f'<section class="panel" aria-label="Registered AgentBus agents"><div class="panel-head"><div><h2>Registered AgentBus agents</h2><p>Identities in agents.json that are not attached to this folder right now.</p></div><span class="panel-meta">{len(registered_agents)} identities</span></div>{registered_table}</section>'
         session_section = ""
         if session_agents:
             session_table = self.render_agent_rows(project, session_agents, include_usage=False)
-            session_section = f'<section class="panel" aria-label="Session assignments"><div class="panel-head"><h2>Assigned by session</h2><span class="panel-meta">{len(session_agents)} session ids</span></div>{session_table}</section>'
+            session_section = f'<section class="panel" aria-label="Session assignments"><div class="panel-head"><div><h2>Assigned by session</h2><p>Roles saved against a Claude or Codex session id that is not bound to a listed agent.</p></div><span class="panel-meta">{len(session_agents)} session ids</span></div>{session_table}</section>'
         bindable = [agent for agent in agents if agent.get("id")]
-        bind_options = ''.join(
-            f'<option value="{esc(item.get("id"))}">{esc(item.get("id"))}</option>' for item in bindable
-        )
+        bind_options = "".join(f'<option value="{esc(item.get("id"))}">{esc(item.get("id"))}</option>' for item in bindable)
         session_form = f"""
           <details class="session-assign" aria-labelledby="session-assign-title">
-            <summary id="session-assign-title">Assign a role by session ID</summary><div><p>Paste a Claude or Codex session id, optionally bind it to an agent in this project, then save the role.</p></div>
+            <summary><h2 id="session-assign-title">Assign a role by session ID</h2><span class="chev" aria-hidden="true">›</span></summary>
+            <div class="session-assign-body"><p>Paste a Claude or Codex session id, optionally bind it to an agent in this project, then save the role. Bound roles apply on the agent’s next turn; unbound ones are operator metadata.</p>
             <form class="session-assign-form" method="post" action="/project/{esc(project.key)}/agents/set-role">
               <input type="hidden" name="csrf" value="{esc(self.csrf_token)}">
               <div class="session-assign-fields">
@@ -1767,37 +2787,37 @@ class Dashboard:
                 <label for="session-role-input">Role<input id="session-role-input" name="role" list="role-presets" maxlength="{MAX_ROLE_LENGTH}" autocomplete="off" required placeholder="Independent QA"></label>
                 <button class="btn btn-primary" type="submit">Save</button>
               </div>
-            </form>
+            </form></div>
           </details>
         """
         controls = ""
         usage_monitor = ""
         if project.kind == "workspace":
-            active_ids = project.attached_agent_ids()
-            definitions = [item for item in project.agent_definitions() if item["id"] not in active_ids]
-            options = ''.join(f'<option value="{esc(item["id"])}">{esc(item["id"])} · {esc(item["model"] or item["harness"])}</option>' for item in definitions)
-            reachable = live_snapshot is None or live_snapshot.get("_reachable", True) is not False
-            select_disabled = "" if options and reachable else " disabled"
-            controllable_count = sum(1 for agent in live_agents if agent.get("controllable"))
-            stop_disabled = "" if controllable_count and reachable else " disabled"
-            controls = f"""
-              <section class="control-strip" aria-labelledby="control-title"><div><p class="eyeline">Agent controls</p><h2 id="control-title">Run this project</h2><p>Starts an existing AgentBus supervisor in this repository. Stop sends a graceful termination request to that supervisor.</p></div>
-                <div class="control-actions"><form class="agent-control-form" method="post" action="/project/{esc(project.key)}/agents/start"><input type="hidden" name="csrf" value="{esc(self.csrf_token)}"><label for="agent-id">Registered agent</label><div class="field-row"><select id="agent-id" name="agent_id" required{select_disabled}><option value="" selected disabled>{'Choose an agent…' if options else 'No registered agents available — check Local setup'}</option>{options}</select><button class="btn btn-primary" type="submit"{select_disabled}>Start agent</button></div></form>
-                <form class="inline-form" method="post" action="/project/{esc(project.key)}/agents/stop-all" data-confirm="Stop all {controllable_count} controllable supervisors in this project?"><input type="hidden" name="csrf" value="{esc(self.csrf_token)}"><button class="btn btn-danger" type="submit"{stop_disabled}>Stop all</button></form></div></section>
-            """
+            controls = self.render_supervision(project, live_agents, len(registered_agents), live_snapshot)
             live_reachable = live_snapshot is None or live_snapshot.get("_reachable", True) is not False
             last_observed = "" if live_snapshot is None else clean_text(live_snapshot.get("_observedAt"))
             usage_monitor = self.render_usage_monitor(project, live_agents, live_reachable, last_observed)
+        lede = (
+            "Live status, harness and model, current activity, usage, and saved roles for every identity attached to this folder."
+            if project.kind == "workspace"
+            else "Agents recorded by this source, with their saved roles. Supervision and usage are available for live AgentBus workspaces only."
+        )
         body = f"""
-          <header class="page-head"><div><p class="eyeline">{esc(project.short_name)}</p><h1>Agents</h1><p class="page-copy">Check attached agents, their current activity, and saved roles. Usage and controls are available for live AgentBus workspaces.</p></div><a class="text-link" href="/project/{esc(project.key)}/messages">Conversations →</a></header>
-          {flash}{controls}
+          <header class="page-head"><div><p class="kicker">{esc(project.short_name)}</p><h1>Agents</h1><p class="lede">{lede}</p></div>
+          <div class="page-side"><a class="btn btn-quiet" href="/project/{esc(project.key)}/agents">Refresh</a><a class="text-link" href="/project/{esc(project.key)}/messages">Conversations →</a></div></header>
+          {self.hidden_notice(project)}{flash}{controls}
           {usage_monitor}
           {self.role_presets_datalist()}
-          <div class="toolbar"><div class="search"><input data-search type="search" aria-label="Filter agents" placeholder="Search agents"></div><a class="btn btn-quiet" href="/project/{esc(project.key)}/agents">Refresh</a></div>
-          <section class="panel" aria-label="Agent list"><div class="panel-head"><h2>Attached agents</h2><span class="panel-meta">{len(live_agents)} observed</span></div>{live_table}</section>
+          <section class="panel" aria-label="Agent list" id="roster">
+            <div class="panel-head"><div><h2>Attached agents</h2><p>{len(live_agents)} observed · search filters every column</p></div>
+            <div class="panel-tools"><span class="panel-meta" data-filter-count aria-live="polite"></span><div class="search"><input data-search type="search" aria-label="Filter agents" placeholder="Filter agents ( / )"></div></div></div>
+            {live_table}
+            <p class="register-empty" data-filter-empty hidden>No agents match that filter.</p>
+          </section>
           {registered_section}
           {session_section}
           {session_form}
+          {self.render_tasks_panel(project, tasks, index=self.agent_index(agents))}
         """
         return self.shell(f"{project.name} agents", body, project.key, "agents")
 
@@ -1810,33 +2830,39 @@ class Dashboard:
     ) -> str:
         summary = summarize_usage(agents)
         total = summary["total"]
+        total_tokens = sum(int(group["tokens"]) for group in summary["subscriptions"]) or 0
         subscription_rows = []
         for group in summary["subscriptions"]:
+            fraction = (int(group["tokens"]) / total_tokens) if total_tokens else 0.0
             subscription_rows.append(
-                f"""<div class="usage-subscription">
-                  <div><strong>{esc(group['name'])}</strong><span>{esc(', '.join(group['agents']))}</span></div>
-                  <span>{format_count(group['turns'])} turns</span><span>{format_count(group['tokens'])} tokens</span><span>{format_cost(group['costUSD'])} equivalent</span>
+                f"""<div class="usage-row">
+                  <div class="usage-name"><strong>{esc(group['name'])}</strong><span title="{esc(', '.join(group['agents']))}">{esc(', '.join(group.get('labels') or group['agents']))}</span></div>
+                  <div class="usage-share"><meter min="0" max="1" value="{fraction:.4f}" aria-label="Share of tokens"></meter><small>{round(fraction * 100)}%</small></div>
+                  <span class="num">{format_count(group['turns'])}</span><span class="num">{format_count(group['tokens'])}</span><span class="num">{format_cost(group['costUSD'])}</span>
                 </div>"""
             )
         if not subscription_rows:
             subscription_rows.append('<div class="usage-empty">Usage appears after an attached agent completes a turn.</div>')
         if reachable:
-            monitor_status = "Updates every 10s"
+            monitor_status = "Live · updates every 10s"
         elif last_observed:
             monitor_status = f"Update paused · last confirmed {display_time(last_observed)}"
         else:
             monitor_status = "Broker unavailable · retrying"
         return f"""
           <section class="panel usage-panel" aria-labelledby="usage-title" data-usage-monitor data-api-url="/project/{esc(project.key)}/api/agents">
-            <div class="panel-head"><div><h2 id="usage-title">Usage monitor</h2><p>Current broker session · resets when AgentBus restarts</p></div><span class="panel-meta" data-usage-status aria-live="polite">{esc(monitor_status)}</span></div>
-            <div class="usage-totals">
+            <div class="panel-head"><div><h2 id="usage-title">Usage</h2><p>Current broker session · resets when AgentBus restarts · equivalent cost is an estimate, not a charge</p></div><span class="panel-meta usage-status" data-usage-status aria-live="polite">{esc(monitor_status)}</span></div>
+            <div class="usage-tiles">
               <div><span>Turns</span><strong data-usage-total="turns">{format_count(total['turns'])}</strong></div>
               <div><span>Tokens</span><strong data-usage-total="tokens">{format_count(total['tokens'])}</strong></div>
               <div><span>Equivalent cost</span><strong data-usage-total="cost">{format_cost(total['costUSD'])}</strong><small>Estimate, not a subscription charge</small></div>
             </div>
-            <div class="usage-breakdown"><div class="usage-breakdown-head"><span>Subscription / harness</span><span>Turns</span><span>Tokens</span><span>Equivalent cost</span></div><div data-usage-subscriptions>{''.join(subscription_rows)}</div></div>
+            <div class="usage-head" aria-hidden="true"><span>Subscription</span><span>Share of tokens</span><span>Turns</span><span>Tokens</span><span>Equivalent cost</span></div>
+            <div data-usage-subscriptions>{''.join(subscription_rows)}</div>
           </section>
         """
+
+    # ---------- conversations ----------
 
     def messages_page(self, project: ProjectSource, query: dict[str, list[str]]) -> str:
         try:
@@ -1844,6 +2870,11 @@ class Dashboard:
             agents = project.agents()
         except (OSError, sqlite3.Error, ValueError) as error:
             return self.error_page(project, str(error), "messages")
+        harness_map = {str(agent.get("id")): infer_harness(agent) for agent in agents if agent.get("id")}
+        try:
+            index = self.agent_index(self.apply_saved_agent_roles(project, project.listed_agents()))
+        except (OSError, sqlite3.Error, ValueError):
+            index = self.agent_index(agents)
         conversations = group_conversations(messages)
         for conversation in conversations:
             conversation["status"] = self.state_store.status(project.key, conversation["id"])
@@ -1887,35 +2918,60 @@ class Dashboard:
         for name, label in (("inbox", "Inbox"), ("archived", "Archived"), ("trash", "Trash")):
             current = ' aria-current="page"' if box == name else ""
             tabs_list.append(
-                f'<a class="conversation-tab" href="/project/{esc(project.key)}/messages?box={name}"{current}>{label}<span>{counts[name]}</span></a>'
+                f'<a class="folder-tab" href="/project/{esc(project.key)}/messages?box={name}"{current}>{label}<span>{counts[name]}</span></a>'
             )
         tabs = "".join(tabs_list)
-        list_html = self.render_conversation_list(project, visible, box, selected["id"] if selected else "", page, search_query)
-        detail_html = self.render_conversation_detail(project, selected, box)
+        list_html = self.render_conversation_list(project, visible, box, selected["id"] if selected else "", page, search_query, harness_map, index)
+        detail_html = self.render_conversation_detail(project, selected, box, harness_map, index)
         pagination = self.render_pagination(project, box, page, page_count, search_query)
         compose = self.render_compose(project, agents)
+        found = f"{len(filtered)} found" if search_query else f"{len(filtered)} in {box.title()}"
         body = f"""
-          <header class="page-head conversation-head"><div><p class="eyeline">{esc(project.short_name)}</p><h1>Conversations</h1><p class="page-copy">{len(messages)} messages grouped into {len(conversations)} conversations. Archive and Trash only change this dashboard; source history stays intact. Conversation roles are operator metadata only.</p></div><a class="text-link" href="/project/{esc(project.key)}/agents">Manage agents →</a></header>
-          {self.flash(query)}
+          <header class="page-head"><div><p class="kicker">{esc(project.short_name)}</p><h1>Conversations</h1><p class="lede">{len(messages)} messages grouped into {len(conversations)} conversations. Archive and Trash only change this dashboard; source history stays intact. Conversation roles are operator metadata.</p></div>
+          <div class="page-side"><a class="text-link" href="/project/{esc(project.key)}/agents">Manage agents →</a></div></header>
+          {self.hidden_notice(project)}{self.flash(query)}
           {self.role_presets_datalist()}
-          <nav class="conversation-tabs" aria-label="Conversation folders">{tabs}</nav>
-          <section class="conversation-workspace" aria-label="{esc(box.title())} conversations">
-            <aside class="conversation-index"><form class="conversation-tools" method="get" action="/project/{esc(project.key)}/messages"><input type="hidden" name="box" value="{esc(box)}"><div class="search"><input data-search name="q" value="{esc(search_query)}" type="search" aria-label="Search all conversations" placeholder="Search all conversations"></div><button class="btn btn-small" type="submit">Search</button><span>{len(filtered)} found</span></form>{list_html}{pagination}</aside>
-            <article class="conversation-detail" id="conversation-detail" tabindex="-1">{detail_html}</article>
+          <div class="conv-toolbar">
+            <nav class="folders" aria-label="Conversation folders">{tabs}</nav>
+            <form class="conv-search" method="get" action="/project/{esc(project.key)}/messages"><input type="hidden" name="box" value="{esc(box)}"><input data-search name="q" value="{esc(search_query)}" type="search" aria-label="Search all conversations" placeholder="Search conversations"><button class="btn btn-small" type="submit">Search</button><span>{esc(found)}</span></form>
+          </div>
+          <section class="workspace" aria-label="{esc(box.title())} conversations">
+            <aside class="index" aria-label="Conversation index">{list_html}{pagination}</aside>
+            <article class="detail" id="conversation-detail" tabindex="-1">{detail_html}{compose}</article>
           </section>
-          {compose}
         """
         return self.shell(f"{project.name} conversations", body, project.key, "messages")
 
-    def render_conversation_list(self, project: ProjectSource, conversations: list[dict[str, Any]], box: str, selected_id: str, page: int, search_query: str) -> str:
+    def render_conversation_list(
+        self,
+        project: ProjectSource,
+        conversations: list[dict[str, Any]],
+        box: str,
+        selected_id: str,
+        page: int,
+        search_query: str,
+        harness_map: dict[str, str] | None = None,
+        index: dict[str, dict[str, Any]] | None = None,
+    ) -> str:
+        harness_map = harness_map or {}
+        index = index or {}
         if not conversations:
-            return f'<div class="empty compact-empty"><h2>{esc(box.title())} is empty</h2><p>{"Archived conversations appear here." if box == "archived" else "Deleted conversations stay here until you restore them." if box == "trash" else "Messages appear when agents are attached to this project’s exact folder. Check Agents or Local setup to connect your existing services."}</p></div>'
+            if box == "archived":
+                copy = "Archived conversations appear here. Archive keeps them out of the Inbox without touching source history."
+            elif box == "trash":
+                copy = "Deleted conversations stay here until you restore them."
+            elif search_query:
+                copy = "Nothing matches that search in this folder."
+            else:
+                copy = "Messages appear when agents are attached to this project’s exact folder. Check <a href=\"agents\">Agents</a> or <a href=\"/setup\">Local setup</a> to connect your existing services."
+            return f'<div class="conv-list">{self.empty_state(f"{box.title()} is empty", copy, compact=True)}</div>'
         rows = []
         for conversation in conversations:
             actions = self.conversation_actions(project, conversation["id"], box, compact=True)
-            participants = ", ".join(conversation["participants"])
-            filter_text = clean_text(f"{conversation['title']} {participants} {conversation['latest_body']}").lower()
-            selected_class = " selected" if conversation["id"] == selected_id else ""
+            participants = self.who_names(index, conversation["participants"])
+            raw_participants = ", ".join(conversation["participants"])
+            filter_text = clean_text(f"{conversation['title']} {participants} {raw_participants} {conversation['latest_body']}").lower()
+            selected_class = " is-selected" if conversation["id"] == selected_id else ""
             link_query = urllib.parse.urlencode(
                 {
                     "box": box,
@@ -1936,26 +2992,42 @@ class Dashboard:
                 suffix="list",
                 box=box,
             )
-            role_note = f'<span class="conversation-role-label">{esc(conversation_role)}</span>' if conversation_role else ""
+            role_note = f'<span class="conv-role-chip">{esc(conversation_role)}</span>' if conversation_role else ""
+            latest_sender = conversation.get("latest_sender") or (conversation["participants"][0] if conversation["participants"] else "?")
             rows.append(f"""
-              <div class="conversation-row{selected_class}" data-filter-text="{esc(filter_text + ' ' + conversation_role)}">
-                <a class="conversation-link" href="/project/{esc(project.key)}/messages?{esc(link_query)}#conversation-detail"><span class="conversation-row-top"><strong>{esc(conversation['title'])}</strong><time>{esc(conversation.get('latest_display', ''))}</time></span><span class="conversation-route">{esc(participants)}</span><span class="conversation-preview">{esc(conversation['latest_body'])}</span><span class="conversation-meta">{conversation['message_count']} message{'s' if conversation['message_count'] != 1 else ''}{role_note}</span></a>
-                <div class="conversation-foot">
-                  <details class="conversation-role role-editor"><summary>{esc(conversation_role) if conversation_role else "Add role"}</summary>{role_control}</details>
-                  <div class="conversation-actions">{actions}</div>
+              <div class="conv-row{selected_class}" data-filter-text="{esc(filter_text + ' ' + conversation_role)}">
+                <a class="conv-link" href="/project/{esc(project.key)}/messages?{esc(link_query)}#conversation-detail"{' aria-current="true"' if selected_class else ''}>{avatar_html(self.who(index, latest_sender), harness=harness_map.get(str(latest_sender), ""))}<span class="conv-copy"><span class="conv-top"><span class="conv-title">{esc(conversation['title'])}</span><time class="conv-time">{esc(conversation.get('latest_display', ''))}</time></span><span class="conv-route" title="{esc(raw_participants)}">{esc(participants)}</span><span class="conv-preview">{esc(conversation['latest_body'])}</span><span class="conv-meta"><span>{conversation['message_count']} message{'s' if conversation['message_count'] != 1 else ''}</span>{role_note}</span></span></a>
+                <div class="conv-foot">
+                  <div class="conv-actions">{actions}</div>
+                  <details class="role-editor"><summary>{esc(conversation_role) if conversation_role else "Add role"}</summary>{role_control}</details>
                 </div>
               </div>""")
-        return f'<div class="conversation-list">{"".join(rows)}</div>'
+        return f'<div class="conv-list">{"".join(rows)}</div>'
 
-    def render_conversation_detail(self, project: ProjectSource, conversation: dict[str, Any] | None, box: str) -> str:
+    def render_conversation_detail(
+        self,
+        project: ProjectSource,
+        conversation: dict[str, Any] | None,
+        box: str,
+        harness_map: dict[str, str] | None = None,
+        index: dict[str, dict[str, Any]] | None = None,
+    ) -> str:
+        harness_map = harness_map or {}
+        index = index or {}
         if conversation is None:
-            return '<div class="empty detail-empty"><span class="empty-mark" aria-hidden="true"><img src="/assets/b-logo.png?v=cat" alt=""></span><h2>No conversation selected</h2><p>Choose a conversation from the list.</p></div>'
+            return self.empty_state("No conversation selected", "Choose a conversation from the index to read the full transcript.", cat=True).replace('class="empty-state"', 'class="empty-state detail-empty"', 1)
         transcript = []
         for message in conversation["messages"]:
             recipient = message.get("recipient") or "all"
+            sender = clean_text(message.get("sender")) or "unknown"
+            kind = clean_text(message.get("priority")).lower()
+            badge = f'<span class="msg-type msg-type-{esc(status_class(kind))}">{esc(kind)}</span>' if kind and kind != "normal" else ""
             transcript.append(f"""
-              <section class="transcript-item"><header><span class="speaker-mark">{esc((clean_text(message.get('sender')) or '?')[:1].upper())}</span><div><strong>{esc(message.get('sender') or 'unknown')}</strong><span>to {esc(recipient)}</span></div><time>{esc(display_time(message.get('ts')))}</time></header><div class="transcript-subject">{esc(message.get('subject') or '(no subject)')}</div><div class="transcript-body">{esc(message.get('body') or '')}</div></section>""")
-        participants = ", ".join(conversation["participants"])
+              <article class="msg"><div class="msg-head">{avatar_html(self.who(index, sender), harness=harness_map.get(sender, ""))}<div class="msg-who"><strong>{self.who_label(index, sender)}</strong><span>to {self.who_label(index, recipient)}</span>{badge}</div><time class="msg-time">{esc(display_time(message.get('ts')))}</time></div><div class="msg-subject">{esc(message.get('subject') or '(no subject)')}</div><div class="msg-body">{esc(message.get('body') or '')}</div></article>""")
+        people = "".join(
+            f'<span class="people-chip" title="{esc(participant)}">{avatar_html(self.who(index, participant), size="avatar-s", harness=harness_map.get(participant, ""))}{esc(agent_title(self.who(index, participant)))}</span>'
+            for participant in conversation["participants"]
+        )
         record = self.state_store.role_record(project.key, conversation["id"])
         conversation_role = (record or {}).get("role") or ""
         role_control = self.render_role_control(
@@ -1969,13 +3041,13 @@ class Dashboard:
             box=box,
         )
         return f"""
-          <header class="detail-head"><div><p class="eyeline">{esc(conversation.get('thread') or 'Conversation')}</p><h2>{esc(conversation['title'])}</h2><p>{esc(participants)} · {conversation['message_count']} message{'s' if conversation['message_count'] != 1 else ''}</p></div><div class="detail-actions">{self.conversation_actions(project, conversation['id'], box)}</div></header>
-          <div class="conversation-role detail-role">{role_control}</div>
+          <header class="detail-head"><div><p class="kicker">{esc(conversation.get('thread') or 'Conversation')}</p><h2>{esc(conversation['title'])}</h2><div class="detail-people">{people}<span class="quiet">{conversation['message_count']} message{'s' if conversation['message_count'] != 1 else ''}</span></div></div><div class="detail-actions">{self.conversation_actions(project, conversation['id'], box)}</div></header>
+          <div class="detail-role">{role_control}</div>
           <div class="transcript">{''.join(transcript)}</div>
         """
 
     def conversation_actions(self, project: ProjectSource, conversation_id: str, box: str, compact: bool = False) -> str:
-        button_class = "icon-action" if compact else "btn btn-quiet"
+        button_class = "btn btn-quiet btn-small" if compact else "btn btn-small"
         if box == "inbox":
             actions = (("archive", "Archive", ""), ("delete", "Move to Trash", ""))
         elif box == "archived":
@@ -1986,29 +3058,40 @@ class Dashboard:
         for action, label, confirm in actions:
             confirm_attr = f' data-confirm="{esc(confirm)}"' if confirm else ""
             danger_class = " danger-text" if action == "delete" else ""
-            forms.append(f'<form class="inline-form" method="post" action="/project/{esc(project.key)}/conversations/{action}"{confirm_attr}><input type="hidden" name="csrf" value="{esc(self.csrf_token)}"><input type="hidden" name="conversation_id" value="{esc(conversation_id)}"><button class="{button_class}{danger_class}" type="submit" title="{label}">{label}</button></form>')
-        return ''.join(forms)
+            forms.append(
+                f'<form class="inline-form" method="post" action="/project/{esc(project.key)}/conversations/{action}"{confirm_attr}>'
+                f'<input type="hidden" name="csrf" value="{esc(self.csrf_token)}"><input type="hidden" name="conversation_id" value="{esc(conversation_id)}">'
+                f'<button class="{button_class}{danger_class}" type="submit" title="{label}">{label}</button></form>'
+            )
+        return "".join(forms)
 
     def render_pagination(self, project: ProjectSource, box: str, page: int, page_count: int, search_query: str) -> str:
         if page_count <= 1:
             return ""
+
         def page_url(number: int) -> str:
             query = urllib.parse.urlencode({"box": box, "page": number, **({"q": search_query} if search_query else {})})
             return f"/project/{esc(project.key)}/messages?{esc(query)}"
-        previous = f'<a class="btn btn-small" href="{page_url(page - 1)}">← Previous</a>' if page > 1 else '<span></span>'
-        following = f'<a class="btn btn-small" href="{page_url(page + 1)}">Next →</a>' if page < page_count else '<span></span>'
-        return f'<nav class="pagination" aria-label="Conversation pages">{previous}<span>{page} / {page_count}</span>{following}</nav>'
+
+        previous = f'<a class="btn btn-small" href="{page_url(page - 1)}">← Previous</a>' if page > 1 else "<span></span>"
+        following = f'<a class="btn btn-small" href="{page_url(page + 1)}">Next →</a>' if page < page_count else "<span></span>"
+        return f'<nav class="pagination" aria-label="Conversation pages">{previous}<span>Page {page} of {page_count}</span>{following}</nav>'
 
     def render_compose(self, project: ProjectSource, agents: list[dict[str, Any]]) -> str:
         recipient_options = ['<option value="" selected disabled>Choose a recipient…</option>']
         if agents or project.kind != "workspace":
             recipient_options.append('<option value="all">All project agents</option>')
-        recipient_options.extend(f'<option value="{esc(agent.get("id"))}">{esc(agent.get("name") or agent.get("id"))}</option>' for agent in agents)
+        recipient_options.extend(
+            f'<option value="{esc(agent.get("id"))}">{esc(agent_title(agent))} · {esc(agent_model_line(agent))}</option>' for agent in agents
+        )
         can_send = project.kind != "workspace" or bool(agents)
         disabled = "" if can_send else " disabled"
-        note = f"Sends only to agents attached to {project.path_label}." if project.kind == "workspace" else f"Uses the existing {project.short_name} message command."
+        if project.kind == "workspace":
+            note = f"Sends only to agents attached to {project.path_label}." if agents else "No live agents are attached to this folder, so nothing can receive a message yet."
+        else:
+            note = f"Uses the existing {project.short_name} message command."
         return f"""
-          <details class="panel compose"><summary class="panel-head"><h2>New message</h2><span class="panel-meta">Compose <span class="compose-caret">›</span></span></summary>
+          <details class="composer compose"><summary><h2>New message</h2><span class="panel-meta">Compose as operator <span class="chev" aria-hidden="true">›</span></span></summary>
             <form class="compose-form" method="post" action="/project/{esc(project.key)}/messages/send"><input type="hidden" name="csrf" value="{esc(self.csrf_token)}">
               <div class="field"><label for="sender">From</label><input id="sender" name="sender" value="operator" readonly required maxlength="80"></div><div class="field"><label for="recipient">To</label><select id="recipient" name="recipient" required{disabled}>{''.join(recipient_options)}</select></div>
               <div class="field"><label for="subject">Subject</label><input id="subject" name="subject" maxlength="160" placeholder="Optional"{disabled}></div><div class="field"><label for="thread">Thread</label><input id="thread" name="thread" maxlength="120" placeholder="Optional topic"{disabled}></div>
@@ -2016,18 +3099,33 @@ class Dashboard:
             </form>
           </details>"""
 
-    def render_conversation_teasers(self, project: ProjectSource, conversations: list[dict[str, Any]]) -> str:
+    def render_conversation_teasers(
+        self, project: ProjectSource, conversations: list[dict[str, Any]], index: dict[str, dict[str, Any]] | None = None
+    ) -> str:
+        index = index or {}
         if not conversations:
-            return '<div class="empty"><h2>No conversations yet</h2><p>Messages appear when agents are attached to this project’s exact folder. Open Agents to check the roster, or <a href="/setup">check local setup</a>.</p></div>'
+            return self.empty_state(
+                "No conversations yet",
+                "Messages appear when agents are attached to this project’s exact folder. Open Agents to check the roster, or <a href=\"/setup\">check local setup</a>.",
+                compact=True,
+            )
         rows = []
         for conversation in conversations:
-            rows.append(f'<a class="teaser-row" href="/project/{esc(project.key)}/messages?conversation={esc(conversation["id"])}"><span><strong>{esc(conversation["title"])}</strong><small>{esc(", ".join(conversation["participants"]))}</small></span><span class="teaser-preview">{esc(conversation["latest_body"])}</span><time>{esc(conversation.get("latest_display", ""))}</time><span class="arrow">→</span></a>')
+            latest_sender = conversation.get("latest_sender") or "?"
+            rows.append(
+                f'<a class="teaser" href="/project/{esc(project.key)}/messages?conversation={esc(conversation["id"])}">'
+                f'{avatar_html(self.who(index, latest_sender), size="avatar-s")}'
+                f'<span class="teaser-copy"><strong>{esc(conversation["title"])}</strong><span title="{esc(", ".join(conversation["participants"]))}">{esc(self.who_names(index, conversation["participants"]))} · {esc(conversation["latest_body"])}</span></span>'
+                f'<time>{esc(conversation.get("latest_display", ""))}</time></a>'
+            )
         return f'<div class="teaser-list">{"".join(rows)}</div>'
+
+    # ---------- feedback ----------
 
     @staticmethod
     def flash(query: dict[str, list[str]]) -> str:
         if "error" in query:
-            return f'<div class="flash flash-error" role="alert">{esc(query["error"][0])}</div>'
+            return f'<div class="flash flash-error" role="alert"><div><strong>Action failed</strong>{esc(query["error"][0])}</div></div>'
         messages = {
             "sent": "Message sent through the existing project bus.",
             "archived": "Conversation archived.",
@@ -2043,10 +3141,15 @@ class Dashboard:
         action = (query.get("action") or [""])[0]
         if query.get("sent") == ["1"]:
             action = "sent"
-        return f'<div class="flash flash-success" role="status">{messages[action]}</div>' if action in messages else ""
+        return f'<div class="flash flash-success" role="status"><div>{messages[action]}</div></div>' if action in messages else ""
 
     def error_page(self, project: ProjectSource, error: str, active: str = "project") -> str:
-        body = f'<header class="page-head"><div><p class="eyeline">{esc(project.short_name)}</p><h1>Source unavailable</h1><p class="page-copy">This project could not be read. No other project data was substituted.</p></div></header><section class="panel error-panel"><div class="panel-head"><h2>Check this source</h2></div><div class="error-copy">{esc(error)}<p><a href="/setup">Open local setup</a> to review the path and connection.</p></div></section>'
+        body = (
+            f'<header class="page-head"><div><p class="kicker">{esc(project.short_name)}</p><h1>Source unavailable</h1>'
+            f'<p class="lede">This project could not be read. No other project data was substituted.</p></div></header>'
+            f'<section class="panel"><div class="panel-head"><h2>Check this source</h2>{self.status_pill_named("Unavailable", "failed")}</div>'
+            f'<div class="error-copy">{esc(error)}<p><a href="/setup">Open local setup</a> to review the path and connection.</p></div></section>'
+        )
         return self.shell("Source unavailable", body, project.key, active)
 
     def health(self) -> dict[str, Any]:
@@ -2166,8 +3269,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self.redirect(self.action_error_location(project, parts[2], "The form expired. Refresh and try again."))
             return
-        if parts[2] == "flags" and parts[3] in {"pin", "unpin"}:
-            self.pin_action(project, parts[3])
+        if parts[2] == "flags" and parts[3] in {"pin", "unpin", "hide", "unhide"}:
+            self.flag_action(project, parts[3])
             return
         if parts[2:] == ["messages", "send"]:
             self.send_message_action(project, form)
@@ -2183,9 +3286,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.send_error_page(HTTPStatus.NOT_FOUND, "Action not found")
 
-    def pin_action(self, project: ProjectSource, action: str) -> None:
+    def flag_action(self, project: ProjectSource, action: str) -> None:
         try:
-            self.dashboard.state_store.set_pinned(project.key, action == "pin")
+            if action in {"pin", "unpin"}:
+                self.dashboard.state_store.set_pinned(project.key, action == "pin")
+            else:
+                self.dashboard.state_store.set_hidden(project.key, action == "hide")
         except (OSError, ValueError) as error:
             self.redirect("/?error=" + urllib.parse.quote(str(error)))
             return
@@ -2351,10 +3457,13 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def send_error_page(self, status: HTTPStatus, message: str) -> None:
-        body = f"""
-          <header class="page-head"><div><p class="eyeline">Error {int(status)}</p><h1>{esc(message)}</h1><p class="page-copy">Return to the main menu and choose an available project.</p></div></header>
-          <a class="btn" href="/">Back to projects</a>
-        """
+        body = (
+            '<div class="empty-state error-hero"><span class="empty-cat" aria-hidden="true">'
+            '<img class="mascot-plain" src="/assets/home-cat.jpg" alt=""><img class="mascot-evil" src="/assets/home-cat-evil.jpg?v=cape" alt=""></span>'
+            f'<p class="kicker">Error {int(status)}</p><h1>{esc(message)}</h1>'
+            '<p>Return to the projects register and choose an available project.</p>'
+            '<div class="empty-actions"><a class="btn btn-primary" href="/">Back to projects</a><a class="btn" href="/setup">Local setup</a></div></div>'
+        )
         self.send_html(self.dashboard.shell(str(status.phrase), body), status)
 
     def security_headers(self) -> None:
@@ -2693,7 +3802,7 @@ def check_role_assignment() -> list[str]:
             failures.append("bound session assignment did not store the agent id")
 
         bind_page_status, _bind_page_location, bind_page = request("GET", agents_path)
-        if bind_page_status != 200 or "session 3d2f1e91-ead5-46f8-9382-66f2890e7eb5" not in bind_page:
+        if bind_page_status != 200 or ">3d2f1e91-ead5-46f8-9382-66f2890e7eb5</code>" not in bind_page:
             failures.append("rendered agent row does not show the bound session id")
 
         reset_session_status, reset_session_location, _reset_session = request(
@@ -2745,9 +3854,14 @@ def run_check(dashboard: Dashboard) -> int:
         "/assets/theme.js",
         "data-project-search",
         "Pinned",
+        "data-broker-state",
+        "data-dock-scrim",
+        'class="mascot"',
     ):
         if required not in home:
             failures.append(f"home missing {required!r}")
+    if "CloisterBlack" in home:
+        failures.append("home still references the retired blackletter font")
     for project in dashboard.projects.values():
         summary = project.summary()
         if not summary["available"]:
@@ -2760,8 +3874,15 @@ def run_check(dashboard: Dashboard) -> int:
             failures.append(f"{project.key}: agents page missing role presets")
         if 'id="session-id-input"' not in agents_page:
             failures.append(f"{project.key}: agents page missing session-id assignment")
+        if project.kind != "agent-bus" and 'id="tasks"' not in agents_page:
+            failures.append(f"{project.key}: agents page missing tasks panel")
+        if "data-usage-monitor" not in agents_page and project.kind == "workspace":
+            failures.append(f"{project.key}: agents page missing usage monitor")
+        overview = dashboard.project_page(project)
+        if 'class="stat-row"' not in overview:
+            failures.append(f"{project.key}: overview missing summary tiles")
         conversation_page = dashboard.messages_page(project, {})
-        for required in ("Conversations", "Inbox", "Archived", "Trash"):
+        for required in ("Conversations", "Inbox", "Archived", "Trash", 'id="conversation-detail"', "details class=\"composer compose\""):
             if required not in conversation_page:
                 failures.append(f"{project.key}: conversations page missing {required!r}")
     failures.extend(check_configuration())
@@ -2961,6 +4082,15 @@ def check_configuration() -> list[str]:
         state._write(data)
         if json.loads(state.path.read_text()).get("extension") != {"keep": True}:
             failures.append("state write discarded unknown keys")
+        state.set_hidden("demo", True)
+        if "demo" not in state.hidden_projects():
+            failures.append("hidden project flag did not persist")
+        state.set_pinned("demo", True)
+        if "demo" in state.hidden_projects() or "demo" not in state.pinned_projects():
+            failures.append("pin did not unhide project")
+        state.archive_conversations({"demo": ["thread-1"]})
+        if state.status("demo", "thread-1") != "archived":
+            failures.append("bulk archive did not hide conversation")
     return failures
 
 

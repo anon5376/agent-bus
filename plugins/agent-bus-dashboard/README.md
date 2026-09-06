@@ -66,8 +66,9 @@ Set `AGENT_DASHBOARD_AGENT_ID` for each host's identity (default `codex`). Do no
 
 ## Daily use and boundaries
 
-- Pin projects for repeat access. Search from the register or rail. `/` focuses search; `g p`, `g a`, and `g m` open projects, agents, and conversations. Tab and Enter operate controls.
-- Light and Dark are monochrome; EVIL uses parchment and crimson. Theme and Hide/Show rail persist in the browser.
+- Pin projects for repeat access and hide the ones you never open; both live in the register and the dock. Search from the register or dock. `/` focuses search; `g p`, `g o`, `g a`, and `g m` open projects, the project overview, agents, and conversations. Tab and Enter operate controls.
+- The top bar always shows whether the live broker is connected and how many agents are live. Themes are Light, Dark, and Evil; theme and the dock's hidden state persist in the browser. On narrow screens the dock is a drawer behind the menu button.
+- Agents shows each identity's harness, provider and model, status, activity, usage, role, and controls. The Tasks panel on Overview and Agents is read-only: live broker tasks for workspaces, the tasks table for the coordinator.
 - Conversation roles are operator metadata. Expand **Add role** to edit. Archive, Move to Trash, and Restore remain visible beneath it. Both folders are reversible; Restore returns a conversation to Inbox.
 - Pins, roles, and folder state live in `dashboard-state.json`. Archive and Trash never rewrite source databases or the audit log. Registered AgentBus role edits update only that identity's role in `agents.json`.
 - Usage is for the current broker session. Equivalent cost is an estimate, not an added subscription charge. A disconnected broker retains last-known values marked stale.

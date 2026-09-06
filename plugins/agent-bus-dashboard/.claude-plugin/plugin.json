@@ -1,7 +1,7 @@
 {
   "name": "agent-bus-dashboard",
-  "version": "0.2.0",
-  "description": "Operate the existing local Agent Coordinator and AgentBus from Claude Code and a unified localhost dashboard.",
+  "version": "0.3.0",
+  "description": "Operate the existing local Agent Coordinator and AgentBus from Claude Code and a unified localhost switchboard dashboard: projects, live status, supervision, usage, tasks, and conversations.",
   "keywords": [
     "agents",
     "dashboard",
