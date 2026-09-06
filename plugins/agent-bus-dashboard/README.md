@@ -1,35 +1,33 @@
 # Agent Bus Dashboard
 
-A local project register, agent roster, and conversation ledger for existing Agent Coordinator and AgentBus installations. Python 3.10 or newer, standard library only. No account, build step, or runtime packages. macOS is required only for opening harness sessions in Terminal.
+A small local web page for an existing AgentBus or Agent Coordinator install. It lists your projects, shows which agents are attached to each one and what they are doing, and lets you read and send their messages. One Python file, standard library only, no build step, no accounts. Python 3.9 or newer. macOS is only needed for the "open session in Terminal" button.
 
-## Start in one minute
+It does not start a broker or an agent. If nothing is running, it says so.
 
-Copy or clone this plugin directory anywhere you own. From its root:
+## Run it
 
 ```sh
 python3 scripts/dashboard_server.py
 ```
 
-On macOS you can also use `./scripts/run_dashboard.sh`. Open [127.0.0.1:8788](http://127.0.0.1:8788/). Choose **Local setup**, enter an existing projects folder such as `~/Projects`, and click **Save local setup**. Each immediate subfolder becomes a project; nested repositories with recognized project markers are included too. Saving refreshes discovery without restarting a supervisor.
+Open http://127.0.0.1:8788, go to **Local setup**, enter the folder your projects live in (say `~/Projects`), and save. Every folder directly under it becomes a project, plus any nested git repositories. Open a project to see its agents and conversations.
 
-Open a project, then **Agents** or **Conversations**. Empty projects are valid. Agents appear when your existing AgentBus supervisors use that exact project folder as their workdir. The dashboard does not install or launch a broker. Check **Local setup → Connections** to see whether the live broker is connected. If disconnected, start your existing AgentBus broker using its own installation instructions.
+Agents show up on a project when an AgentBus supervisor is running with that project's folder as its workdir. The setup page shows whether the broker is reachable. If it is not, start the broker the way you normally do.
 
-Success looks like: the projects register contains your folders; Local setup shows the sources you attached; Agents shows identities attached to the selected workdir; Conversations shows their messages. [Health](http://127.0.0.1:8788/health) reports the dashboard process and source summaries, not a guarantee that all optional services are online.
+## Where things come from
 
-## Optional sources
+- **Live broker**, `http://127.0.0.1:7717` by default. Roster, status, usage, and tasks.
+- **Coordinator database**, optional. Agents, tasks, and messages from a `prototype` install.
+- **AgentBus history database**, optional. Old messages from `agentcomms.db`.
+- **AgentBus folder**, default `~/.agent-bus`. Where `agents.json` and the supervisor scripts are.
 
-The default live broker is `http://127.0.0.1:7717`. Local setup accepts:
+All of these are read in place. The dashboard never creates, migrates, or rewrites them. The one exception: editing a registered agent's role writes that one field back to `agents.json`, because the supervisor reads it there.
 
-- Coordinator SQLite database and optional `prototype` executable.
-- AgentBus history SQLite database and optional `agent_comms_server.py`.
-- AgentBus implementation folder, containing your existing `agents.json` and supervisor scripts.
-- Optional AgentBus status folder.
-
-Use your existing installation paths. Missing optional databases are omitted from the register; unavailable configured files can be corrected in Local setup. A readable but incompatible database is reported as unreadable. The dashboard does not create or migrate these stores.
+Do not point the broker URL at the dashboard's own port. It refuses to save that, and if an old config still has it, it shows a warning instead of looping.
 
 ## Configuration
 
-Saved privately with mode `0600` in `~/.agent-bus/dashboard.json`. Choose another file with `--config /absolute/path/dashboard.json` or `AGENT_DASHBOARD_CONFIG`. Paths support `~`. Set an optional database, command, or status path to `null` to disable it; clearing that field in Local setup does the same. Clearing the implementation folder restores `~/.agent-bus`.
+Setup saves to `~/.agent-bus/dashboard.json` with mode 0600. Pick another file with `--config` or `AGENT_DASHBOARD_CONFIG`. Every key also works as a `--kebab-case` flag or an `AGENT_DASHBOARD_UPPER_CASE` environment variable, and those win over the file. `~` expands. Set an optional path to `null`, or clear it in setup, to turn it off.
 
 ```json
 {
@@ -39,46 +37,43 @@ Saved privately with mode `0600` in `~/.agent-bus/dashboard.json`. Choose anothe
 }
 ```
 
-Precedence: command-line flags → `AGENT_DASHBOARD_*` environment variables → JSON file → defaults. An explicit `--projects-root` replaces configured roots; repeat the flag for multiple roots. Environment roots use the platform path separator (`:` on macOS). A setup save cannot override a launch flag or environment variable.
-
-| JSON key | Default |
+| Key | Default |
 | --- | --- |
 | `projects_root` | `["~/Projects"]` |
+| `live_bus_url` | `http://127.0.0.1:7717` |
+| `agent_bus_root` | `~/.agent-bus` |
 | `coordinator_db` | `~/.agent-bus/coordinator.db` |
 | `coordinator_cli` | `~/.agent-bus/bin/prototype` |
 | `agent_bus_db` | `~/.agent-bus/agentcomms.db` |
 | `agent_bus_cli` | `~/.agent-bus/agent_comms_server.py` |
 | `status_dir` | `~/.agent-bus/status` |
-| `agent_bus_root` | `~/.agent-bus` |
-| `live_bus_url` | `http://127.0.0.1:7717` |
-| `operator_token` | `~/.agent-bus/operator.token` (path only) |
+| `operator_token` | `~/.agent-bus/operator.token` |
 | `audit_log` | `~/.agent-bus/bus.jsonl` |
 | `dashboard_state` | `~/.agent-bus/dashboard-state.json` |
 | `host`, `port` | `127.0.0.1`, `8788` |
 
-For each key use a hyphenated CLI option or uppercase environment name, e.g. `--coordinator-db` / `AGENT_DASHBOARD_COORDINATOR_DB`. Never put token contents in the config. Invalid JSON or keys produce a configuration error at startup; fix the indicated file and restart the dashboard. Stop the foreground dashboard with Ctrl-C. Restart only the dashboard after server-code changes.
+Pins, hidden projects, roles, and archived or trashed conversations are kept in `dashboard-state.json`. Archiving or trashing a conversation only changes that file; the source databases are untouched and Restore brings it back.
 
-## Agent plugin integration
+Restart the server after editing the Python. CSS and JS changes show up on reload.
 
-The dashboard runs independently of a plugin host. Add this directory through your host's local plugin workflow to use the included skill and optional MCP launchers. The manifest uses the host's `${CLAUDE_PLUGIN_ROOT}` substitution. For hosts that do not support that substitution, register `python3 /absolute/plugin/path/scripts/mcp_launcher.py coordinator` and `python3 /absolute/plugin/path/scripts/mcp_launcher.py bus` manually. Both launch your installed services with the same dashboard configuration; they add no coordination backend. Unconfigured launchers exit with setup guidance. Only enable the sources you actually use.
+## Using it
 
-Set `AGENT_DASHBOARD_AGENT_ID` for each host's identity (default `codex`). Do not change another host's identity. Outbound agent messages require explicit authorization, a sender label, and a reply path.
+- **Projects.** Pin the ones you use, hide the rest. Both apply to the register and the dock. `/` focuses search. `g p`, `g o`, `g a`, `g m` jump to projects, overview, agents, and messages.
+- **Agents.** Each row is titled by the agent's role and shows its model and reasoning effort, status, current activity, token usage, and controls. Raw ids are under the Identifiers toggle. Start, Stop, and Open latest session only happen when you click them.
+- **Conversations.** Inbox, Archived, Trash. Roles on conversations are notes for you and nothing else reads them.
+- **Themes.** Light, Dark, and Evil. Evil uses the bundled Cloister Black face and the painted cat.
+- **Usage** covers the current broker session and resets when the broker does. The cost column is an estimate, not a bill.
 
-## Daily use and boundaries
+The server binds to loopback and has no login. If you pass `--host` to bind elsewhere, put your own access control in front of it.
 
-- Pin projects for repeat access and hide the ones you never open; both live in the register and the dock. Search from the register or dock. `/` focuses search; `g p`, `g o`, `g a`, and `g m` open projects, the project overview, agents, and conversations. Tab and Enter operate controls.
-- The top bar always shows whether the live broker is connected and how many agents are live. Themes are Light, Dark, and Evil; theme and the dock's hidden state persist in the browser. On narrow screens the dock is a drawer behind the menu button.
-- Agents shows each identity's harness, provider and model, status, activity, usage, role, and controls. The Tasks panel on Overview and Agents is read-only: live broker tasks for workspaces, the tasks table for the coordinator.
-- Conversation roles are operator metadata. Expand **Add role** to edit. Archive, Move to Trash, and Restore remain visible beneath it. Both folders are reversible; Restore returns a conversation to Inbox.
-- Pins, roles, and folder state live in `dashboard-state.json`. Archive and Trash never rewrite source databases or the audit log. Registered AgentBus role edits update only that identity's role in `agents.json`.
-- Usage is for the current broker session. Equivalent cost is an estimate, not an added subscription charge. A disconnected broker retains last-known values marked stale.
-- Start, stop, open session, and send are explicit actions. Reading a page never performs them. Open session is available only for an unambiguous resumable harness identity.
-- This is an unauthenticated local control plane, not a hosted service. The default bind is loopback. Explicit `--host` can opt into another interface; do so only with your own access protections. Broker connections stay loopback-only.
+## As a plugin
 
-## Verify
+The folder is also a Claude Code plugin. Install it through the normal local-plugin flow and you get the skill plus two MCP launchers, `mcp_launcher.py coordinator` and `mcp_launcher.py bus`, which start your installed coordinator or bus server with the same configuration as the dashboard. They do not add a server of their own. Set `AGENT_DASHBOARD_AGENT_ID` to give each host its own identity on the bus.
+
+## Check
 
 ```sh
 python3 scripts/dashboard_server.py --check
 ```
 
-The checker renders available sources and validates isolated role persistence, CSRF, reversible folder state, configuration, first-run guidance, and unknown state-key preservation. Missing optional sources and an empty projects root are valid. Browser verification should use an isolated `--dashboard-state` file for reversible actions when preserving an operator's live folder state matters.
+Renders every configured source and runs the role, CSRF, folder-state, configuration, and broker-loopback tests against a throwaway server. Use `--dashboard-state` with a scratch file when you try things in the browser and do not want to disturb your real pins and folders.
