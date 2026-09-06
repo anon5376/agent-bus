@@ -63,6 +63,11 @@ PROJECT_MARKERS = {
     "project.godot",
     "pyproject.toml",
 }
+DASHBOARD_SELF_PORTS: set[int] = set()
+SELF_BROKER_ERROR = "Broker URL points at this dashboard, not at AgentBus. Fix it in Local setup (usually http://127.0.0.1:7717)."
+DASHBOARD_BROKER_ERROR = "Broker URL points at an Agent Bus Dashboard, not at AgentBus. Fix it in Local setup (usually http://127.0.0.1:7717)."
+NOT_BROKER_ERROR = "The broker URL answered, but not like an AgentBus broker. Check the port in Local setup."
+DASHBOARD_PROBE_HEADER = "X-Agent-Bus-Dashboard"
 LIVE_SNAPSHOT_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 LIVE_LAST_GOOD_SNAPSHOT: dict[str, dict[str, Any]] = {}
 AUDIT_MESSAGE_CACHE: dict[str, tuple[int, int, list[dict[str, Any]]]] = {}
@@ -723,17 +728,31 @@ class ProjectSource:
         cached = LIVE_SNAPSHOT_CACHE.get(self.bus_url)
         if cached is not None and now - cached[0] < LIVE_SNAPSHOT_TTL_SECONDS:
             return cached[1]
+        if bus_url_is_self(self.bus_url):
+            payload: dict[str, Any] = {"roster": [], "messages": [], "_reachable": False, "_error": SELF_BROKER_ERROR}
+            LIVE_SNAPSHOT_CACHE[self.bus_url] = (now, payload)
+            return payload
         request = urllib.request.Request(
             f"{self.bus_url.rstrip('/')}/snapshot",
             data=b"{}",
-            headers={"content-type": "application/json"},
+            headers={"content-type": "application/json", DASHBOARD_PROBE_HEADER: "probe"},
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=2) as response:
-                payload = json.load(response)
+            try:
+                with urllib.request.urlopen(request, timeout=2) as response:
+                    payload = json.load(response)
+            except urllib.error.HTTPError as error:
+                body = error.read(4096) if hasattr(error, "read") else b""
+                if b'"dashboard"' in body:
+                    raise ValueError(DASHBOARD_BROKER_ERROR) from None
+                raise
             if not isinstance(payload, dict):
-                raise ValueError("AgentBus returned an invalid snapshot")
+                raise ValueError(NOT_BROKER_ERROR)
+            if payload.get("dashboard"):
+                raise ValueError(DASHBOARD_BROKER_ERROR)
+            if not isinstance(payload.get("roster"), list):
+                raise ValueError(NOT_BROKER_ERROR)
             payload["_reachable"] = True
             payload["_observedAt"] = datetime.now(timezone.utc).isoformat()
             LIVE_LAST_GOOD_SNAPSHOT[self.bus_url] = dict(payload)
@@ -1106,7 +1125,7 @@ class ProjectSource:
                     "harness": clean_text(item.get("harness")),
                     "model": clean_text(item.get("model")),
                     "role": clean_text(item.get("role")) or "worker",
-                    "effort": clean_text(item.get("effort") or item.get("reasoningEffort") or item.get("reasoning_effort")),
+                    "effort": registry_effort(item),
                     "description": clean_text(item.get("description")),
                 }
             )
@@ -1609,6 +1628,46 @@ def split_model_effort(model: Any) -> tuple[str, str]:
     return text, ""
 
 
+def registry_effort(item: dict[str, Any]) -> str:
+    """Effort as written in agents.json: `effort`, `reasoning` (Codex), or the same keys under harnessOptions."""
+    options = item.get("harnessOptions") if isinstance(item.get("harnessOptions"), dict) else {}
+    for source in (item, options):
+        for key in ("effort", "reasoning", "reasoningEffort", "reasoning_effort", "model_reasoning_effort"):
+            text = clean_text(source.get(key)).lower()
+            if text and text not in {"none", "off", "false", "default", "auto"}:
+                return text
+    return ""
+
+
+CODEX_DEFAULT_EFFORT: dict[str, tuple[float, str]] = {}
+
+
+def codex_default_effort() -> str:
+    """The Codex CLI's own default from ~/.codex/config.toml, used when neither roster nor registry names an effort."""
+    path = Path.home() / ".codex" / "config.toml"
+    try:
+        stamp = path.stat().st_mtime
+    except OSError:
+        return ""
+    cached = CODEX_DEFAULT_EFFORT.get(str(path))
+    if cached and cached[0] == stamp:
+        return cached[1]
+    value = ""
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if stripped.startswith("["):
+                break  # only the top-level table holds the global default
+            match = re.match(r'model_reasoning_effort\s*=\s*"([^"]+)"', stripped)
+            if match:
+                value = match.group(1).strip().lower()
+                break
+    except OSError:
+        value = ""
+    CODEX_DEFAULT_EFFORT[str(path)] = (stamp, value)
+    return value
+
+
 def agent_effort(agent: dict[str, Any]) -> str:
     for key in ("effort", "reasoningEffort", "reasoning_effort", "reasoning", "thinking", "thinkingLevel", "thinking_level"):
         value = agent.get(key)
@@ -1617,7 +1676,12 @@ def agent_effort(agent: dict[str, Any]) -> str:
         text = clean_text(value).lower()
         if text and text not in {"none", "off", "false", "default", "auto"}:
             return text
-    return split_model_effort(agent.get("model"))[1]
+    inline = split_model_effort(agent.get("model"))[1]
+    if inline:
+        return inline
+    if harness_key(agent.get("cli")) == "codex" or harness_key(agent.get("harness")) == "codex":
+        return codex_default_effort()
+    return ""
 
 
 def model_display(model: Any, effort: Any = "") -> str:
@@ -2374,11 +2438,12 @@ class Dashboard:
         snapshot = probe._live_snapshot()
         reachable = snapshot.get("_reachable", True) is not False
         broker_state = "Connected" if reachable else "Disconnected"
-        broker_hint = (
-            f"{settings.live_bus_url}. Agents belong to a project when their workdir matches its folder exactly."
-            if reachable
-            else f"{settings.live_bus_url} is not answering. Start your existing AgentBus broker, then reload."
-        )
+        if reachable:
+            broker_hint = f"{settings.live_bus_url}. Agents belong to a project when their workdir matches its folder exactly."
+        elif snapshot.get("_error") in {SELF_BROKER_ERROR, DASHBOARD_BROKER_ERROR, NOT_BROKER_ERROR}:
+            broker_hint = f"{settings.live_bus_url}: {snapshot.get('_error')}"
+        else:
+            broker_hint = f"{settings.live_bus_url} is not answering. Start your existing AgentBus broker, then reload."
         cards.append(
             f'<div class="conn-card"><strong>Live broker</strong>{self.status_pill_named(broker_state, "working" if reachable else "failed")}'
             f"<p>{esc(broker_hint)}</p></div>"
@@ -2751,7 +2816,6 @@ class Dashboard:
         except (OSError, sqlite3.Error, ValueError) as error:
             return self.error_page(project, str(error), "agents")
         flash = self.flash(query)
-        session_agents = self.session_assignment_rows(project, agents)
         live_agents = [agent for agent in agents if agent.get("listed") not in {"registered", "session"}]
         registered_agents = [agent for agent in agents if agent.get("listed") == "registered"]
         include_usage = project.kind == "workspace"
@@ -2769,27 +2833,6 @@ class Dashboard:
         if registered_agents:
             registered_table = self.render_agent_rows(project, registered_agents, include_usage=False)
             registered_section = f'<section class="panel" aria-label="Registered AgentBus agents"><div class="panel-head"><div><h2>Registered AgentBus agents</h2><p>Identities in agents.json that are not attached to this folder right now.</p></div><span class="panel-meta">{len(registered_agents)} identities</span></div>{registered_table}</section>'
-        session_section = ""
-        if session_agents:
-            session_table = self.render_agent_rows(project, session_agents, include_usage=False)
-            session_section = f'<section class="panel" aria-label="Session assignments"><div class="panel-head"><div><h2>Assigned by session</h2><p>Roles saved against a Claude or Codex session id that is not bound to a listed agent.</p></div><span class="panel-meta">{len(session_agents)} session ids</span></div>{session_table}</section>'
-        bindable = [agent for agent in agents if agent.get("id")]
-        bind_options = "".join(f'<option value="{esc(item.get("id"))}">{esc(item.get("id"))}</option>' for item in bindable)
-        session_form = f"""
-          <details class="session-assign" aria-labelledby="session-assign-title">
-            <summary><h2 id="session-assign-title">Assign a role by session ID</h2><span class="chev" aria-hidden="true">›</span></summary>
-            <div class="session-assign-body"><p>Paste a Claude or Codex session id, optionally bind it to an agent in this project, then save the role. Bound roles apply on the agent’s next turn; unbound ones are operator metadata.</p>
-            <form class="session-assign-form" method="post" action="/project/{esc(project.key)}/agents/set-role">
-              <input type="hidden" name="csrf" value="{esc(self.csrf_token)}">
-              <div class="session-assign-fields">
-                <label for="session-id-input">Session ID<input id="session-id-input" name="session_id" value="" maxlength="{MAX_SESSION_LENGTH}" autocomplete="off" required placeholder="Paste a Claude or Codex session ID"></label>
-                <label for="session-agent-input">Agent<select id="session-agent-input" name="agent_id"><option value="">None · session only</option>{bind_options}</select></label>
-                <label for="session-role-input">Role<input id="session-role-input" name="role" list="role-presets" maxlength="{MAX_ROLE_LENGTH}" autocomplete="off" required placeholder="Independent QA"></label>
-                <button class="btn btn-primary" type="submit">Save</button>
-              </div>
-            </form></div>
-          </details>
-        """
         controls = ""
         usage_monitor = ""
         if project.kind == "workspace":
@@ -2815,8 +2858,6 @@ class Dashboard:
             <p class="register-empty" data-filter-empty hidden>No agents match that filter.</p>
           </section>
           {registered_section}
-          {session_section}
-          {session_form}
           {self.render_tasks_panel(project, tasks, index=self.agent_index(agents))}
         """
         return self.shell(f"{project.name} agents", body, project.key, "agents")
@@ -3159,9 +3200,22 @@ class Dashboard:
 class Handler(BaseHTTPRequestHandler):
     dashboard: Dashboard
 
+    def is_broker_probe(self, path: str) -> bool:
+        return bool(self.headers.get(DASHBOARD_PROBE_HEADER)) or path in {"/snapshot", "/state", "/health.json"}
+
+    def reject_probe(self) -> None:
+        """Answer a dashboard-to-dashboard probe with plain JSON so no page (and no further probe) is rendered."""
+        self.send_json(
+            {"dashboard": True, "error": "This is the Agent Bus Dashboard, not an AgentBus broker. Point the broker URL at AgentBus."},
+            HTTPStatus.NOT_FOUND,
+        )
+
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
+        if self.headers.get(DASHBOARD_PROBE_HEADER):
+            self.reject_probe()
+            return
         try:
             if path == "/":
                 self.send_html(self.dashboard.home(urllib.parse.parse_qs(parsed.query)))
@@ -3224,6 +3278,9 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path.rstrip("/")
         parts = [part for part in path.split("/") if part]
+        if self.is_broker_probe(path):
+            self.reject_probe()
+            return
         if path == "/setup":
             try:
                 length = int(self.headers.get("Content-Length", "0"))
@@ -3612,6 +3669,7 @@ def check_role_assignment() -> list[str]:
         isolated = Dashboard([project], ConversationStateStore(state_path))
         Handler.dashboard = isolated
         server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        DASHBOARD_SELF_PORTS.add(int(server.server_address[1]))
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         host, port = server.server_address
@@ -3629,6 +3687,34 @@ def check_role_assignment() -> list[str]:
             status = response.status
             connection.close()
             return status, location, payload
+
+        loop_started = monotonic()
+        probe_status, _probe_location, probe_body = request("POST", "/snapshot", body="{}")
+        if probe_status != 404 or '"dashboard": true' not in probe_body or "<html" in probe_body.lower():
+            failures.append("dashboard rendered a page for a broker-style POST /snapshot")
+        looped = ProjectSource(
+            key="loop",
+            name="Loop",
+            short_name="Loop",
+            description="",
+            path_label="",
+            kind="workspace",
+            workspace_path=workspace,
+            bus_url=f"http://{host}:{port}",
+            operator_token=tmp / "operator.token",
+            audit_log=tmp / "bus.jsonl",
+            agent_bus_root=root,
+        )
+        looped_snapshot = looped._live_snapshot()
+        if looped_snapshot.get("_reachable") is not False or looped_snapshot.get("_error") not in {SELF_BROKER_ERROR, DASHBOARD_BROKER_ERROR}:
+            failures.append(f"broker URL aimed at the dashboard was not refused: {looped_snapshot.get('_error')!r}")
+        try:
+            validate_bus_url(f"http://127.0.0.1:{port}")
+            failures.append("validate_bus_url accepted the dashboard's own port")
+        except ValueError:
+            pass
+        if monotonic() - loop_started > 5:
+            failures.append("loopback broker guard took longer than five seconds")
 
         status, _location, page = request("GET", agents_path)
         if status != 200 or "Registered AgentBus agents" not in page:
@@ -3716,8 +3802,6 @@ def check_role_assignment() -> list[str]:
         if reset_page_status != 200 or 'value="manager"' not in reset_page:
             failures.append("rendered rows do not show the restored default role")
 
-        if 'id="session-id-input"' not in reset_page:
-            failures.append("agents page missing session-id assignment form")
 
         bad_session_status, bad_session_location, _bad_session = request(
             "POST",
@@ -3772,10 +3856,6 @@ def check_role_assignment() -> list[str]:
         unbound_registry = json.loads(registry_path.read_text(encoding="utf-8"))
         if unbound_registry.get("opus", {}).get("role") != "manager":
             failures.append("unbound session assignment changed a registry role")
-
-        session_page_status, _session_page_location, session_page = request("GET", agents_path)
-        if session_page_status != 200 or "019ff1f7-cfea-7240-a6fe-f1ab2cb2fe4a" not in session_page or 'value="Commander"' not in session_page:
-            failures.append("rendered rows do not show the session assignment")
 
         bind_status, bind_location, _bind = request(
             "POST",
@@ -3872,8 +3952,6 @@ def run_check(dashboard: Dashboard) -> int:
             failures.append(f"{project.key}: agents page did not render")
         if 'id="role-presets"' not in agents_page:
             failures.append(f"{project.key}: agents page missing role presets")
-        if 'id="session-id-input"' not in agents_page:
-            failures.append(f"{project.key}: agents page missing session-id assignment")
         if project.kind != "agent-bus" and 'id="tasks"' not in agents_page:
             failures.append(f"{project.key}: agents page missing tasks panel")
         if "data-usage-monitor" not in agents_page and project.kind == "workspace":
@@ -3983,6 +4061,15 @@ def parse_settings(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
+def bus_url_is_self(value: str) -> bool:
+    """True when a broker URL would loop back into this dashboard process."""
+    try:
+        port = urllib.parse.urlparse(value).port or 80
+    except ValueError:
+        return False
+    return port in DASHBOARD_SELF_PORTS
+
+
 def validate_bus_url(value: str) -> None:
     try:
         parsed = urllib.parse.urlparse(value)
@@ -3991,6 +4078,8 @@ def validate_bus_url(value: str) -> None:
         parsed.port
     except (TypeError, ValueError):
         raise ValueError("Broker URL must be a loopback HTTP address, such as http://127.0.0.1:7717.") from None
+    if bus_url_is_self(value):
+        raise ValueError(SELF_BROKER_ERROR)
 
 
 def save_setup(settings: argparse.Namespace, form: dict[str, str]) -> argparse.Namespace:
@@ -4107,6 +4196,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"warning: binding to {args.host} may expose agent messages to the network", file=sys.stderr)
     Handler.dashboard = dashboard
     server = ThreadingHTTPServer((args.host, args.port), Handler)
+    DASHBOARD_SELF_PORTS.add(int(server.server_address[1]))
+    if bus_url_is_self(args.live_bus_url):
+        print(f"warning: {SELF_BROKER_ERROR}", file=sys.stderr, flush=True)
     print(f"Agent Bus Dashboard: http://{args.host}:{args.port}/", flush=True)
     try:
         server.serve_forever()
