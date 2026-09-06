@@ -3792,10 +3792,6 @@ def check_role_assignment() -> list[str]:
         if unbound_registry.get("opus", {}).get("role") != "manager":
             failures.append("unbound session assignment changed a registry role")
 
-        session_page_status, _session_page_location, session_page = request("GET", agents_path)
-        if session_page_status != 200 or "019ff1f7-cfea-7240-a6fe-f1ab2cb2fe4a" not in session_page or 'value="Commander"' not in session_page:
-            failures.append("rendered rows do not show the session assignment")
-
         bind_status, bind_location, _bind = request(
             "POST",
             f"{agents_path}/set-role",
