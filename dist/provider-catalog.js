@@ -78,7 +78,7 @@ export const PROVIDER_CATALOG = [
         harnessId: "codex",
         adapter: "codex",
         binaries: [{ command: "codex", knownPaths: unixBin("codex"), probeArgs: ["--version"] }],
-        features: { ...FULL_FEATURES, structuredOutput: false },
+        features: FULL_FEATURES,
         models: [{
                 id: "openai-default",
                 family: "gpt",
@@ -137,7 +137,7 @@ export const PROVIDER_CATALOG = [
         harnessId: "gemini",
         adapter: "gemini",
         binaries: [{ command: "gemini", knownPaths: unixBin("gemini"), probeArgs: ["--version"] }],
-        features: BASIC_FEATURES,
+        features: { ...BASIC_FEATURES, resume: true, structuredOutput: true },
         models: [{
                 id: "google-default",
                 family: "gemini",
@@ -155,7 +155,7 @@ export const PROVIDER_CATALOG = [
         harnessId: "kimi",
         adapter: "kimi",
         binaries: [{ command: "kimi", knownPaths: unixBin("kimi"), probeArgs: ["--version"] }],
-        features: { ...BASIC_FEATURES, resume: true, usageReporting: true },
+        features: { ...BASIC_FEATURES, resume: true, structuredOutput: true, usageReporting: true },
         models: [{
                 id: "moonshot-default",
                 family: "kimi",
@@ -179,6 +179,26 @@ export const PROVIDER_CATALOG = [
                 id: "opencode-default",
                 family: "opencode",
                 capabilities: heuristic({ contextTokens: 128000, costClass: "subscription" }),
+            }],
+    },
+    {
+        id: "zai",
+        displayName: "Z.AI / GLM via OpenCode",
+        authKind: "subscription",
+        authSource: "OpenCode provider configuration",
+        subscriptionBacked: true,
+        loginCommand: "opencode auth login",
+        installHint: "Install OpenCode, configure a GLM-capable provider, and replace the exact model selector if `opencode models` reports a different route.",
+        harnessId: "opencode",
+        adapter: "opencode",
+        binaries: [{ command: "opencode", knownPaths: unixBin("opencode"), probeArgs: ["--version"] }],
+        modelDiscovery: { args: ["models", "--refresh", "--verbose"], format: "lines" },
+        features: FULL_FEATURES,
+        models: [{
+                id: "zai-glm-5.3",
+                family: "glm",
+                exactModel: "opencode-go/glm-5.3",
+                capabilities: heuristic({ coding: 0.84, reasoning: 0.84, planning: 0.78, debugging: 0.82, toolUse: 0.84, speed: 0.7, tokenEfficiency: 0.8, reliability: 0.8, autonomy: 0.82, contextTokens: 128000, costClass: "subscription" }),
             }],
     },
     {

@@ -1,10 +1,7 @@
 {
   "name": "agent-bus-dashboard",
-  "version": "0.1.0+codex.20260904130600",
-  "description": "Operate the existing local agent coordinator and AgentBus from Codex and a unified localhost dashboard.",
-  "author": {
-    "name": "Local developer"
-  },
+  "version": "0.3.0",
+  "description": "Operate the existing local agent coordinator and AgentBus from Codex and a unified localhost switchboard dashboard: projects, live status, supervision, usage, tasks, and conversations.",
   "keywords": [
     "agents",
     "dashboard",
@@ -16,9 +13,8 @@
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Agent Bus Dashboard",
-    "shortDescription": "Projects, usage, live sessions, agent controls, and conversations.",
-    "longDescription": "Connects Codex to the existing Agent Coordinator and AgentBus services, and adds a dependency-free localhost dashboard for choosing a project, monitoring current-session usage, opening resumable agent sessions in Terminal, controlling attached supervisors, and managing complete conversation history with Inbox, Archive, and Trash.",
-    "developerName": "Local developer",
+    "shortDescription": "Projects, live status, supervision, usage, tasks, and conversations.",
+    "longDescription": "Connects Codex to the existing Agent Coordinator and AgentBus services, and adds a dependency-free localhost switchboard dashboard: a status bar with the live broker state, a project dock, per-agent harness, provider, model, status and usage, supervision controls, resumable Terminal sessions, read-only tasks, and complete conversation history with Inbox, Archived, and Trash.",
     "category": "Developer Tools",
     "capabilities": [
       "Read",
@@ -32,6 +28,6 @@
       "Show current AgentBus usage by subscription.",
       "Open the complete AgentBus conversation history."
     ],
-    "brandColor": "#D97757"
+    "brandColor": "#2A78D6"
   }
 }

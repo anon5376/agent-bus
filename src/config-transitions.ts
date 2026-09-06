@@ -33,6 +33,7 @@ export function executionConfigSnapshot(config: BusConfig, agentId: string): unk
       authority: resolved.authority,
       enabled: resolved.enabled,
       permissions: resolved.permissions,
+      resumeSessionId: resolved.resumeSessionId ?? null,
       harnessOptions: resolved.harnessOptions ?? null,
     },
     role: config.roles[resolved.role],
@@ -133,6 +134,9 @@ export function stageAgentUpdate(baseConfig: BusConfig, body: Record<string, unk
   if (body.harnessOptions && typeof body.harnessOptions === "object") Object.assign(harnessOptions, body.harnessOptions);
   if (body.reasoning !== undefined) harnessOptions.reasoning = String(body.reasoning);
   if (body.effort !== undefined) harnessOptions.effort = String(body.effort);
+  const resumeSessionId = body.resumeSessionId === undefined
+    ? existing?.resumeSessionId
+    : String(body.resumeSessionId ?? "").trim() || undefined;
 
   const agent: AgentDefinition = {
     id,
@@ -143,6 +147,7 @@ export function stageAgentUpdate(baseConfig: BusConfig, body: Record<string, unk
     enabled: body.enabled === undefined ? existing?.enabled ?? true : Boolean(body.enabled),
     autoStart: body.autoStart === undefined ? existing?.autoStart ?? false : Boolean(body.autoStart),
     permissions: normalizedPermissions(body.permissions, existing?.permissions),
+    resumeSessionId,
     harnessOptions,
   };
   config.agents[id] = agent;

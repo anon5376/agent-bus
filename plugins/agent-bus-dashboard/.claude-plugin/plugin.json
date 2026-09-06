@@ -1,8 +1,13 @@
 {
   "name": "agent-bus-dashboard",
-  "version": "0.1.0",
-  "description": "Operate the existing local Agent Coordinator and AgentBus from Claude Code and a unified localhost dashboard.",
-  "author": { "name": "Local developer" },
-  "keywords": ["agents", "dashboard", "mcp", "agent-bus", "local"],
+  "version": "0.3.0",
+  "description": "Operate the existing local Agent Coordinator and AgentBus from Claude Code and a unified localhost switchboard dashboard: projects, live status, supervision, usage, tasks, and conversations.",
+  "keywords": [
+    "agents",
+    "dashboard",
+    "mcp",
+    "agent-bus",
+    "local"
+  ],
   "skills": "./skills/"
 }

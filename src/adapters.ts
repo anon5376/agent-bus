@@ -7,6 +7,8 @@ export interface AdapterContext {
   agent: ResolvedAgent;
   prompt: string;
   sessionId: string | null;
+  /** Configured native chat binding. Dynamic sessions leave this null. */
+  pinnedSessionId: string | null;
   workdir: string;
   mcpServerPath: string;
   fakeHarnessPath: string;
@@ -153,6 +155,7 @@ function genericCommandResult(stdout: string, exitCode: number): NormalizedHarne
  *
  * Configure a harness with `adapter: "command"`, then set per-agent harnessOptions:
  *   args: ["run", "--model", "{model}", "--prompt", "{prompt}"]
+ *   resumeArgs: ["run", "--resume", "{session}", "--prompt", "{prompt}"]
  *   env: { SOME_PROFILE: "work" }
  *   autoReport: true
  *   timeoutMs: 3600000
@@ -168,7 +171,8 @@ const commandAdapter: HarnessAdapter = {
   id: "command",
   build(context) {
     const options = context.agent.harnessOptions ?? {};
-    const rawArgs = Array.isArray(options.args) ? options.args.map(String) : ["{prompt}"];
+    const configuredArgs = context.sessionId && Array.isArray(options.resumeArgs) ? options.resumeArgs : options.args;
+    const rawArgs = Array.isArray(configuredArgs) ? configuredArgs.map(String) : ["{prompt}"];
     const args = rawArgs
       .map((item) => commandTemplateValue(item, context))
       .filter((item, index) => item.length > 0 || rawArgs[index] === "");
@@ -265,15 +269,25 @@ const codexAdapter: HarnessAdapter = {
     if (reasoning) cfg.push("-c", `model_reasoning_effort="${reasoning}"`);
     const localProvider = String(context.agent.harnessOptions?.localProvider ?? "");
     if (localProvider) cfg.push("--oss", "--local-provider", localProvider);
-    const unsafe = context.agent.permissions.filesystem === "write" && context.agent.permissions.shell;
-    const access = unsafe
-      ? ["--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check"]
-      : ["--sandbox", "read-only", "--skip-git-repo-check"];
-    const args = context.sessionId
-      ? ["exec", "resume", ...cfg, ...access, "--last"]
-      : ["exec", ...cfg, ...access];
-    if (context.agent.modelDefinition.exactModel) args.push("-m", context.agent.modelDefinition.exactModel);
-    args.push(context.prompt);
+    // Current Codex builds cancel stdio MCP calls in every sandboxed mode.
+    // Bus permissions remain enforced by the broker; the CLI must run with full
+    // access for its MCP calls to reach that broker at all.
+    const fullAccess = ["--dangerously-bypass-approvals-and-sandbox"];
+    let args: string[];
+    if (context.pinnedSessionId) {
+      // Explicit bindings target the original Desktop/TUI thread. `queue` is
+      // the exact-thread API and lets that original chat visibly process mail.
+      args = ["queue", ...cfg, ...fullAccess];
+      if (context.agent.modelDefinition.exactModel) args.push("-m", context.agent.modelDefinition.exactModel);
+      args.push("--thread", context.pinnedSessionId, "--message", context.prompt);
+    } else {
+      args = context.sessionId
+        ? ["exec", "resume", ...cfg, ...fullAccess, "--skip-git-repo-check", "--json"]
+        : ["exec", ...cfg, ...fullAccess, "--skip-git-repo-check", "--json"];
+      if (context.agent.modelDefinition.exactModel) args.push("-m", context.agent.modelDefinition.exactModel);
+      if (context.sessionId) args.push(context.sessionId);
+      args.push(context.prompt);
+    }
     return {
       command: context.agent.harnessDefinition.command,
       args,
@@ -283,11 +297,33 @@ const codexAdapter: HarnessAdapter = {
     };
   },
   parse(stdout, exitCode) {
+    const rows = jsonLines(stdout);
+    let sessionId: string | null = null;
+    let inputTokens = 0;
+    let outputTokens = 0;
+    const text: string[] = [];
+    for (const row of rows) {
+      if (row.type === "thread.started" && typeof row.thread_id === "string") sessionId = row.thread_id;
+      const item = row.item && typeof row.item === "object" ? row.item as Record<string, unknown> : null;
+      if (item?.type === "agent_message" && typeof item.text === "string") text.push(item.text);
+      const usage = row.usage && typeof row.usage === "object" ? row.usage as Record<string, unknown> : null;
+      inputTokens = Math.max(inputTokens, asNumber(usage?.input_tokens ?? usage?.inputTokens));
+      outputTokens = Math.max(outputTokens, asNumber(usage?.output_tokens ?? usage?.outputTokens));
+    }
+    if (text.length) {
+      return {
+        text: text.join("\n"),
+        sessionId,
+        usage: { inputTokens, outputTokens, totalTokens: inputTokens + outputTokens, costUSD: 0 },
+        structured: { events: rows.length },
+        malformed: false,
+      };
+    }
     const result = defaultResult(stdout, exitCode);
     const clean = stripAnsi(stdout);
     const match = clean.match(/tokens used\s*\n\s*([\d,]+)/i);
     if (match) result.usage.totalTokens = Number(match[1].replace(/,/g, "")) || 0;
-    result.sessionId = exitCode === 0 ? "resume-last" : null;
+    result.sessionId = sessionId;
     return result;
   },
 };
@@ -296,14 +332,19 @@ const kimiAdapter: HarnessAdapter = {
   id: "kimi",
   build(context) {
     const env = commonEnvironment(context);
-    const args = context.sessionId ? ["-r", context.sessionId, "-p", context.prompt] : ["-p", context.prompt];
+    const args = context.sessionId ? ["--session", context.sessionId] : [];
+    args.push("--prompt", context.prompt, "--auto", "--output-format", "stream-json");
     if (context.agent.modelDefinition.exactModel) args.push("-m", context.agent.modelDefinition.exactModel);
     return { command: context.agent.harnessDefinition.command, args, environment: env, autoReport: false, timeoutMs: 60 * 60_000 };
   },
   parse(stdout, exitCode) {
     const result = defaultResult(stdout, exitCode);
-    const session = stdout.match(/kimi -r (session_[\w-]+)/);
+    const session = stdout.match(/kimi (?:-S|--session) (session_[\w-]+)/);
     if (session) result.sessionId = session[1];
+    for (const row of jsonLines(stdout)) {
+      const id = row.session_id ?? row.sessionId ?? row.sessionID;
+      if (typeof id === "string") result.sessionId = id;
+    }
     for (const match of stdout.matchAll(/"tokens":\{"total":(\d+)/g)) {
       result.usage.totalTokens = Math.max(result.usage.totalTokens, Number(match[1]) || 0);
     }
@@ -315,7 +356,8 @@ const geminiAdapter: HarnessAdapter = {
   id: "gemini",
   build(context) {
     const env = commonEnvironment(context);
-    const args = ["-p", context.prompt];
+    const args = ["-p", context.prompt, "--output-format", "json", "--approval-mode", "yolo"];
+    if (context.sessionId) args.push("--resume", context.sessionId);
     if (context.agent.modelDefinition.exactModel) args.push("-m", context.agent.modelDefinition.exactModel);
     return { command: context.agent.harnessDefinition.command, args, environment: env, autoReport: false, timeoutMs: 60 * 60_000 };
   },
@@ -422,7 +464,7 @@ const opencodeAdapter: HarnessAdapter = {
   },
   build(context) {
     const env = commonEnvironment(context);
-    const args = ["run", "--format", "json"];
+    const args = ["run", "--auto", "--format", "json"];
     if (context.agent.modelDefinition.exactModel) args.push("-m", context.agent.modelDefinition.exactModel);
     const variant = String(context.agent.harnessOptions?.variant ?? "");
     if (variant) args.push("--variant", variant);
@@ -458,8 +500,8 @@ const hermesAdapter: HarnessAdapter = {
   build(context) {
     const env = { ...commonEnvironment(context), HERMES_DISABLE_STREAMING: "1" };
     const profile = String(context.agent.harnessOptions?.profile ?? "default");
-    const args = ["--profile", profile, "chat", "-q", context.prompt];
-    if (context.sessionId) args.unshift("--resume", context.sessionId);
+    const args = ["--profile", profile, "chat", "-q", context.prompt, "-Q", "--yolo", "--pass-session-id"];
+    if (context.sessionId) args.push("--resume", context.sessionId);
     return { command: context.agent.harnessDefinition.command, args, environment: env, autoReport: false, timeoutMs: 60 * 60_000 };
   },
   parse(stdout, exitCode) {

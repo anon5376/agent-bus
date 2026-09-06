@@ -107,6 +107,8 @@ export interface AgentDefinition {
   enabled: boolean;
   autoStart: boolean;
   permissions: AgentPermissions;
+  /** Native harness chat/session to wake for every incoming bus message. */
+  resumeSessionId?: string;
   harnessOptions?: Record<string, unknown>;
 }
 
@@ -243,6 +245,22 @@ export function validateConfig(value: unknown): BusConfig {
     if (!config.roles[agent.role]) throw new Error(`agent ${id} references unknown role ${agent.role}`);
     if (agent.permissions.maxDelegationDepth < 0) {
       throw new Error(`agent ${id} maxDelegationDepth must be >= 0`);
+    }
+    if (agent.resumeSessionId !== undefined) {
+      if (typeof agent.resumeSessionId !== "string" || !agent.resumeSessionId.trim()) {
+        throw new Error(`agent ${id} resumeSessionId must be a non-empty string`);
+      }
+      const harness = config.harnesses[config.models[agent.model].harness];
+      if (!harness.features.resume) {
+        throw new Error(`agent ${id} pins session ${agent.resumeSessionId}, but harness ${harness.id} does not support resume`);
+      }
+      if (harness.adapter === "command") {
+        const options = agent.harnessOptions ?? {};
+        const rawArgs = Array.isArray(options.resumeArgs) ? options.resumeArgs : options.args;
+        if (!Array.isArray(rawArgs) || !rawArgs.some((item) => String(item).includes("{session}"))) {
+          throw new Error(`agent ${id} uses the command adapter with resumeSessionId, but harnessOptions.resumeArgs/args has no {session} placeholder`);
+        }
+      }
     }
   }
   if (config.constraints.maxDelegationDepth < 0) throw new Error("maxDelegationDepth must be >= 0");

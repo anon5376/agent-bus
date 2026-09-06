@@ -1,36 +1,44 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-07-29T00:00:00Z",
+  "generatedAt": "2026-09-05T00:00:00Z",
   "title": "Design System: Agent Bus Dashboard",
   "extensions": {
     "colorMeta": {
-      "canvas": {"role": "neutral", "displayName": "Work Canvas", "canonical": "#171717"},
-      "sidebar": {"role": "neutral", "displayName": "Anchor Black", "canonical": "#111111"},
-      "surface": {"role": "neutral", "displayName": "Control Surface", "canonical": "#1E1E1E"},
-      "accent": {"role": "primary", "displayName": "Warm Clay", "canonical": "#D97757"}
+      "bg": {"role": "neutral", "displayName": "Paper", "canonical": "#F3F1EA"},
+      "panel": {"role": "neutral", "displayName": "Panel", "canonical": "#FFFFFF"},
+      "ink": {"role": "neutral", "displayName": "Ink", "canonical": "#16150F"},
+      "accent": {"role": "primary", "displayName": "Signal Blue", "canonical": "#2A78D6"},
+      "evil-accent": {"role": "primary", "displayName": "Vermilion", "canonical": "#FF4D3D"}
     },
     "typographyMeta": {
-      "title": {"displayName": "Title", "purpose": "Page and project headings."},
-      "body": {"displayName": "Body", "purpose": "Controls, labels, and explanatory copy."},
-      "data": {"displayName": "Data", "purpose": "Identifiers, routes, timestamps, and messages."}
+      "display": {"displayName": "Display", "purpose": "Page and panel titles; serif, Cloister Black blackletter in Evil."},
+      "ui": {"displayName": "UI", "purpose": "Controls, labels, copy, stat values."},
+      "data": {"displayName": "Data", "purpose": "Identifiers, paths, timestamps, table numbers."}
     },
     "shadows": [
-      {"name": "feedback", "value": "0 8px 24px rgba(0,0,0,.28)", "purpose": "Transient flash feedback only."}
+      {"name": "panel", "value": "0 1px 2px rgba(22,21,15,.05), 0 10px 28px -16px rgba(22,21,15,.22)", "purpose": "Panels and stat tiles."},
+      {"name": "pop", "value": "0 12px 40px -12px rgba(22,21,15,.35)", "purpose": "The mobile dock drawer."}
     ],
     "motion": [
-      {"name": "state", "value": "180ms cubic-bezier(.2,.8,.2,1)", "purpose": "Control and selection state changes."}
+      {"name": "hover", "value": "120ms cubic-bezier(.2,.7,.2,1)", "purpose": "Hover feedback."},
+      {"name": "structural", "value": "360ms cubic-bezier(.6,0,.2,1)", "purpose": "Dock collapse and drawer."}
     ],
     "breakpoints": [
-      {"name": "mobile", "value": "760px"}
+      {"name": "roster-stack", "value": "1040px"},
+      {"name": "drawer", "value": "900px"},
+      {"name": "phone", "value": "640px"}
     ]
   },
   "components": [],
   "narrative": {
-    "northStar": "The Quiet Control Deck",
-    "overview": "A compact, near-black operating shell with persistent project context, restrained tonal layers, and warm clay reserved for meaningful state.",
-    "keyCharacteristics": ["Dense but calm hierarchy", "Persistent project context", "Warm accent used sparingly", "Monospace only for data"],
-    "rules": [{"name": "The Signal Rule", "body": "Accent color is reserved for selection, focus, and primary actions.", "section": "colors"}],
-    "dos": ["Keep project context visible on every detail screen", "Use real counts and timestamps from connected stores"],
-    "donts": ["Decorate inactive states with the accent", "Use gradients, glass, or terminal tropes as ornament"]
+    "northStar": "The Switchboard",
+    "overview": "A status bar, a project dock, and pages that say who is live, what they are doing, and what the operator can do next. Serif titles, sans instrument body, mono data, colour only for meaning.",
+    "keyCharacteristics": ["Broker state on every page", "Agent identity as provider marks, titled by role and model", "Status as dot plus label", "Layered panels with hairlines", "Three themes: Light, Dark, Evil"],
+    "rules": [
+      {"name": "The Signal Rule", "body": "The accent is reserved for selection, focus, links, and primary actions.", "section": "colors"},
+      {"name": "Never Colour Alone", "body": "Every status and harness colour ships with a text label.", "section": "colors"}
+    ],
+    "dos": ["Keep the broker pill and project context visible on every page", "Use real counts and timestamps from connected stores", "Show why a control is disabled"],
+    "donts": ["Use the accent on inactive states", "Use gradients, glass, or terminal tropes", "Reuse a status colour as a harness colour"]
   }
 }

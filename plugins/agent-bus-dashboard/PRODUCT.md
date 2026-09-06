@@ -24,7 +24,7 @@ The product runs locally during coding sessions. Codex and other agents communic
 
 ## Capabilities and Constraints
 
-- Choose every immediate project under `/Users/anon5376/Projects`, including nested marked repositories/apps.
+- Choose every immediate project under the configured projects roots (default `~/Projects`), including nested marked repositories/apps.
 - Keep Agent Coordinator and Liminal AgentBus available as explicit coordination sources.
 - Scope live agents and messages to a project by the AgentBus supervisor's exact workdir.
 - Include complete SQLite message history and the persisted AgentBus audit history for the AgentBus implementation project.
@@ -41,13 +41,13 @@ The product runs locally during coding sessions. Codex and other agents communic
 
 ## Brand Commitments
 
-The dashboard ships three themes: Light and Dark stay monochrome; EVIL uses parchment ink, crimson accent, and Cloister Black. Product behavior remains operator-first, keyboard-friendly, and local-only.
+The dashboard is a switchboard: a status bar with the live broker state, a project dock, and pages that say who is live, what they are doing, and what the operator can do next. It ships three themes: Light (paper), Dark (graphite), and Evil (void, bone ink, vermilion signal, and the painted evil cat). Agents are shown by role and readable model name with their provider's mark; raw ids stay one click away. Status is a dot with a label. Product behavior remains operator-first, keyboard-friendly, and local-only.
 
-## Evidence on Hand
+## First Run and Configuration
 
-- Coordinator MCP and dashboard source: `/Users/anon5376/prototype_0.2`.
-- AgentBus MCP and SQLite source: `/Users/anon5376/Desktop/liminal/comms`.
-- Both servers are already configured in the local Codex configuration.
+A new operator runs `scripts/run_dashboard.sh`, opens localhost, and chooses a projects folder in Local setup. Optional Coordinator and AgentBus sources attach through explicit paths. Configuration lives in `~/.agent-bus/dashboard.json`; command-line flags override environment variables, which override the file and portable defaults. Missing optional sources are not configured; an unavailable live broker is disconnected.
+
+The dashboard is a local Python standard-library application. Existing coordination services must be installed separately. No bundled credentials or machine-specific paths are required.
 
 ## Product Principles
 

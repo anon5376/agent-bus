@@ -2,19 +2,20 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
-import { getHarnessAdapter } from "../src/adapters.js";
-import { resolveAgent } from "../src/config.js";
+import { AdapterContext, getHarnessAdapter } from "../src/adapters.js";
+import { ResolvedAgent, resolveAgent } from "../src/config.js";
 import { mergeCatalogProvider } from "../src/discover.js";
-import { retryDelayMs, runHarnessProcess } from "../src/supervisor.js";
+import { resumedUnexpectedSession, retryDelayMs, runHarnessProcess } from "../src/supervisor.js";
 import { temporaryDirectory, testConfig } from "./helpers.js";
 
-function contextFor(agentId: string) {
+function contextFor(agentId: string): AdapterContext {
   const config = testConfig();
   const agent = resolveAgent(config, agentId);
   return {
     agent,
     prompt: "perform a deterministic test",
     sessionId: null,
+    pinnedSessionId: null,
     workdir: temporaryDirectory(),
     mcpServerPath: "/tmp/mcp-server.js",
     fakeHarnessPath: join(process.cwd(), "dist", "fake-harness.js"),
@@ -34,6 +35,7 @@ test("Claude adapter normalizes JSON envelope and usage", () => {
     agent,
     prompt: "test",
     sessionId: null,
+    pinnedSessionId: null,
     workdir: temporaryDirectory(),
     mcpServerPath: "/tmp/mcp.js",
     fakeHarnessPath: "/tmp/fake.js",
@@ -64,6 +66,7 @@ test("Codex adapter places options before positional prompt", () => {
     agent,
     prompt: "THE_PROMPT",
     sessionId: null,
+    pinnedSessionId: null,
     workdir: temporaryDirectory(),
     mcpServerPath: "/tmp/mcp.js",
     fakeHarnessPath: "/tmp/fake.js",
@@ -71,6 +74,38 @@ test("Codex adapter places options before positional prompt", () => {
   });
   assert.equal(invocation.args.at(-1), "THE_PROMPT");
   assert.ok(invocation.args.indexOf("-c") < invocation.args.indexOf("THE_PROMPT"));
+  assert.ok(invocation.args.includes("--dangerously-bypass-approvals-and-sandbox"));
+  assert.ok(invocation.args.includes("--json"));
+});
+
+test("Codex adapter resumes an exact managed session instead of latest", () => {
+  const context = contextFor("gpt");
+  context.sessionId = "019ff1f7-cfea-7240-a6fe-f1ab2cb2fe4a";
+  const invocation = getHarnessAdapter("codex").build(context);
+  assert.deepEqual(invocation.args.slice(0, 2), ["exec", "resume"]);
+  assert.ok(invocation.args.includes(context.sessionId));
+  assert.ok(!invocation.args.includes("--last"));
+});
+
+test("Codex adapter queues pinned mail into the exact original task", () => {
+  const context = contextFor("gpt");
+  context.sessionId = "019ff1f7-cfea-7240-a6fe-f1ab2cb2fe4a";
+  context.pinnedSessionId = context.sessionId;
+  const invocation = getHarnessAdapter("codex").build(context);
+  assert.equal(invocation.args[0], "queue");
+  assert.equal(invocation.args[invocation.args.indexOf("--thread") + 1], context.sessionId);
+  assert.equal(invocation.args[invocation.args.indexOf("--message") + 1], context.prompt);
+});
+
+test("Codex adapter captures the exact session from JSON events", () => {
+  const parsed = getHarnessAdapter("codex").parse([
+    JSON.stringify({ type: "thread.started", thread_id: "thread-exact" }),
+    JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "done" } }),
+    JSON.stringify({ type: "turn.completed", usage: { input_tokens: 11, output_tokens: 4 } }),
+  ].join("\n"), 0);
+  assert.equal(parsed.sessionId, "thread-exact");
+  assert.equal(parsed.text, "done");
+  assert.equal(parsed.usage.totalTokens, 15);
 });
 
 test("fake adapter runs a normalized successful process", async () => {
@@ -112,6 +147,7 @@ test("Cursor adapter uses print/json/force and writes MCP config", () => {
     agent,
     prompt: "test",
     sessionId: null,
+    pinnedSessionId: null,
     workdir,
     mcpServerPath: "/tmp/mcp.js",
     fakeHarnessPath: "/tmp/fake.js",
@@ -121,6 +157,7 @@ test("Cursor adapter uses print/json/force and writes MCP config", () => {
     agent,
     prompt: "test",
     sessionId: "chat-1",
+    pinnedSessionId: null,
     workdir,
     mcpServerPath: "/tmp/mcp.js",
     fakeHarnessPath: "/tmp/fake.js",
@@ -134,6 +171,73 @@ test("Cursor adapter uses print/json/force and writes MCP config", () => {
   assert.ok(invocation.args.includes("--resume"));
   const mcp = JSON.parse(readFileSync(join(workdir, ".cursor", "mcp.json"), "utf8"));
   assert.equal(mcp.mcpServers["qagent"].args[0], "/tmp/mcp.js");
+});
+
+function providerAgent(providerId: string, agentId: string): ResolvedAgent {
+  let config = mergeCatalogProvider(testConfig(), providerId, { enabled: true });
+  const model = Object.values(config.models).find((item) => item.provider === providerId);
+  assert.ok(model, `catalog model for ${providerId}`);
+  config.agents[agentId] = {
+    id: agentId,
+    model: model.id,
+    role: "implementation",
+    authority: "worker",
+    description: `${providerId} adapter test`,
+    enabled: true,
+    autoStart: false,
+    permissions: { canDelegate: false, canReview: false, filesystem: "write", shell: true, network: true, maxDelegationDepth: 0 },
+  };
+  return resolveAgent(config, agentId);
+}
+
+test("native adapters use each installed harness's exact resume syntax", () => {
+  const cases = [
+    { provider: "anthropic", adapter: "claude", flag: "--resume" },
+    { provider: "cursor", adapter: "cursor", flag: "--resume" },
+    { provider: "moonshot", adapter: "kimi", flag: "--session" },
+    { provider: "google", adapter: "gemini", flag: "--resume" },
+    { provider: "xai", adapter: "grok", flag: "-r" },
+    { provider: "opencode", adapter: "opencode", flag: "-s" },
+    { provider: "novita", adapter: "hermes", flag: "--resume" },
+    { provider: "zai", adapter: "opencode", flag: "-s" },
+  ];
+  for (const row of cases) {
+    const agent = providerAgent(row.provider, `${row.provider}-worker`);
+    const invocation = getHarnessAdapter(row.adapter).build({
+      agent,
+      prompt: "wake on bus mail",
+      sessionId: "exact-native-session",
+      pinnedSessionId: "exact-native-session",
+      workdir: temporaryDirectory(),
+      mcpServerPath: "/tmp/mcp.js",
+      fakeHarnessPath: "/tmp/fake.js",
+      busEnvironment: { AGENT_TOKEN: "token" },
+    });
+    assert.equal(invocation.args[invocation.args.indexOf(row.flag) + 1], "exact-native-session", `${row.adapter} resume flag`);
+  }
+});
+
+test("generic command adapter supports a separate resume command", () => {
+  const config = testConfig();
+  config.harnesses.fake.adapter = "command";
+  config.agents["fake-small"].harnessOptions = {
+    args: ["new", "{prompt}"],
+    resumeArgs: ["resume", "--chat", "{session}", "{prompt}"],
+  };
+  const agent = resolveAgent(config, "fake-small");
+  const invocation = getHarnessAdapter("command").build({
+    ...contextFor("fake-small"),
+    agent,
+    sessionId: "custom-session",
+    pinnedSessionId: "custom-session",
+  });
+  assert.deepEqual(invocation.args, ["resume", "--chat", "custom-session", "perform a deterministic test"]);
+});
+
+test("supervisor rejects a harness that silently forks a pinned session", () => {
+  assert.equal(resumedUnexpectedSession("expected", "forked"), true);
+  assert.equal(resumedUnexpectedSession("expected", "expected"), false);
+  assert.equal(resumedUnexpectedSession("expected", null), false);
 });
 
 test("supervisor retry backoff is bounded and exponential", () => {

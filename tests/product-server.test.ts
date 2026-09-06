@@ -62,9 +62,9 @@ test("SSE is session protected and emits real broker snapshots",async t=>{
 
 test("agent editor updates config and live catalog without broker restart",async t=>{
   const f=await fixture();t.after(()=>f.handle.close());const cookie=await login(f);
-  const response=await fetch(`${f.handle.url}/api/agents`,{method:"POST",headers:{cookie,origin:f.handle.url,"content-type":"application/json"},body:JSON.stringify({id:"fake-small",model:"fake-small",role:"cheap-worker",description:"edited live",enabled:true,autoStart:true,reasoning:"high",permissions:{filesystem:"read",shell:false,network:false,canReview:false,canDelegate:false,maxDelegationDepth:0,allowedPaths:["."]}})});
+  const response=await fetch(`${f.handle.url}/api/agents`,{method:"POST",headers:{cookie,origin:f.handle.url,"content-type":"application/json"},body:JSON.stringify({id:"fake-small",model:"fake-small",role:"cheap-worker",description:"edited live",enabled:true,autoStart:true,resumeSessionId:"original-chat",reasoning:"high",permissions:{filesystem:"read",shell:false,network:false,canReview:false,canDelegate:false,maxDelegationDepth:0,allowedPaths:["."]}})});
   const responseText=await response.text();assert.equal(response.status,200,responseText);
-  const catalog=await fetch(`${f.handle.url}/api/catalog`,{headers:{cookie}});const body=await catalog.json() as any;assert.equal(body.agents["fake-small"].description,"edited live");assert.equal(body.agents["fake-small"].autoStart,true);
+  const catalog=await fetch(`${f.handle.url}/api/catalog`,{headers:{cookie}});const body=await catalog.json() as any;assert.equal(body.agents["fake-small"].description,"edited live");assert.equal(body.agents["fake-small"].autoStart,true);assert.equal(body.agents["fake-small"].resumeSessionId,"original-chat");
   const disk=JSON.parse(readFileSync(f.configPath,"utf8"));assert.equal(disk.agents["fake-small"].description,"edited live");
 });
 
