@@ -1106,7 +1106,7 @@ class ProjectSource:
                     "harness": clean_text(item.get("harness")),
                     "model": clean_text(item.get("model")),
                     "role": clean_text(item.get("role")) or "worker",
-                    "effort": clean_text(item.get("effort") or item.get("reasoningEffort") or item.get("reasoning_effort")),
+                    "effort": registry_effort(item),
                     "description": clean_text(item.get("description")),
                 }
             )
@@ -1609,6 +1609,46 @@ def split_model_effort(model: Any) -> tuple[str, str]:
     return text, ""
 
 
+def registry_effort(item: dict[str, Any]) -> str:
+    """Effort as written in agents.json: `effort`, `reasoning` (Codex), or the same keys under harnessOptions."""
+    options = item.get("harnessOptions") if isinstance(item.get("harnessOptions"), dict) else {}
+    for source in (item, options):
+        for key in ("effort", "reasoning", "reasoningEffort", "reasoning_effort", "model_reasoning_effort"):
+            text = clean_text(source.get(key)).lower()
+            if text and text not in {"none", "off", "false", "default", "auto"}:
+                return text
+    return ""
+
+
+CODEX_DEFAULT_EFFORT: dict[str, tuple[float, str]] = {}
+
+
+def codex_default_effort() -> str:
+    """The Codex CLI's own default from ~/.codex/config.toml, used when neither roster nor registry names an effort."""
+    path = Path.home() / ".codex" / "config.toml"
+    try:
+        stamp = path.stat().st_mtime
+    except OSError:
+        return ""
+    cached = CODEX_DEFAULT_EFFORT.get(str(path))
+    if cached and cached[0] == stamp:
+        return cached[1]
+    value = ""
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if stripped.startswith("["):
+                break  # only the top-level table holds the global default
+            match = re.match(r'model_reasoning_effort\s*=\s*"([^"]+)"', stripped)
+            if match:
+                value = match.group(1).strip().lower()
+                break
+    except OSError:
+        value = ""
+    CODEX_DEFAULT_EFFORT[str(path)] = (stamp, value)
+    return value
+
+
 def agent_effort(agent: dict[str, Any]) -> str:
     for key in ("effort", "reasoningEffort", "reasoning_effort", "reasoning", "thinking", "thinkingLevel", "thinking_level"):
         value = agent.get(key)
@@ -1617,7 +1657,12 @@ def agent_effort(agent: dict[str, Any]) -> str:
         text = clean_text(value).lower()
         if text and text not in {"none", "off", "false", "default", "auto"}:
             return text
-    return split_model_effort(agent.get("model"))[1]
+    inline = split_model_effort(agent.get("model"))[1]
+    if inline:
+        return inline
+    if harness_key(agent.get("cli")) == "codex" or harness_key(agent.get("harness")) == "codex":
+        return codex_default_effort()
+    return ""
 
 
 def model_display(model: Any, effort: Any = "") -> str:
