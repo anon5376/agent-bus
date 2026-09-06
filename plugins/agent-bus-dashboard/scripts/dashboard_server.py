@@ -65,6 +65,9 @@ PROJECT_MARKERS = {
 }
 DASHBOARD_SELF_PORTS: set[int] = set()
 SELF_BROKER_ERROR = "Broker URL points at this dashboard, not at AgentBus. Fix it in Local setup (usually http://127.0.0.1:7717)."
+DASHBOARD_BROKER_ERROR = "Broker URL points at an Agent Bus Dashboard, not at AgentBus. Fix it in Local setup (usually http://127.0.0.1:7717)."
+NOT_BROKER_ERROR = "The broker URL answered, but not like an AgentBus broker. Check the port in Local setup."
+DASHBOARD_PROBE_HEADER = "X-Agent-Bus-Dashboard"
 LIVE_SNAPSHOT_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 LIVE_LAST_GOOD_SNAPSHOT: dict[str, dict[str, Any]] = {}
 AUDIT_MESSAGE_CACHE: dict[str, tuple[int, int, list[dict[str, Any]]]] = {}
@@ -732,14 +735,24 @@ class ProjectSource:
         request = urllib.request.Request(
             f"{self.bus_url.rstrip('/')}/snapshot",
             data=b"{}",
-            headers={"content-type": "application/json"},
+            headers={"content-type": "application/json", DASHBOARD_PROBE_HEADER: "probe"},
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=2) as response:
-                payload = json.load(response)
+            try:
+                with urllib.request.urlopen(request, timeout=2) as response:
+                    payload = json.load(response)
+            except urllib.error.HTTPError as error:
+                body = error.read(4096) if hasattr(error, "read") else b""
+                if b'"dashboard"' in body:
+                    raise ValueError(DASHBOARD_BROKER_ERROR) from None
+                raise
             if not isinstance(payload, dict):
-                raise ValueError("AgentBus returned an invalid snapshot")
+                raise ValueError(NOT_BROKER_ERROR)
+            if payload.get("dashboard"):
+                raise ValueError(DASHBOARD_BROKER_ERROR)
+            if not isinstance(payload.get("roster"), list):
+                raise ValueError(NOT_BROKER_ERROR)
             payload["_reachable"] = True
             payload["_observedAt"] = datetime.now(timezone.utc).isoformat()
             LIVE_LAST_GOOD_SNAPSHOT[self.bus_url] = dict(payload)
@@ -2427,8 +2440,8 @@ class Dashboard:
         broker_state = "Connected" if reachable else "Disconnected"
         if reachable:
             broker_hint = f"{settings.live_bus_url}. Agents belong to a project when their workdir matches its folder exactly."
-        elif snapshot.get("_error") == SELF_BROKER_ERROR:
-            broker_hint = f"{settings.live_bus_url} is this dashboard. {SELF_BROKER_ERROR}"
+        elif snapshot.get("_error") in {SELF_BROKER_ERROR, DASHBOARD_BROKER_ERROR, NOT_BROKER_ERROR}:
+            broker_hint = f"{settings.live_bus_url}: {snapshot.get('_error')}"
         else:
             broker_hint = f"{settings.live_bus_url} is not answering. Start your existing AgentBus broker, then reload."
         cards.append(
@@ -3187,9 +3200,22 @@ class Dashboard:
 class Handler(BaseHTTPRequestHandler):
     dashboard: Dashboard
 
+    def is_broker_probe(self, path: str) -> bool:
+        return bool(self.headers.get(DASHBOARD_PROBE_HEADER)) or path in {"/snapshot", "/state", "/health.json"}
+
+    def reject_probe(self) -> None:
+        """Answer a dashboard-to-dashboard probe with plain JSON so no page (and no further probe) is rendered."""
+        self.send_json(
+            {"dashboard": True, "error": "This is the Agent Bus Dashboard, not an AgentBus broker. Point the broker URL at AgentBus."},
+            HTTPStatus.NOT_FOUND,
+        )
+
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
+        if self.headers.get(DASHBOARD_PROBE_HEADER):
+            self.reject_probe()
+            return
         try:
             if path == "/":
                 self.send_html(self.dashboard.home(urllib.parse.parse_qs(parsed.query)))
@@ -3252,6 +3278,9 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path.rstrip("/")
         parts = [part for part in path.split("/") if part]
+        if self.is_broker_probe(path):
+            self.reject_probe()
+            return
         if path == "/setup":
             try:
                 length = int(self.headers.get("Content-Length", "0"))
@@ -3658,6 +3687,34 @@ def check_role_assignment() -> list[str]:
             status = response.status
             connection.close()
             return status, location, payload
+
+        loop_started = monotonic()
+        probe_status, _probe_location, probe_body = request("POST", "/snapshot", body="{}")
+        if probe_status != 404 or '"dashboard": true' not in probe_body or "<html" in probe_body.lower():
+            failures.append("dashboard rendered a page for a broker-style POST /snapshot")
+        looped = ProjectSource(
+            key="loop",
+            name="Loop",
+            short_name="Loop",
+            description="",
+            path_label="",
+            kind="workspace",
+            workspace_path=workspace,
+            bus_url=f"http://{host}:{port}",
+            operator_token=tmp / "operator.token",
+            audit_log=tmp / "bus.jsonl",
+            agent_bus_root=root,
+        )
+        looped_snapshot = looped._live_snapshot()
+        if looped_snapshot.get("_reachable") is not False or looped_snapshot.get("_error") not in {SELF_BROKER_ERROR, DASHBOARD_BROKER_ERROR}:
+            failures.append(f"broker URL aimed at the dashboard was not refused: {looped_snapshot.get('_error')!r}")
+        try:
+            validate_bus_url(f"http://127.0.0.1:{port}")
+            failures.append("validate_bus_url accepted the dashboard's own port")
+        except ValueError:
+            pass
+        if monotonic() - loop_started > 5:
+            failures.append("loopback broker guard took longer than five seconds")
 
         status, _location, page = request("GET", agents_path)
         if status != 200 or "Registered AgentBus agents" not in page:
