@@ -556,7 +556,6 @@ h3 { font-size: 14px; font-weight: 600; }
 [data-theme="evil"] h2 { font-size: 26px; font-weight: 400; letter-spacing: 0; }
 [data-theme="evil"] .brand-name { font-size: 24px; letter-spacing: 0; }
 [data-theme="evil"] .bay-head h2, [data-theme="evil"] details.bay > summary h2 { font-size: 22px; }
-[data-theme="evil"] .session-assign > summary h2 { font-size: 23px; }
 [data-theme="evil"] .detail-head h2 { font-size: 28px; }
 [data-theme="evil"] .composer > summary h2 { font-size: 21px; }
 [data-theme="evil"] .mascot figcaption strong { font-size: 24px; font-weight: 400; }
@@ -1333,38 +1332,6 @@ details.bay[open] > summary .chev { transform: rotate(90deg); }
 .agent-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .agent-actions-none { color: var(--ink-4); font-size: 12px; }
 .capabilities { display: flex; flex-wrap: wrap; gap: 4px; }
-.session-assign {
-  margin-bottom: 20px;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-l);
-  box-shadow: var(--shadow);
-}
-.session-assign > summary {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 16px 20px;
-  cursor: pointer;
-  list-style: none;
-}
-.session-assign > summary::-webkit-details-marker { display: none; }
-.session-assign > summary h2 { font-size: 18px; }
-.session-assign > summary .chev { color: var(--ink-4); transition: transform 200ms var(--ease); }
-.session-assign[open] > summary .chev { transform: rotate(90deg); }
-.session-assign-body { padding: 0 20px 20px; border-top: 1px solid var(--line); }
-.session-assign-body > p { margin: 16px 0; color: var(--ink-2); font-size: 13px; }
-.session-assign-form { margin: 0; }
-.session-assign-fields {
-  display: grid;
-  grid-template-columns: minmax(220px, 1.5fr) minmax(160px, 1fr) minmax(160px, 1fr) auto;
-  gap: 10px;
-  align-items: end;
-}
-.session-assign-fields label { display: grid; gap: 6px; color: var(--ink-2); font-size: 12px; font-weight: 600; }
-.session-assign-body > p strong { color: var(--ink); font-weight: 600; }
-
 /* ---------- tasks ---------- */
 
 .task-list { display: grid; }
@@ -1609,7 +1576,6 @@ details.bay[open] > summary .chev { transform: rotate(90deg); }
   .content { padding: 28px 24px 64px; }
   .grid-2 { grid-template-columns: 1fr; }
   .supervision-grid { grid-template-columns: 1fr; }
-  .session-assign-fields { grid-template-columns: 1fr 1fr; }
   .workspace { grid-template-columns: minmax(280px, 340px) minmax(0, 1fr); }
   .agent-row {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1675,7 +1641,6 @@ details.bay[open] > summary .chev { transform: rotate(90deg); }
   .usage-tiles > div:last-child { border-bottom: 0; }
   .agent-row, .agent-row.no-usage { grid-template-columns: 1fr; grid-template-areas: none; }
   .agent-row > * { grid-area: auto; }
-  .session-assign-fields { grid-template-columns: 1fr; }
   .compose-form { grid-template-columns: 1fr; }
   .form-actions { flex-direction: column; align-items: stretch; }
   .form-actions .btn { width: 100%; }

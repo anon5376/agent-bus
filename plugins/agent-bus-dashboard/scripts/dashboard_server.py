@@ -2796,7 +2796,6 @@ class Dashboard:
         except (OSError, sqlite3.Error, ValueError) as error:
             return self.error_page(project, str(error), "agents")
         flash = self.flash(query)
-        session_agents = self.session_assignment_rows(project, agents)
         live_agents = [agent for agent in agents if agent.get("listed") not in {"registered", "session"}]
         registered_agents = [agent for agent in agents if agent.get("listed") == "registered"]
         include_usage = project.kind == "workspace"
@@ -2814,29 +2813,6 @@ class Dashboard:
         if registered_agents:
             registered_table = self.render_agent_rows(project, registered_agents, include_usage=False)
             registered_section = f'<section class="panel" aria-label="Registered AgentBus agents"><div class="panel-head"><div><h2>Registered AgentBus agents</h2><p>Identities in agents.json that are not attached to this folder right now.</p></div><span class="panel-meta">{len(registered_agents)} identities</span></div>{registered_table}</section>'
-        session_section = ""
-        if session_agents:
-            session_table = self.render_agent_rows(project, session_agents, include_usage=False)
-            session_section = f'<section class="panel" aria-label="Session assignments"><div class="panel-head"><div><h2>Assigned by session</h2><p>Roles saved against a Claude or Codex session id that is not bound to a listed agent.</p></div><span class="panel-meta">{len(session_agents)} session ids</span></div>{session_table}</section>'
-        bindable = [agent for agent in agents if agent.get("id")]
-        bind_options = "".join(
-            f'<option value="{esc(item.get("id"))}">{esc(agent_title(item))} · {esc(agent_model_line(item))}</option>' for item in bindable
-        )
-        session_form = f"""
-          <details class="session-assign" aria-labelledby="session-assign-title">
-            <summary><h2 id="session-assign-title">Assign a role by session ID</h2><span class="chev" aria-hidden="true">›</span></summary>
-            <div class="session-assign-body"><p>A Claude or Codex session has its own id, separate from the agent id the broker uses. Paste that session id here to give it a role. Leave <strong>Agent</strong> at “None” and the role is a label for you only; the broker never reads it. Pick an agent and the session is linked to that agent, the role is written to its registry entry, and it applies on the agent’s next turn. Only agents already known to this project can be chosen, because the role has to land on a real identity; this form does not create agents.</p>
-            <form class="session-assign-form" method="post" action="/project/{esc(project.key)}/agents/set-role">
-              <input type="hidden" name="csrf" value="{esc(self.csrf_token)}">
-              <div class="session-assign-fields">
-                <label for="session-id-input">Session ID<input id="session-id-input" name="session_id" value="" maxlength="{MAX_SESSION_LENGTH}" autocomplete="off" required placeholder="Paste a Claude or Codex session ID"></label>
-                <label for="session-agent-input">Agent<select id="session-agent-input" name="agent_id"><option value="">None · label this session only</option>{bind_options}</select></label>
-                <label for="session-role-input">Role<input id="session-role-input" name="role" list="role-presets" maxlength="{MAX_ROLE_LENGTH}" autocomplete="off" required placeholder="Independent QA"></label>
-                <button class="btn btn-primary" type="submit">Save</button>
-              </div>
-            </form></div>
-          </details>
-        """
         controls = ""
         usage_monitor = ""
         if project.kind == "workspace":
@@ -2862,8 +2838,6 @@ class Dashboard:
             <p class="register-empty" data-filter-empty hidden>No agents match that filter.</p>
           </section>
           {registered_section}
-          {session_section}
-          {session_form}
           {self.render_tasks_panel(project, tasks, index=self.agent_index(agents))}
         """
         return self.shell(f"{project.name} agents", body, project.key, "agents")
@@ -3763,8 +3737,6 @@ def check_role_assignment() -> list[str]:
         if reset_page_status != 200 or 'value="manager"' not in reset_page:
             failures.append("rendered rows do not show the restored default role")
 
-        if 'id="session-id-input"' not in reset_page:
-            failures.append("agents page missing session-id assignment form")
 
         bad_session_status, bad_session_location, _bad_session = request(
             "POST",
@@ -3919,8 +3891,6 @@ def run_check(dashboard: Dashboard) -> int:
             failures.append(f"{project.key}: agents page did not render")
         if 'id="role-presets"' not in agents_page:
             failures.append(f"{project.key}: agents page missing role presets")
-        if 'id="session-id-input"' not in agents_page:
-            failures.append(f"{project.key}: agents page missing session-id assignment")
         if project.kind != "agent-bus" and 'id="tasks"' not in agents_page:
             failures.append(f"{project.key}: agents page missing tasks panel")
         if "data-usage-monitor" not in agents_page and project.kind == "workspace":
