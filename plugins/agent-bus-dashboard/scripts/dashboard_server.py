@@ -63,6 +63,8 @@ PROJECT_MARKERS = {
     "project.godot",
     "pyproject.toml",
 }
+DASHBOARD_SELF_PORTS: set[int] = set()
+SELF_BROKER_ERROR = "Broker URL points at this dashboard, not at AgentBus. Fix it in Local setup (usually http://127.0.0.1:7717)."
 LIVE_SNAPSHOT_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 LIVE_LAST_GOOD_SNAPSHOT: dict[str, dict[str, Any]] = {}
 AUDIT_MESSAGE_CACHE: dict[str, tuple[int, int, list[dict[str, Any]]]] = {}
@@ -723,6 +725,10 @@ class ProjectSource:
         cached = LIVE_SNAPSHOT_CACHE.get(self.bus_url)
         if cached is not None and now - cached[0] < LIVE_SNAPSHOT_TTL_SECONDS:
             return cached[1]
+        if bus_url_is_self(self.bus_url):
+            payload: dict[str, Any] = {"roster": [], "messages": [], "_reachable": False, "_error": SELF_BROKER_ERROR}
+            LIVE_SNAPSHOT_CACHE[self.bus_url] = (now, payload)
+            return payload
         request = urllib.request.Request(
             f"{self.bus_url.rstrip('/')}/snapshot",
             data=b"{}",
@@ -2419,11 +2425,12 @@ class Dashboard:
         snapshot = probe._live_snapshot()
         reachable = snapshot.get("_reachable", True) is not False
         broker_state = "Connected" if reachable else "Disconnected"
-        broker_hint = (
-            f"{settings.live_bus_url}. Agents belong to a project when their workdir matches its folder exactly."
-            if reachable
-            else f"{settings.live_bus_url} is not answering. Start your existing AgentBus broker, then reload."
-        )
+        if reachable:
+            broker_hint = f"{settings.live_bus_url}. Agents belong to a project when their workdir matches its folder exactly."
+        elif snapshot.get("_error") == SELF_BROKER_ERROR:
+            broker_hint = f"{settings.live_bus_url} is this dashboard. {SELF_BROKER_ERROR}"
+        else:
+            broker_hint = f"{settings.live_bus_url} is not answering. Start your existing AgentBus broker, then reload."
         cards.append(
             f'<div class="conn-card"><strong>Live broker</strong>{self.status_pill_named(broker_state, "working" if reachable else "failed")}'
             f"<p>{esc(broker_hint)}</p></div>"
@@ -3633,6 +3640,7 @@ def check_role_assignment() -> list[str]:
         isolated = Dashboard([project], ConversationStateStore(state_path))
         Handler.dashboard = isolated
         server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        DASHBOARD_SELF_PORTS.add(int(server.server_address[1]))
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         host, port = server.server_address
@@ -3996,6 +4004,15 @@ def parse_settings(argv: list[str] | None = None) -> argparse.Namespace:
     return args
 
 
+def bus_url_is_self(value: str) -> bool:
+    """True when a broker URL would loop back into this dashboard process."""
+    try:
+        port = urllib.parse.urlparse(value).port or 80
+    except ValueError:
+        return False
+    return port in DASHBOARD_SELF_PORTS
+
+
 def validate_bus_url(value: str) -> None:
     try:
         parsed = urllib.parse.urlparse(value)
@@ -4004,6 +4021,8 @@ def validate_bus_url(value: str) -> None:
         parsed.port
     except (TypeError, ValueError):
         raise ValueError("Broker URL must be a loopback HTTP address, such as http://127.0.0.1:7717.") from None
+    if bus_url_is_self(value):
+        raise ValueError(SELF_BROKER_ERROR)
 
 
 def save_setup(settings: argparse.Namespace, form: dict[str, str]) -> argparse.Namespace:
@@ -4120,6 +4139,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"warning: binding to {args.host} may expose agent messages to the network", file=sys.stderr)
     Handler.dashboard = dashboard
     server = ThreadingHTTPServer((args.host, args.port), Handler)
+    DASHBOARD_SELF_PORTS.add(int(server.server_address[1]))
+    if bus_url_is_self(args.live_bus_url):
+        print(f"warning: {SELF_BROKER_ERROR}", file=sys.stderr, flush=True)
     print(f"Agent Bus Dashboard: http://{args.host}:{args.port}/", flush=True)
     try:
         server.serve_forever()
