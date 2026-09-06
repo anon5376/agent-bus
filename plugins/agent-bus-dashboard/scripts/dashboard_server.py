@@ -2774,16 +2774,18 @@ class Dashboard:
             session_table = self.render_agent_rows(project, session_agents, include_usage=False)
             session_section = f'<section class="panel" aria-label="Session assignments"><div class="panel-head"><div><h2>Assigned by session</h2><p>Roles saved against a Claude or Codex session id that is not bound to a listed agent.</p></div><span class="panel-meta">{len(session_agents)} session ids</span></div>{session_table}</section>'
         bindable = [agent for agent in agents if agent.get("id")]
-        bind_options = "".join(f'<option value="{esc(item.get("id"))}">{esc(item.get("id"))}</option>' for item in bindable)
+        bind_options = "".join(
+            f'<option value="{esc(item.get("id"))}">{esc(agent_title(item))} · {esc(agent_model_line(item))}</option>' for item in bindable
+        )
         session_form = f"""
           <details class="session-assign" aria-labelledby="session-assign-title">
             <summary><h2 id="session-assign-title">Assign a role by session ID</h2><span class="chev" aria-hidden="true">›</span></summary>
-            <div class="session-assign-body"><p>Paste a Claude or Codex session id, optionally bind it to an agent in this project, then save the role. Bound roles apply on the agent’s next turn; unbound ones are operator metadata.</p>
+            <div class="session-assign-body"><p>A Claude or Codex session has its own id, separate from the agent id the broker uses. Paste that session id here to give it a role. Leave <strong>Agent</strong> at “None” and the role is a label for you only; the broker never reads it. Pick an agent and the session is linked to that agent, the role is written to its registry entry, and it applies on the agent’s next turn. Only agents already known to this project can be chosen, because the role has to land on a real identity; this form does not create agents.</p>
             <form class="session-assign-form" method="post" action="/project/{esc(project.key)}/agents/set-role">
               <input type="hidden" name="csrf" value="{esc(self.csrf_token)}">
               <div class="session-assign-fields">
                 <label for="session-id-input">Session ID<input id="session-id-input" name="session_id" value="" maxlength="{MAX_SESSION_LENGTH}" autocomplete="off" required placeholder="Paste a Claude or Codex session ID"></label>
-                <label for="session-agent-input">Agent<select id="session-agent-input" name="agent_id"><option value="">None · session only</option>{bind_options}</select></label>
+                <label for="session-agent-input">Agent<select id="session-agent-input" name="agent_id"><option value="">None · label this session only</option>{bind_options}</select></label>
                 <label for="session-role-input">Role<input id="session-role-input" name="role" list="role-presets" maxlength="{MAX_ROLE_LENGTH}" autocomplete="off" required placeholder="Independent QA"></label>
                 <button class="btn btn-primary" type="submit">Save</button>
               </div>

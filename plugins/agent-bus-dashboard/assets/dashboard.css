@@ -1363,6 +1363,7 @@ details.bay[open] > summary .chev { transform: rotate(90deg); }
   align-items: end;
 }
 .session-assign-fields label { display: grid; gap: 6px; color: var(--ink-2); font-size: 12px; font-weight: 600; }
+.session-assign-body > p strong { color: var(--ink); font-weight: 600; }
 
 /* ---------- tasks ---------- */
 
